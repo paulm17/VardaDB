@@ -1,0 +1,2 @@
+# VardaDB
+Rust GraphQL Database
