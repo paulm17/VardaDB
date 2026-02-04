@@ -1,18 +1,37 @@
 use tokio::sync::broadcast;
 
 
-#[derive(Clone, Debug, PartialEq)]
+use serde::{Serialize, Deserialize};
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum MutationType {
     Create,
     Update,
     Delete,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum MutationSource {
+    Local,
+    Remote,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SchemaMetadata {
+    pub uniques: Vec<String>,
+    pub inverses: Vec<crate::engine::resolver::InverseInfo>,
+    pub search_fields: std::collections::HashMap<String, Vec<String>>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MutationEvent {
     pub type_name: String,
     pub uid: u64,
     pub mutation_type: MutationType,
+    pub source: MutationSource,
+    pub payload: Option<std::collections::HashMap<String, serde_json::Value>>,
+    pub metadata: Option<SchemaMetadata>,
+    pub timestamp: Option<crate::storage::timestamp::Timestamp>,
 }
 
 #[derive(Clone)]

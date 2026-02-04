@@ -153,12 +153,105 @@ VardaDB supports realtime capability groundwork through its event bus system (`s
 *   Currently, likely used for **Live Query** codegen or internal event subscriptions.
 *   Future roadmap includes full WebSocket-based GraphQL Subscriptions.
 
+### 7. Conflict Resolution (Last-Write-Wins)
+VardaDB implements a robust **Last-Write-Wins (LWW)** consistency model, inspired by **Evolu**, to handle distributed data synchronization and conflicts.
+*   **Timestamp-Based**: Every storage operation (Put/Delete) is associated with a timestamp.
+*   **Idempotency**: "Stale" writes (writes with an older timestamp than what is currently stored) are safely ignored without error.
+*   **Convergence**: This ensures that all replicas eventually converge to the same state, provided they receive the same set of updates, regardless of order.
+
+---
+
+## 🔄 Replication Testing & Sync
+VardaDB supports peer-to-peer replication via **Zenoh**. To test this, you run two instances of VardaDB (e.g., in separate directories or on different machines).
+
+### Setup
+
+**Instance A (Primary - Port 8000)**
+Configuration (`config.toml`):
+
+```toml
+[server]
+port = 8000
+storage_path = "./varda_db_data"
+
+[zenoh]
+# Mode: "peer" (default)
+mode = "peer"
+connect = [] 
+listen = ["tcp/0.0.0.0:7447"]
+prefix = "varda/ops"
+```
+
+**Start Instance A**:
+```bash
+cargo run -- start
+```
+**Apply Schema (on Instance A)**:
+```bash
+curl -X POST localhost:8000/admin/schema --data-binary '@tutorial/schema.graphql'
+```
+
+---
+
+**Instance B (Replica - Port 9000)**
+Configuration (`config.toml`):
+
+```toml
+[server]
+port = 9000
+storage_path = "./varda_db_data"
+
+[zenoh]
+# Mode: "peer"
+mode = "peer"
+# Connect to Instance A's Zenoh port
+connect = ["tcp/127.0.0.1:7447"]
+# Bind to a different port if running on the same machine
+listen = ["tcp/0.0.0.0:7448"]
+prefix = "varda/ops"
+```
+
+**Start Instance B**:
+```bash
+cargo run -- start
+```
+
+> **Note**: On startup, Instance B will automatically request the schema from Instance A if it detects it is running a default empty schema.
+
+### Verification Steps
+
+1.  **Mutation on Instance A (8000)**:
+    Open `http://localhost:8000/playground` and run:
+    ```graphql
+    mutation {
+      createTodo(input: { title: "Sync Test", completed: false }) {
+        uid
+      }
+    }
+    ```
+
+2.  **Verify on Instance B (9000)**:
+    Open `http://localhost:9000/playground` and run:
+    ```graphql
+    query {
+      queryTodo {
+        title
+        completed
+      }
+    }
+    ```
+    *Result*: You should see "Sync Test".
+
+3.  **Realtime Check**:
+    If you have a subscription running on Instance B, you should see the `Todo` creation event appear in real-time.
+
 ---
 
 ## 📁 Project Structure
 
 *   `src/engine`: Core GraphQL logic (Schema, Scalars, Planner).
-*   `src/storage`: Backend storage interfaces.
-*   `src/bridge`: Connectors (FjallResolver).
+*   `src/storage`: Backend storage interfaces (Fjall, LWW Logic).
+*   `src/bridge`: Connectors (FjallResolver) and LWW application.
+*   `src/sync`: Zenoh-based replication and schema synchronization.
 *   `examples`: Demo code (`embedded_demo.rs`).
 *   `tests`: Integration tests (`scalar_test.rs`).

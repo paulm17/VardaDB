@@ -1,6 +1,8 @@
 use async_graphql::Value;
 
-#[derive(Debug, Clone)]
+use serde::{Serialize, Deserialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InverseInfo {
     pub field: String,
     pub inverse_type: String,

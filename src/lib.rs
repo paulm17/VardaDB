@@ -5,6 +5,7 @@ pub mod realtime;
 pub mod bridge;
 pub mod caching;
 pub mod sync;
+pub mod config;
 
 
 pub struct DummyResolver;
@@ -47,6 +48,7 @@ use tokio::net::TcpListener;
 use tower_http::cors::{CorsLayer, Any};
 use crate::storage::backend::Storage;
 use crate::bridge::fjall_resolver::FjallResolver;
+use crate::realtime::bus::EventBus;
 
 use tokio::sync::RwLock;
 
@@ -55,18 +57,23 @@ struct ServerState {
     schema: Arc<RwLock<Arc<crate::engine::schema::Schema>>>,
     storage: Arc<Storage>,
     cache: Arc<crate::engine::cache::QueryCache>,
+    event_bus: EventBus,
 }
 
-pub async fn run(port: u16) {
+pub async fn run(config: crate::config::VardaConfig) {
+    let port = config.server.port;
     println!("VardaDB Engine v0.1.0 starting on port {}...", port);
 
     // 1. Initialize Storage
-    let storage_path = "varda_db_data".to_string(); 
-    let storage = Arc::new(Storage::new(&storage_path).expect("Failed to open storage"));
+    let storage_path = config.server.storage_path.clone(); 
+    let storage = Arc::new(Storage::new(&storage_path, config.server.node_id).expect("Failed to open storage"));
     println!("Storage initialized at ./{}", storage_path);
 
-    // 2. Load Schema (from disk or default)
-    let schema_file_path = format!("{}/current_schema.graphql", storage_path);
+    // 2. Load Schema (from config path or default)
+    // If config has schema_path, use it. Else default to storage/current_schema.graphql
+    let schema_file_path = config.server.schema_path.clone()
+        .unwrap_or_else(|| format!("{}/current_schema.graphql", storage_path));
+    
     let loaded_sdl = std::fs::read_to_string(&schema_file_path).ok();
     
     let (sdl, _is_default) = match loaded_sdl {
@@ -75,26 +82,49 @@ pub async fn run(port: u16) {
             (s, false)
         },
         None => {
-             println!("No persisted schema found. Using default.");
+             println!("No persisted schema found at {}. Using default.", schema_file_path);
              ("type Health { status: String }".to_string(), true)
         }
     };
 
-    let resolver = FjallResolver::new(storage.clone());
-    let initial_schema = crate::engine::schema::Schema::load_with_resolver(&sdl, resolver)
+    // Create a shared EventBus that will be used by all resolvers
+    let shared_event_bus = EventBus::new();
+
+    let resolver = FjallResolver::with_bus(storage.clone(), shared_event_bus.clone());
+
+    let initial_schema = crate::engine::schema::Schema::load_with_resolver(&sdl, resolver.clone())
         .or_else(|e| {
             println!("Failed to load persisted schema: {}. Falling back to default.", e);
              let default_sdl = "type Health { status: String }";
-             let blank_resolver = FjallResolver::new(storage.clone()); 
+             let blank_resolver = FjallResolver::with_bus(storage.clone(), shared_event_bus.clone()); 
              crate::engine::schema::Schema::load_with_resolver(default_sdl, blank_resolver)
         })
         .expect("Failed to build schema");
-    
+
     let state = ServerState {
         schema: Arc::new(RwLock::new(Arc::new(initial_schema))),
         storage: storage.clone(),
         cache: Arc::new(crate::engine::cache::QueryCache::new(100)), // Bounded LRU: 100 entries
+        event_bus: shared_event_bus,
     };
+
+    // Start Anti-Gravity (Zenoh) Sync
+    let sync_resolver = Arc::new(resolver.clone());
+    let zenoh_config = config.zenoh.clone();
+    let sync_schema = state.schema.clone();
+    let sync_cache = state.cache.clone();
+    
+    tokio::spawn(async move {
+         println!("Initializing Zenoh Sync...");
+         match crate::sync::manager::SyncManager::new(sync_resolver, zenoh_config, sync_schema, sync_cache).await {
+             Ok(manager) => {
+                 if let Err(e) = manager.start().await {
+                     eprintln!("SyncManager Error: {}", e);
+                 }
+             },
+             Err(e) => eprintln!("Failed to initialize SyncManager: {}", e),
+         }
+    });
 
     // 3. Setup Routes
     let app = Router::new()
@@ -164,7 +194,8 @@ async fn admin_schema_handler(
     body: String,
 ) -> impl IntoResponse {
     println!("Received new schema update...");
-    let resolver = FjallResolver::new(state.storage.clone());
+    // CRITICAL: Use shared EventBus to ensure SyncManager and subscriptions use the same bus
+    let resolver = FjallResolver::with_bus(state.storage.clone(), state.event_bus.clone());
     
     match crate::engine::schema::Schema::load_with_resolver(&body, resolver) {
         Ok(new_schema) => {

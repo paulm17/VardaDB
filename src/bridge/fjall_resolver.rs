@@ -4,6 +4,7 @@ use crate::storage::codec::Codec;
 use async_graphql::Value;
 use std::sync::Arc;
 use byteorder::{BigEndian, ByteOrder};
+use crate::storage::timestamp::Timestamp;
 
 use crate::realtime::bus::{EventBus, MutationEvent, MutationType};
 
@@ -18,7 +19,208 @@ impl FjallResolver {
         Self { storage, bus: EventBus::new() }
     }
 
-    fn link_inverse(&self, target_uid: u64, inverse_field: &str, is_list: bool, self_uid: u64) -> Result<(), String> {
+    /// Create a FjallResolver with a shared EventBus.
+    /// Use this to ensure all resolver instances publish to the same bus.
+    pub fn with_bus(storage: Arc<Storage>, bus: EventBus) -> Self {
+        Self { storage, bus }
+    }
+
+    pub fn compute_fingerprint(&self) -> anyhow::Result<crate::sync::reconciliation::RangeFingerprint> {
+        // Full range fingerprint
+        let start = crate::storage::timestamp::Timestamp::new(0, 0, 0);
+        let end = crate::storage::timestamp::Timestamp::new(u64::MAX, u16::MAX, u64::MAX);
+        crate::sync::reconciliation::compute_fingerprint(&self.storage, &start, &end)
+    }
+
+    pub fn compute_fingerprint_range(&self, start: &Timestamp, end: &Timestamp) -> anyhow::Result<crate::sync::reconciliation::RangeFingerprint> {
+        crate::sync::reconciliation::compute_fingerprint(&self.storage, start, end)
+    }
+
+    pub fn get_history_range(&self, start: &Timestamp, end: &Timestamp) -> anyhow::Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        self.storage.get_history_range(Some(start), Some(end))
+    }
+
+    pub fn apply_batch(&self, items: Vec<(Vec<u8>, Vec<u8>)>) -> anyhow::Result<()> {
+        let mut deleted_uids = std::collections::HashSet::new();
+        // Pre-scan for deletions
+        for (k, v) in &items {
+            if v.is_empty() {
+                if let Ok((_, uid, pred)) = Codec::decode_history_key(k) {
+                    if pred == "_type" {
+                        deleted_uids.insert(uid);
+                    }
+                }
+            }
+        }
+
+        println!("Sync: apply_batch called with {} items", items.len());
+        
+        // Partition items: _type first
+        let (type_items, other_items): (Vec<_>, Vec<_>) = items.into_iter().partition(|(k, _)| {
+             if let Ok((_, _, pred)) = crate::storage::codec::Codec::decode_history_key(k) {
+                 pred == "_type"
+             } else {
+                 false
+             }
+        });
+
+        println!("Sync: Partitioned batch: {} type items, {} other items", type_items.len(), other_items.len());
+
+        // Initialize Event Buffer
+        // Map: UID -> (Type, MutationType, Payload, MinTimestamp)
+        // We use MinTimestamp because events are usually batched from the same "transaction" or we want the earliest causal time? 
+        // Actually, for LWW, if we have multiple updates, we want the LATEST timestamp.
+        let mut pending_emissions: std::collections::HashMap<u64, (String, crate::realtime::bus::MutationType, std::collections::HashMap<String, serde_json::Value>, crate::storage::timestamp::Timestamp)> = std::collections::HashMap::new();
+
+        for (k, v) in type_items.into_iter().chain(other_items.into_iter()) {
+             // Decode Key: [Ts][UID][Pred]
+             match Codec::decode_history_key(&k) {
+                 Ok((ts, uid, pred)) => {
+                     // Proceed
+
+                 if v.is_empty() {
+                     // Tombstone
+                     let mut event_type_name = "Unknown".to_string();
+                     let mut mutation_type = crate::realtime::bus::MutationType::Update;
+                     let mut should_emit = true;
+
+                     // 1. Index Maintenance (Type Index Deletion)
+                     if pred == "_type" {
+                          let data_key = crate::storage::codec::Codec::encode_data_key(uid, "_type");
+                          if let Ok(Some(current_bytes)) = self.storage.get(&data_key) {
+                               if let Ok(serde_json::Value::String(current_type)) = serde_json::from_slice(&current_bytes) {
+                                    let type_idx_key = crate::storage::codec::Codec::encode_type_index_key(&current_type, uid);
+                                    let _ = self.storage.remove(&type_idx_key);
+                                    
+                                    event_type_name = current_type;
+                                    mutation_type = crate::realtime::bus::MutationType::Delete;
+                               }
+                          }
+                     } else {
+                         // If this node is being deleted, suppress individual field tombstone events
+                         if deleted_uids.contains(&uid) {
+                             should_emit = false;
+                         }
+                     }
+
+                     self.storage.delete_with_lww(uid, &pred, &ts)?;
+                     
+                     if should_emit {
+                         // Emit Event Immediately for Delete (Atomic enough usually)
+                         let payload = if mutation_type == crate::realtime::bus::MutationType::Delete {
+                             None
+                         } else {
+                             Some(std::collections::HashMap::from([(pred, serde_json::Value::Null)]))
+                         };
+
+                         let event = crate::realtime::bus::MutationEvent {
+                             type_name: event_type_name,
+                             uid,
+                             mutation_type,
+                             source: crate::realtime::bus::MutationSource::Remote,
+                             payload,
+                             metadata: None,
+                             timestamp: Some(ts),
+                         };
+                         let _ = self.bus.publish(event);
+                     }
+
+                 } else {
+                     self.storage.put_with_lww(uid, &pred, &v, &ts)?;
+                     
+                     // 1. Buffer Event Emission
+                     if let Ok(json_val) = serde_json::from_slice::<serde_json::Value>(&v) {
+                         // 2. Index Maintenance (Type Index)
+                         let mut resolved_type_name = "Unknown".to_string();
+                         
+                         if pred == "_type" {
+                             if let serde_json::Value::String(ref type_name) = json_val {
+                                 let type_idx_key = Codec::encode_type_index_key(type_name, uid);
+                                 let _res = self.storage.insert(&type_idx_key, &[]);
+                                 println!("Sync: Insert Type Index Key: {:?}, Result: {:?}", type_idx_key, _res);
+                                 resolved_type_name = type_name.clone();
+                             } else {
+                                  println!("Sync: ERROR: _type predicate found but value is not a String! Value: {:?}", json_val);
+                             }
+                         } else {
+                             // Try to lookup type from storage
+                             let type_key = crate::storage::codec::Codec::encode_data_key(uid, "_type");
+                             if let Ok(Some(type_bytes)) = self.storage.get(&type_key) {
+                                 if let Ok(serde_json::Value::String(t)) = serde_json::from_slice(&type_bytes) {
+                                     resolved_type_name = t;
+                                 }
+                             }
+                         }
+
+                         // Add to Buffer
+                         let entry = pending_emissions.entry(uid).or_insert_with(|| ("Unknown".to_string(), crate::realtime::bus::MutationType::Update, std::collections::HashMap::new(), ts));
+                         
+                         // Update Timestamp (Take Latest)
+                         if ts > entry.3 {
+                             entry.3 = ts;
+                         }
+                         
+                         // Update Type Name if resolved
+                         if resolved_type_name != "Unknown" {
+                             entry.0 = resolved_type_name;
+                         }
+                         
+                         // Determine Mutation Type
+                         if pred == "_type" {
+                             entry.1 = crate::realtime::bus::MutationType::Create;
+                         }
+
+                         entry.2.insert(pred, json_val);
+                     }
+                 }
+                 self.storage.update_clock(&ts);
+             },
+             Err(_e) => {
+                 println!("Sync: Failed to decode key: {:?}", k);
+             }
+        }
+    }
+    
+    // Flush Pending Events
+    for (uid, (type_name, mutation_type, mut payload, timestamp)) in pending_emissions {
+        // Inject ID into payload for Frontend Cache compatibility
+        payload.insert("id".to_string(), serde_json::Value::String(uid.to_string()));
+        
+        let event = crate::realtime::bus::MutationEvent {
+            type_name,
+            uid,
+            mutation_type,
+            source: crate::realtime::bus::MutationSource::Remote,
+            payload: Some(payload),
+            metadata: None,
+            timestamp: Some(timestamp),
+        };
+        let _ = self.bus.publish(event);
+    }
+
+    Ok(())
+}
+
+    pub fn try_restore_quarantine(&self, valid_predicates: &std::collections::HashSet<String>) -> anyhow::Result<usize> {
+        let items = self.storage.scan_quarantine()?;
+        let mut restored = 0;
+        for (k, v) in items {
+             if let Ok((uid, pred)) = Codec::decode_quarantine_key(&k) {
+                 if valid_predicates.contains(&pred) {
+                     if let Ok((ts, data)) = Codec::decode_quarantine_value(&v) {
+                         // Restore to LATEST/HISTORY using LWW
+                         self.storage.put_with_lww(uid, &pred, &data, &ts)?;
+                         // Remove from Quarantine
+                         self.storage.delete_quarantine(&k)?;
+                         restored += 1;
+                     }
+                 }
+             }
+        }
+        Ok(restored)
+    }
+
+    fn link_inverse(&self, target_uid: u64, inverse_field: &str, is_list: bool, self_uid: u64, timestamp: &Timestamp) -> Result<(), String> {
          let key = Codec::encode_data_key(target_uid, inverse_field);
          
          if is_list {
@@ -33,18 +235,18 @@ impl FjallResolver {
              if !list.contains(&val_to_add) {
                   list.push(val_to_add);
                   let bytes = serde_json::to_vec(&list).map_err(|e| e.to_string())?;
-                  self.storage.insert(&key, &bytes).map_err(|e| e.to_string())?;
+                  self.storage.put_with_lww(target_uid, inverse_field, &bytes, timestamp).map_err(|e| e.to_string())?;
              }
          } else {
              // 1:1 or N:1 - Overwrite
              let val = Value::String(self_uid.to_string());
              let bytes = serde_json::to_vec(&val).map_err(|e| e.to_string())?;
-             self.storage.insert(&key, &bytes).map_err(|e| e.to_string())?;
+             self.storage.put_with_lww(target_uid, inverse_field, &bytes, timestamp).map_err(|e| e.to_string())?;
          }
          Ok(())
     }
 
-    fn unlink_inverse(&self, target_uid: u64, inverse_field: &str, is_list: bool, self_uid: u64) -> Result<(), String> {
+    fn unlink_inverse(&self, target_uid: u64, inverse_field: &str, is_list: bool, self_uid: u64, timestamp: &Timestamp) -> Result<(), String> {
          let key = Codec::encode_data_key(target_uid, inverse_field);
          
          if is_list {
@@ -65,7 +267,7 @@ impl FjallResolver {
                       });
                       
                       let bytes = serde_json::to_vec(&list).map_err(|e| e.to_string())?;
-                      self.storage.insert(&key, &bytes).map_err(|e| e.to_string())?;
+                      self.storage.put_with_lww(target_uid, inverse_field, &bytes, timestamp).map_err(|e| e.to_string())?;
                  }
              }
          } else {
@@ -78,7 +280,7 @@ impl FjallResolver {
                           _ => false
                       };
                       if matches {
-                          self.storage.remove(&key).map_err(|e| e.to_string())?;
+                          self.storage.delete_with_lww(target_uid, inverse_field, timestamp).map_err(|e| e.to_string())?;
                       }
                  }
              }
@@ -339,6 +541,7 @@ impl FjallResolver {
     }
 
     fn get_candidates(&self, type_name: &str, filter: &std::collections::HashMap<String, Value>) -> Option<std::collections::HashSet<u64>> {
+        // println!("Scan: get_candidates called for {} with filter {:?}", type_name, filter);
         let mut candidates: Option<std::collections::HashSet<u64>> = None;
 
         for (field, condition) in filter {
@@ -387,11 +590,11 @@ impl FjallResolver {
                     for term in terms {
                         let prefix = Codec::encode_term_index_prefix(field, &term);
                         use std::ops::Bound;
-                        let iter = self.storage.main_partition.range((Bound::Included(prefix.clone()), Bound::Unbounded));
+                        let iter = self.storage.main_keyspace.range((Bound::Included(prefix.clone()), Bound::Unbounded));
                         
                         let mut term_uids = std::collections::HashSet::new();
-                        for item in iter {
-                            if let Ok((key, _)) = item {
+                        for guard in iter {
+                            if let Ok(key) = guard.key() {
                                 if !key.starts_with(&prefix) { break; }
                                 if key.len() >= 8 {
                                     let uid = BigEndian::read_u64(&key[key.len()-8..]);
@@ -423,10 +626,10 @@ impl FjallResolver {
                      for term in terms {
                         let prefix = Codec::encode_term_index_prefix(field, &term);
                         use std::ops::Bound;
-                        let iter = self.storage.main_partition.range((Bound::Included(prefix.clone()), Bound::Unbounded));
+                        let iter = self.storage.main_keyspace.range((Bound::Included(prefix.clone()), Bound::Unbounded));
                         
-                        for item in iter {
-                            if let Ok((key, _)) = item {
+                        for guard in iter {
+                            if let Ok(key) = guard.key() {
                                 if !key.starts_with(&prefix) { break; }
                                 if key.len() >= 8 {
                                     let uid = BigEndian::read_u64(&key[key.len()-8..]);
@@ -451,11 +654,11 @@ impl FjallResolver {
                     for term in terms {
                         let prefix = Codec::encode_term_index_prefix(&index_field, &term);
                         use std::ops::Bound;
-                        let iter = self.storage.main_partition.range((Bound::Included(prefix.clone()), Bound::Unbounded));
+                        let iter = self.storage.main_keyspace.range((Bound::Included(prefix.clone()), Bound::Unbounded));
                         
                         let mut term_uids = std::collections::HashSet::new();
-                        for item in iter {
-                            if let Ok((key, _)) = item {
+                        for guard in iter {
+                            if let Ok(key) = guard.key() {
                                 if !key.starts_with(&prefix) { break; }
                                 if key.len() >= 8 {
                                     let uid = BigEndian::read_u64(&key[key.len()-8..]);
@@ -488,10 +691,10 @@ impl FjallResolver {
                      for term in terms {
                         let prefix = Codec::encode_term_index_prefix(&index_field, &term);
                         use std::ops::Bound;
-                        let iter = self.storage.main_partition.range((Bound::Included(prefix.clone()), Bound::Unbounded));
+                        let iter = self.storage.main_keyspace.range((Bound::Included(prefix.clone()), Bound::Unbounded));
                         
-                        for item in iter {
-                            if let Ok((key, _)) = item {
+                        for guard in iter {
+                            if let Ok(key) = guard.key() {
                                 if !key.starts_with(&prefix) { break; }
                                 if key.len() >= 8 {
                                     let uid = BigEndian::read_u64(&key[key.len()-8..]);
@@ -551,6 +754,332 @@ impl FjallResolver {
         }
         true
     }
+    pub fn create_node_internal(&self, type_name: &str, uid: u64, fields: std::collections::HashMap<String, serde_json::Value>, uniques: &[String], inverses: &[crate::engine::resolver::InverseInfo], search_fields: &std::collections::HashMap<String, Vec<String>>, source: crate::realtime::bus::MutationSource, timestamp_override: Option<crate::storage::timestamp::Timestamp>) -> Result<(), String> {
+        // Generate Timestamp for this Atomic Mutation or use override
+        let timestamp = timestamp_override.unwrap_or_else(|| self.storage.next_timestamp());
+
+        for (field, value) in &fields {
+            let val_bytes = serde_json::to_vec(&value).map_err(|e| e.to_string())?;
+            if let Some(tokenizers) = search_fields.get(field) {
+                if let serde_json::Value::String(s) = value {
+                     for strategy in tokenizers {
+                         self.write_term_index(uid, field, s, strategy)?;
+                     }
+                }
+            }
+            if uniques.contains(&field) {
+                 let index_pred = format!("{}.{}", type_name, field);
+                 let val_str = serde_json::to_string(&value).map_err(|e| e.to_string())?;
+                 let idx_key = Codec::encode_unique_index_key(&index_pred, &val_str);
+                 if let Ok(Some(_)) = self.storage.get(&idx_key) {
+                     return Err(format!("Duplicate value for unique field: {}", field));
+                 }
+                 let mut uid_bytes = vec![0u8; 8];
+                 BigEndian::write_u64(&mut uid_bytes, uid);
+                 self.storage.insert(&idx_key, &uid_bytes).map_err(|e| e.to_string())?;
+            }
+            // Use LWW Put
+            self.storage.put_with_lww(uid, field, &val_bytes, &timestamp).map_err(|e| e.to_string())?;
+        }
+        
+        let type_key_idx = Codec::encode_type_index_key(type_name, uid);
+        self.storage.insert(&type_key_idx, &[]).map_err(|e| e.to_string())?; // Index
+        
+        let type_val_bytes = serde_json::to_vec(&serde_json::Value::String(type_name.to_string())).expect("Serialization failed");
+        self.storage.put_with_lww(uid, "_type", &type_val_bytes, &timestamp).map_err(|e| e.to_string())?; // Data
+
+        // Link New Inverses
+        for info in inverses {
+             if let Some(val) = fields.get(&info.field) {
+                  let mut new_targets = Vec::new();
+                  match val {
+                      serde_json::Value::String(s) => { if let Ok(id) = s.parse::<u64>() { new_targets.push(id); } }
+                      serde_json::Value::Number(n) => { if let Some(id) = n.as_u64() { new_targets.push(id); } }
+                      serde_json::Value::Array(items) => {
+                          for item in items {
+                              match item {
+                                    serde_json::Value::String(s) => { if let Ok(id) = s.parse::<u64>() { new_targets.push(id); } }
+                                    serde_json::Value::Number(n) => { if let Some(id) = n.as_u64() { new_targets.push(id); } }
+                                    _ => {}
+                              }
+                          }
+                      }
+                      _ => {}
+                  }
+                  for target in new_targets {
+                      self.link_inverse(target, &info.inverse_field, info.inverse_is_list, uid, &timestamp)?;
+                  }
+             }
+        }
+
+
+        // Inject ID into payload for Frontend Cache compatibility
+        let mut event_payload = fields;
+        event_payload.insert("id".to_string(), serde_json::Value::String(uid.to_string()));
+
+        self.bus.publish(MutationEvent {
+            type_name: type_name.to_string(),
+            uid,
+            mutation_type: MutationType::Create,
+            source,
+            payload: Some(event_payload),
+            metadata: Some(crate::realtime::bus::SchemaMetadata {
+                uniques: uniques.to_vec(),
+                inverses: inverses.to_vec(),
+                search_fields: search_fields.clone(),
+            }),
+            timestamp: Some(timestamp),
+        });
+        Ok(())
+    }
+
+    pub fn update_node_internal(&self, type_name: &str, uid: u64, fields: std::collections::HashMap<String, serde_json::Value>, uniques: &[String], inverses: &[crate::engine::resolver::InverseInfo], search_fields: &std::collections::HashMap<String, Vec<String>>, source: crate::realtime::bus::MutationSource, timestamp_override: Option<crate::storage::timestamp::Timestamp>) -> Result<(), String> {
+        let timestamp = timestamp_override.unwrap_or_else(|| self.storage.next_timestamp());
+         // 0. Remove Old Search Indexes for updated fields
+        for (field, _) in &fields {
+             if let Some(tokenizers) = search_fields.get(field) {
+                 let data_key = Codec::encode_data_key(uid, field);
+                 if let Ok(Some(bytes)) = self.storage.get(&data_key) {
+                     if let Ok(serde_json::Value::String(s)) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                          for strategy in tokenizers {
+                              self.remove_term_index(uid, field, &s, strategy)?;
+                          }
+                     }
+                 }
+             }
+        }
+        // 1. Unlink Inverses
+        for info in inverses {
+             if fields.contains_key(&info.field) {
+                 let data_key = Codec::encode_data_key(uid, &info.field);
+                 if let Ok(Some(bytes)) = self.storage.get(&data_key) {
+                     let mut old_targets = Vec::new();
+                     if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                          match val {
+                              serde_json::Value::String(s) => { if let Ok(id) = s.parse::<u64>() { old_targets.push(id); } }
+                              serde_json::Value::Number(n) => { if let Some(id) = n.as_u64() { old_targets.push(id); } }
+                              serde_json::Value::Array(items) => {
+                                  for item in items {
+                                      match item {
+                                            serde_json::Value::String(s) => { if let Ok(id) = s.parse::<u64>() { old_targets.push(id); } }
+                                            serde_json::Value::Number(n) => { if let Some(id) = n.as_u64() { old_targets.push(id); } }
+                                            _ => {}
+                                      }
+                                  }
+                              }
+                              _ => {}
+                          }
+                     }
+                     for target in old_targets {
+                         self.unlink_inverse(target, &info.inverse_field, info.inverse_is_list, uid, &timestamp)?;
+                     }
+                 }
+             }
+        }
+        // 2. Remove Old Unique Indexes
+        for field in uniques {
+             if fields.contains_key(field) {
+                 let data_key = Codec::encode_data_key(uid, field);
+                 if let Ok(Some(val_bytes)) = self.storage.get(&data_key) {
+                     if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&val_bytes) {
+                          let val_str = serde_json::to_string(&val).unwrap_or_default();
+                          let index_pred = format!("{}.{}", type_name, field);
+                          let idx_key = Codec::encode_unique_index_key(&index_pred, &val_str);
+                          self.storage.remove(&idx_key).map_err(|e| e.to_string())?;
+                     }
+                 }
+             }
+        }
+        // 3. Write New Data & Indexes
+        for (field, value) in &fields {
+            let val_bytes = serde_json::to_vec(&value).map_err(|e| e.to_string())?;
+            if let Some(tokenizers) = search_fields.get(field) {
+                if let serde_json::Value::String(s) = value {
+                     for strategy in tokenizers {
+                         self.write_term_index(uid, field, s, strategy)?;
+                     }
+                }
+            }
+            if uniques.contains(&field) {
+                 let index_pred = format!("{}.{}", type_name, field);
+                 let val_str = serde_json::to_string(&value).map_err(|e| e.to_string())?;
+                 let idx_key = Codec::encode_unique_index_key(&index_pred, &val_str);
+                 if let Ok(Some(_)) = self.storage.get(&idx_key) {
+                     return Err(format!("Duplicate value for unique field: {}", field));
+                 }
+                 let mut uid_bytes = vec![0u8; 8];
+                 BigEndian::write_u64(&mut uid_bytes, uid);
+                 self.storage.insert(&idx_key, &uid_bytes).map_err(|e| e.to_string())?;
+            }
+            self.storage.put_with_lww(uid, field, &val_bytes, &timestamp).map_err(|e| e.to_string())?;
+        }
+        // 4. Link New Inverses
+        for info in inverses {
+             if let Some(val) = fields.get(&info.field) {
+                  let mut new_targets = Vec::new();
+                  match val {
+                      serde_json::Value::String(s) => { if let Ok(id) = s.parse::<u64>() { new_targets.push(id); } }
+                      serde_json::Value::Number(n) => { if let Some(id) = n.as_u64() { new_targets.push(id); } }
+                      serde_json::Value::Array(items) => {
+                          for item in items {
+                              match item {
+                                    serde_json::Value::String(s) => { if let Ok(id) = s.parse::<u64>() { new_targets.push(id); } }
+                                    serde_json::Value::Number(n) => { if let Some(id) = n.as_u64() { new_targets.push(id); } }
+                                    _ => {}
+                              }
+                          }
+                      }
+                      _ => {}
+                  }
+                  for target in new_targets {
+                      self.link_inverse(target, &info.inverse_field, info.inverse_is_list, uid, &timestamp)?;
+                  }
+             }
+        }
+
+        // Inject ID into payload for Frontend Cache compatibility
+        let mut event_payload = fields;
+        event_payload.insert("id".to_string(), serde_json::Value::String(uid.to_string()));
+
+        self.bus.publish(MutationEvent {
+            type_name: type_name.to_string(),
+            uid,
+            mutation_type: MutationType::Update,
+            source,
+            payload: Some(event_payload),
+            metadata: Some(crate::realtime::bus::SchemaMetadata {
+                uniques: uniques.to_vec(),
+                inverses: inverses.to_vec(),
+                search_fields: search_fields.clone(),
+            }),
+            timestamp: Some(timestamp),
+        });
+        Ok(())
+    }
+
+    pub fn delete_node_internal(&self, type_name: &str, uid: u64, uniques: &[String], inverses: &[crate::engine::resolver::InverseInfo], search_fields: &std::collections::HashMap<String, Vec<String>>, source: crate::realtime::bus::MutationSource, timestamp_override: Option<crate::storage::timestamp::Timestamp>) -> Result<(), String> {
+        let timestamp = timestamp_override.unwrap_or_else(|| self.storage.next_timestamp());
+        // 0. Remove Search Indexes
+        for (field, tokenizers) in search_fields {
+            let data_key = Codec::encode_data_key(uid, field);
+            if let Ok(Some(bytes)) = self.storage.get(&data_key) {
+                if let Ok(serde_json::Value::String(s)) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                     for strategy in tokenizers {
+                         self.remove_term_index(uid, field, &s, strategy)?;
+                     }
+                }
+            }
+        }
+        // 1. Handle Inverses (Unlink)
+        for info in inverses {
+             let data_key = Codec::encode_data_key(uid, &info.field);
+             if let Ok(Some(bytes)) = self.storage.get(&data_key) {
+                 let mut targets = Vec::new();
+                 if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                      match val {
+                           serde_json::Value::String(s) => { if let Ok(id) = s.parse::<u64>() { targets.push(id); } }
+                           serde_json::Value::Number(n) => { if let Some(id) = n.as_u64() { targets.push(id); } }
+                           serde_json::Value::Array(items) => {
+                               for item in items {
+                                   match item {
+                                        serde_json::Value::String(s) => { if let Ok(id) = s.parse::<u64>() { targets.push(id); } }
+                                        serde_json::Value::Number(n) => { if let Some(id) = n.as_u64() { targets.push(id); } }
+                                        _ => {}
+                                   }
+                               }
+                           }
+                           _ => {}
+                      }
+                 }
+                 for target in targets {
+                     self.unlink_inverse(target, &info.inverse_field, info.inverse_is_list, uid, &timestamp)?;
+                 }
+             }
+        }
+        // 2. Remove Unique Indexes
+        for field in uniques {
+            let data_key = Codec::encode_data_key(uid, field);
+            if let Ok(Some(val_bytes)) = self.storage.get(&data_key) {
+                if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&val_bytes) {
+                     let val_str = serde_json::to_string(&val).unwrap_or_default();
+                     let index_pred = format!("{}.{}", type_name, field);
+                     let idx_key = Codec::encode_unique_index_key(&index_pred, &val_str);
+                     self.storage.remove(&idx_key).map_err(|e| e.to_string())?;
+                }
+             }
+        }
+        // 3. Remove Type Index
+        let type_key = Codec::encode_type_index_key(type_name, uid);
+        self.storage.remove(&type_key).map_err(|e| e.to_string())?;
+
+        // 4. Remove Data Keys (Scan Prefix)
+        let prefix = Codec::encode_data_prefix(uid);
+        use std::ops::Bound;
+        let iter = self.storage.main_keyspace.range((Bound::Included(prefix.clone()), Bound::Unbounded));
+        let mut keys_to_delete: Vec<Vec<u8>> = Vec::new();
+        for guard in iter {
+             if let Ok(key) = guard.key() {
+             if !key.starts_with(&prefix) { break; }
+             keys_to_delete.push(key.to_vec());
+             }
+        }
+        for k in keys_to_delete {
+            if k.len() > 9 {
+                if let Ok(pred) = std::str::from_utf8(&k[9..]) {
+                     self.storage.delete_with_lww(uid, pred, &timestamp).map_err(|e| e.to_string())?;
+                }
+            }
+        }
+
+        self.bus.publish(MutationEvent {
+             type_name: type_name.to_string(),
+             uid,
+             mutation_type: MutationType::Delete,
+             source,
+             payload: None,
+             metadata: Some(crate::realtime::bus::SchemaMetadata {
+                uniques: uniques.to_vec(),
+                inverses: inverses.to_vec(),
+                search_fields: search_fields.clone(),
+            }),
+            timestamp: Some(timestamp),
+        });
+        Ok(())
+    }
+
+    pub fn apply_remote_mutation(&self, event: crate::realtime::bus::MutationEvent) -> Result<(), String> {
+         println!("Sync: Applying Remote Mutation: Type={}, UID={}, MutationType={:?}, Source={:?}, Timestamp={:?}", event.type_name, event.uid, event.mutation_type, event.source, event.timestamp);
+         let metadata = event.metadata.ok_or("Missing metadata for remote mutation")?;
+         let source = crate::realtime::bus::MutationSource::Remote;
+         
+         let result = match event.mutation_type {
+             crate::realtime::bus::MutationType::Create => {
+                  let payload = event.payload.clone().ok_or("Missing payload for Create")?;
+                  self.create_node_internal(&event.type_name, event.uid, payload, &metadata.uniques, &metadata.inverses, &metadata.search_fields, source, event.timestamp)
+             },
+             crate::realtime::bus::MutationType::Update => {
+                  let payload = event.payload.clone().ok_or("Missing payload for Update")?;
+                  self.update_node_internal(&event.type_name, event.uid, payload, &metadata.uniques, &metadata.inverses, &metadata.search_fields, source, event.timestamp)
+             },
+             crate::realtime::bus::MutationType::Delete => {
+                  self.delete_node_internal(&event.type_name, event.uid, &metadata.uniques, &metadata.inverses, &metadata.search_fields, source, event.timestamp)
+             }
+         };
+
+         if let Err(e) = result {
+             eprintln!("Quarantining mutation due to error: {}", e);
+             let timestamp = self.storage.next_timestamp();
+             if let Some(payload) = event.payload {
+                 for (field, value) in payload {
+                     if let Ok(bytes) = serde_json::to_vec(&value) {
+                         let _ = self.storage.put_quarantine(event.uid, &field, &bytes, &timestamp);
+                     }
+                 }
+             }
+             return Err(e);
+         }
+         Ok(())
+    }
 }
 
 impl Resolver for FjallResolver {
@@ -562,9 +1091,18 @@ impl Resolver for FjallResolver {
         let key = Codec::encode_data_key(uid, field_name);
         match self.storage.get(&key) {
             Ok(Some(bytes)) => {
-                serde_json::from_slice(&bytes).ok()
+                let res = serde_json::from_slice(&bytes).ok();
+                if field_name == "title" {
+                     println!("Resolve: UID: {}, Field: {}, Result: {:?}", uid, field_name, res);
+                }
+                res
             }
-            _ => None,
+            _ => {
+                if field_name == "title" {
+                     println!("Resolve: UID: {}, Field: {}, Result: None (Key not found)", uid, field_name);
+                }
+                None
+            },
         }
     }
 
@@ -579,97 +1117,15 @@ impl Resolver for FjallResolver {
     }
 
     fn create_node(&self, type_name: &str, fields: std::collections::HashMap<String, Value>, uniques: &[String], inverses: &[crate::engine::resolver::InverseInfo], search_fields: &std::collections::HashMap<String, Vec<String>>) -> Result<u64, String> {
-        // Simple UID generation: SystemTime nanos
         let start = std::time::SystemTime::now();
-        let since_the_epoch = start
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("Time went backwards");
+        let since_the_epoch = start.duration_since(std::time::UNIX_EPOCH).expect("Time went backwards");
         let uid = since_the_epoch.as_nanos() as u64;
 
-        for (field, value) in &fields {
-             // Serialize Value to JSON bytes
-            let val_bytes = serde_json::to_vec(&value).map_err(|e| e.to_string())?;
-            
-            // 2b. Write Term Index if needed
-            if let Some(tokenizers) = search_fields.get(field) {
-                if let Value::String(s) = value {
-                     for strategy in tokenizers {
-                         self.write_term_index(uid, field, s, strategy)?;
-                     }
-                }
-            }
+        let payload: std::collections::HashMap<String, serde_json::Value> = fields.iter()
+            .map(|(k, v)| (k.clone(), serde_json::to_value(v).unwrap_or(serde_json::Value::Null)))
+            .collect();
 
-            // 1. Check Uniqueness if required
-            if uniques.contains(&field) {
-                 // Construct Index Index: Type.Field
-                 let index_pred = format!("{}.{}", type_name, field);
-                 let val_str = serde_json::to_string(&value).map_err(|e| e.to_string())?;
-                 
-                 let idx_key = Codec::encode_unique_index_key(&index_pred, &val_str);
-                 
-                 // Check existence
-                 if let Ok(Some(_)) = self.storage.get(&idx_key) {
-                     return Err(format!("Duplicate value for unique field: {}", field));
-                 }
-                 
-                 // Write Index: Key -> UID
-                 let mut uid_bytes = vec![0u8; 8];
-                 BigEndian::write_u64(&mut uid_bytes, uid);
-                 self.storage.insert(&idx_key, &uid_bytes).map_err(|e| e.to_string())?;
-            }
-
-            // 2. Write Data
-            let key = Codec::encode_data_key(uid, &field);
-            self.storage.insert(&key, &val_bytes).map_err(|e| e.to_string())?;
-        }
-        
-        // 3. Write Type Index (for Listing/Scanning)
-        let type_key_idx = Codec::encode_type_index_key(type_name, uid);
-        self.storage.insert(&type_key_idx, &[]).map_err(|e| e.to_string())?;
-
-        // 3b. Write Internal _type Predicate (for Polymorphism)
-        let type_data_key = Codec::encode_data_key(uid, "_type");
-        let type_val_bytes = serde_json::to_vec(&Value::String(type_name.to_string())).expect("Serialization failed");
-        self.storage.insert(&type_data_key, &type_val_bytes).map_err(|e| e.to_string())?;
-
-        // 3c. Emit Event
-        self.bus.publish(MutationEvent {
-            type_name: type_name.to_string(),
-            uid,
-            mutation_type: MutationType::Create,
-        });
-
-        // 4. Handle @hasInverse
-        for info in inverses {
-             if let Some(val) = fields.get(&info.field) {
-                 // value could be Single UID or List of UIDs
-                 let mut target_uids = Vec::new();
-                 
-                 match val {
-                     Value::String(s) => {
-                         if let Ok(id) = s.parse::<u64>() { target_uids.push(id); }
-                     }
-                     Value::Number(n) => {
-                         if let Some(id) = n.as_u64() { target_uids.push(id); }
-                     }
-                     Value::List(items) => {
-                         for item in items {
-                             match item {
-                                  Value::String(s) => { if let Ok(id) = s.parse::<u64>() { target_uids.push(id); } }
-                                  Value::Number(n) => { if let Some(id) = n.as_u64() { target_uids.push(id); } }
-                                  _ => {}
-                             }
-                         }
-                     }
-                     _ => {}
-                 }
-
-                 for target_uid in target_uids {
-                     self.link_inverse(target_uid, &info.inverse_field, info.inverse_is_list, uid)?;
-                 }
-             }
-        }
-
+        self.create_node_internal(type_name, uid, payload, uniques, inverses, search_fields, crate::realtime::bus::MutationSource::Local, None)?;
         Ok(uid)
     }
 
@@ -683,6 +1139,7 @@ impl Resolver for FjallResolver {
 
 
     fn scan_nodes(&self, type_name: &str, filter: std::collections::HashMap<String, Value>, sort: std::collections::HashMap<String, Value>, first: Option<usize>, after: Option<String>) -> Vec<u64> {
+        // println!("Scan: scan_nodes called for {}. Filter: {:?}, Sort: {:?}", type_name, filter, sort);
         // Optimization: Smallest Set First
         let candidate_set = self.get_candidates(type_name, &filter);
         // Removed candidate set logic, always perform full scan or scan from cursor.
@@ -749,11 +1206,18 @@ impl Resolver for FjallResolver {
             };
 
             use std::ops::Bound;
-            let iter = self.storage.main_partition.range((Bound::Included(start_key), Bound::Unbounded));
-
-            for item in iter {
-                 if let Ok((key, _)) = item {
-                     if !key.starts_with(&prefix) { break; }
+            let iter = self.storage.main_keyspace.range((Bound::Included(start_key.clone()), Bound::Unbounded));
+            println!("Scan: Starting Full Scan for type: {}. Prefix/StartKey: {:?}", type_name, start_key);
+            for guard in iter {
+                 if let Ok(key) = guard.key() {
+                     // scanned_count += 1;
+                     // if scanned_count <= 10 {
+                     //    println!("Scan: Seeing Key: {:?}", key);
+                     // }
+                     if !key.starts_with(&prefix) { 
+                         // if scanned_count <= 10 { println!("Scan: Key {:?} does not match prefix {:?}", key, prefix); }
+                         break; 
+                     }
                      if key.len() >= 8 {
                          let uid = BigEndian::read_u64(&key[key.len()-8..]);
                         
@@ -774,7 +1238,8 @@ impl Resolver for FjallResolver {
                          }
                      }
                  }
-            }
+             }
+             println!("Scan: Completed. Found {} uids", uids.len());
         }
 
         if needs_sorting {
@@ -832,224 +1297,15 @@ impl Resolver for FjallResolver {
     }
 
     fn update_node(&self, type_name: &str, uid: u64, fields: std::collections::HashMap<String, Value>, uniques: &[String], inverses: &[crate::engine::resolver::InverseInfo], search_fields: &std::collections::HashMap<String, Vec<String>>) -> Result<(), String> {
-        // 0. Update Search Indexes (Get Old -> Remove -> Add New)
-         for (field, value) in &fields {
-             if let Some(tokenizers) = search_fields.get(field) {
-                 let data_key = Codec::encode_data_key(uid, field);
-                 if let Ok(Some(old_bytes)) = self.storage.get(&data_key) {
-                     if let Ok(Value::String(s)) = serde_json::from_slice::<Value>(&old_bytes) {
-                          for strategy in tokenizers {
-                              self.remove_term_index(uid, field, &s, strategy)?;
-                          }
-                     }
-                 }
-                 if let Value::String(s) = value {
-                      for strategy in tokenizers {
-                          self.write_term_index(uid, field, s, strategy)?;
-                      }
-                 }
-             }
-         }
-
-        // 1. Check Uniqueness Constraints First
-        for (field, value) in &fields {
-            if uniques.contains(field) {
-                let index_pred = format!("{}.{}", type_name, field);
-                let val_str = serde_json::to_string(value).map_err(|e| e.to_string())?;
-                let idx_key = Codec::encode_unique_index_key(&index_pred, &val_str);
-
-                match self.storage.get(&idx_key) {
-                    Ok(Some(existing_uid_bytes)) => {
-                        let existing_uid = BigEndian::read_u64(&existing_uid_bytes);
-                        if existing_uid != uid {
-                            return Err(format!("Duplicate value for unique field: {}", field));
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-        
-        // 2. Handle Inverses (Read-Verify-Link)
-        for info in inverses {
-             if let Some(new_val) = fields.get(&info.field) {
-                  // A. UNLINK OLD
-                  let data_key = Codec::encode_data_key(uid, &info.field);
-                  if let Ok(Some(old_bytes)) = self.storage.get(&data_key) {
-                      let mut old_targets = Vec::new();
-                      if let Ok(old_val) = serde_json::from_slice::<Value>(&old_bytes) {
-                          match old_val {
-                               Value::String(s) => { if let Ok(id) = s.parse::<u64>() { old_targets.push(id); } }
-                               Value::Number(n) => { if let Some(id) = n.as_u64() { old_targets.push(id); } }
-                               Value::List(items) => {
-                                   for item in items {
-                                       match item {
-                                            Value::String(s) => { if let Ok(id) = s.parse::<u64>() { old_targets.push(id); } }
-                                            Value::Number(n) => { if let Some(id) = n.as_u64() { old_targets.push(id); } }
-                                            _ => {}
-                                       }
-                                   }
-                               }
-                               _ => {}
-                          }
-                      }
-                      for old_target in old_targets {
-                          self.unlink_inverse(old_target, &info.inverse_field, info.inverse_is_list, uid)?;
-                      }
-                  }
-
-                  // B. LINK NEW
-                 let mut new_targets = Vec::new();
-                 match new_val {
-                     Value::String(s) => { if let Ok(id) = s.parse::<u64>() { new_targets.push(id); } }
-                     Value::Number(n) => { if let Some(id) = n.as_u64() { new_targets.push(id); } }
-                     Value::List(items) => {
-                         for item in items {
-                             match item {
-                                  Value::String(s) => { if let Ok(id) = s.parse::<u64>() { new_targets.push(id); } }
-                                  Value::Number(n) => { if let Some(id) = n.as_u64() { new_targets.push(id); } }
-                                  _ => {}
-                             }
-                         }
-                     }
-                     _ => {}
-                 }
-
-                 for new_target in new_targets {
-                     self.link_inverse(new_target, &info.inverse_field, info.inverse_is_list, uid)?;
-                 }
-             }
-        }
-
-        // 3. Handle Unique Index Updates
-        for (field, value) in &fields {
-            if uniques.contains(field) {
-                // Get OLD value
-                let data_key = Codec::encode_data_key(uid, field);
-                if let Ok(Some(old_val_bytes)) = self.storage.get(&data_key) {
-                    if let Ok(old_val) = serde_json::from_slice::<Value>(&old_val_bytes) {
-                        if &old_val != value {
-                            // Removes OLD index
-                            let old_val_str = serde_json::to_string(&old_val).unwrap_or_default();
-                            let index_pred = format!("{}.{}", type_name, field);
-                            let old_idx_key = Codec::encode_unique_index_key(&index_pred, &old_val_str);
-                            self.storage.remove(&old_idx_key).map_err(|e| e.to_string())?;
-                        }
-                    }
-                }
-                
-                // Add NEW index
-                let index_pred = format!("{}.{}", type_name, field);
-                let val_str = serde_json::to_string(value).map_err(|e| e.to_string())?;
-                let idx_key = Codec::encode_unique_index_key(&index_pred, &val_str);
-                
-                let mut uid_bytes = vec![0u8; 8];
-                BigEndian::write_u64(&mut uid_bytes, uid);
-                self.storage.insert(&idx_key, &uid_bytes).map_err(|e| e.to_string())?;
-            }
-        }
-
-        // 4. Write Data
-        for (field, value) in fields {
-            let key = Codec::encode_data_key(uid, &field);
-            let val_bytes = serde_json::to_vec(&value).map_err(|e| e.to_string())?;
-            self.storage.insert(&key, &val_bytes).map_err(|e| e.to_string())?;
-        }
-
-        self.bus.publish(MutationEvent {
-            type_name: type_name.to_string(),
-            uid,
-            mutation_type: MutationType::Update,
-        });
-
-        Ok(())
+        let payload: std::collections::HashMap<String, serde_json::Value> = fields.iter()
+            .map(|(k, v)| (k.clone(), serde_json::to_value(v).unwrap_or(serde_json::Value::Null)))
+            .collect();
+            
+        self.update_node_internal(type_name, uid, payload, uniques, inverses, search_fields, crate::realtime::bus::MutationSource::Local, None)
     }
 
     fn delete_node(&self, type_name: &str, uid: u64, uniques: &[String], inverses: &[crate::engine::resolver::InverseInfo], search_fields: &std::collections::HashMap<String, Vec<String>>) -> Result<(), String> {
-        // 0. Remove Search Indexes
-        for (field, tokenizers) in search_fields {
-            let data_key = Codec::encode_data_key(uid, field);
-            if let Ok(Some(bytes)) = self.storage.get(&data_key) {
-                if let Ok(Value::String(s)) = serde_json::from_slice::<Value>(&bytes) {
-                     for strategy in tokenizers {
-                         self.remove_term_index(uid, field, &s, strategy)?;
-                     }
-                }
-            }
-        }
-
-        // 1. Handle Inverses (Unlink)
-        // We must do this BEFORE deleting data, so we can see who we are linked to.
-        for info in inverses {
-             let data_key = Codec::encode_data_key(uid, &info.field);
-             if let Ok(Some(bytes)) = self.storage.get(&data_key) {
-                 let mut targets = Vec::new();
-                 if let Ok(val) = serde_json::from_slice::<Value>(&bytes) {
-                      match val {
-                           Value::String(s) => { if let Ok(id) = s.parse::<u64>() { targets.push(id); } }
-                           Value::Number(n) => { if let Some(id) = n.as_u64() { targets.push(id); } }
-                           Value::List(items) => {
-                               for item in items {
-                                   match item {
-                                        Value::String(s) => { if let Ok(id) = s.parse::<u64>() { targets.push(id); } }
-                                        Value::Number(n) => { if let Some(id) = n.as_u64() { targets.push(id); } }
-                                        _ => {}
-                                   }
-                               }
-                           }
-                           _ => {}
-                      }
-                 }
-                 
-                 for target in targets {
-                     self.unlink_inverse(target, &info.inverse_field, info.inverse_is_list, uid)?;
-                 }
-             }
-        }
-
-        // 2. Remove Unique Indexes
-        for field in uniques {
-            let data_key = Codec::encode_data_key(uid, field);
-            if let Ok(Some(val_bytes)) = self.storage.get(&data_key) {
-                if let Ok(val) = serde_json::from_slice::<Value>(&val_bytes) {
-                     let val_str = serde_json::to_string(&val).unwrap_or_default();
-                     let index_pred = format!("{}.{}", type_name, field);
-                     let idx_key = Codec::encode_unique_index_key(&index_pred, &val_str);
-                     self.storage.remove(&idx_key).map_err(|e| e.to_string())?;
-                }
-             }
-        }
-
-        // 3. Remove Type Index
-        let type_key = Codec::encode_type_index_key(type_name, uid);
-        self.storage.remove(&type_key).map_err(|e| e.to_string())?;
-
-        // 4. Remove Data Keys (Scan Prefix)
-        let prefix = Codec::encode_data_prefix(uid);
-        use std::ops::Bound;
-        let iter = self.storage.main_partition.range((Bound::Included(prefix.clone()), Bound::Unbounded));
-        
-        let mut keys_to_delete = Vec::new();
-        for item in iter {
-             if let Ok((key, _)) = item {
-                 if !key.starts_with(&prefix) {
-                     break;
-                 }
-                 keys_to_delete.push(key);
-             }
-        }
-
-        for k in keys_to_delete {
-            self.storage.remove(&k).map_err(|e| e.to_string())?;
-        }
-
-        self.bus.publish(MutationEvent {
-             type_name: type_name.to_string(),
-             uid,
-             mutation_type: MutationType::Delete,
-        });
-
-        Ok(())
+        self.delete_node_internal(type_name, uid, uniques, inverses, search_fields, crate::realtime::bus::MutationSource::Local, None)
     }
 
     fn node_exists(&self, type_name: &str, uid: u64) -> bool {

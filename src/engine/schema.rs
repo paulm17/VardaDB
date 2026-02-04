@@ -48,6 +48,8 @@ pub struct GeoMultiPolygonData {
 
 pub struct Schema {
     inner: async_graphql::dynamic::Schema,
+    #[allow(dead_code)]
+    sdl: String,
 }
 
 impl Schema {
@@ -946,7 +948,7 @@ impl Schema {
                     Ok(Some(dynamic::FieldValue::value(async_graphql::Value::String(event.uid.to_string()))))
                 })
              }))
-            .field(dynamic::Field::new("mutation", dynamic::TypeRef::named_nn("MutationType"), |ctx| {
+             .field(dynamic::Field::new("mutation", dynamic::TypeRef::named_nn("MutationType"), |ctx| {
                 dynamic::FieldFuture::new(async move {
                     let event = ctx.parent_value.try_downcast_ref::<crate::realtime::bus::MutationEvent>()?;
                     let s = match event.mutation_type {
@@ -955,6 +957,18 @@ impl Schema {
                         crate::realtime::bus::MutationType::Delete => "DELETE",
                     };
                     Ok(Some(dynamic::FieldValue::value(async_graphql::Value::Enum(async_graphql::Name::new(s)))))
+                })
+            }))
+            .field(dynamic::Field::new("payload", dynamic::TypeRef::named("JSON"), |ctx| {
+                dynamic::FieldFuture::new(async move {
+                     let event = ctx.parent_value.try_downcast_ref::<crate::realtime::bus::MutationEvent>()?;
+                     if let Some(payload) = &event.payload {
+                         let val = serde_json::to_value(payload).map_err(|e| e.to_string())?;
+                         let g_val = async_graphql::Value::from_json(val).map_err(|e| e.to_string())?;
+                         Ok(Some(dynamic::FieldValue::value(g_val)))
+                     } else {
+                         Ok(None)
+                     }
                 })
             }));
 
@@ -1229,7 +1243,7 @@ impl Schema {
     pub fn load_from_sdl(sdl: &str) -> Result<Schema, String> {
         let builder = Self::create_builder(sdl)?;
         let schema = builder.finish().map_err(|e| e.to_string())?;
-        Ok(Self { inner: schema })
+        Ok(Self { inner: schema, sdl: sdl.to_string() })
     }
 
     pub fn load_with_resolver<R: crate::engine::resolver::Resolver + Send + Sync + 'static>(sdl: &str, resolver: R) -> Result<Schema, String> {
@@ -1238,11 +1252,19 @@ impl Schema {
             .data(Box::new(resolver) as Box<dyn crate::engine::resolver::Resolver + Send + Sync>)
             .finish()
             .map_err(|e| e.to_string())?;
-        Ok(Self { inner: schema })
+        Ok(Self { inner: schema, sdl: sdl.to_string() })
     }
 
+    /// Returns the generated SDL from async-graphql (includes all generated types)
+    /// Use this for export-schema command
     pub fn sdl(&self) -> String {
         self.inner.sdl()
+    }
+
+    /// Returns the original source SDL (user-provided schema)
+    /// Use this for schema sync between instances
+    pub fn source_sdl(&self) -> String {
+        self.sdl.clone()
     }
 }
 

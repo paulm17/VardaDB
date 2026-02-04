@@ -225,8 +225,9 @@ fn register_time_extensions(types: &mut Vec<dynamic::Type>) {
 // =========================================================================
 // D. Misc
 // =========================================================================
-fn register_misc_scalars(_types: &mut Vec<dynamic::Type>) {
-    // Moved to additional scalars for debugging
+fn register_misc_scalars(types: &mut Vec<dynamic::Type>) {
+    // Register JSON Scalar (Any)
+    types.push(dynamic::Type::Scalar(dynamic::Scalar::new("JSON").specified_by_url("http://www.ecma-international.org/publications/files/ECMA-ST/ECMA-404.pdf")));
 }
 
 // =========================================================================

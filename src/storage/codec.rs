@@ -87,4 +87,60 @@ impl Codec {
         buf.push(0x00);
         buf
     }
+
+    // --- Evolu / Varda Extensions ---
+
+    /// History Key: [Timestamp: 16][UID: 8][Predicate: Var]
+    /// Used for Range-Based Set Reconciliation (Sync)
+    pub fn encode_history_key(timestamp: &[u8; 16], uid: u64, predicate: &str) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(16 + 8 + predicate.len());
+        buf.extend_from_slice(timestamp);
+        buf.write_u64::<BigEndian>(uid).unwrap();
+        buf.extend_from_slice(predicate.as_bytes());
+        buf
+    }
+
+    pub fn encode_quarantine_key(uid: u64, predicate: &str) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(8 + predicate.len());
+        buf.write_u64::<BigEndian>(uid).unwrap();
+        buf.extend_from_slice(predicate.as_bytes());
+        buf
+    }
+
+    pub fn decode_quarantine_key(key: &[u8]) -> anyhow::Result<(u64, String)> {
+        if key.len() < 8 {
+            return Err(anyhow::anyhow!("Quarantine key too short"));
+        }
+        use byteorder::ByteOrder;
+        let uid = byteorder::BigEndian::read_u64(&key[0..8]);
+        let pred_bytes = &key[8..];
+        let predicate = std::str::from_utf8(pred_bytes)?.to_string();
+        Ok((uid, predicate))
+    }
+
+    pub fn decode_quarantine_value(val: &[u8]) -> anyhow::Result<(crate::storage::timestamp::Timestamp, Vec<u8>)> {
+        if val.len() < 16 {
+            return Err(anyhow::anyhow!("Quarantine value too short"));
+        }
+        let ts_bytes: [u8; 16] = val[0..16].try_into().unwrap();
+        let timestamp = crate::storage::timestamp::Timestamp::from_bytes(&ts_bytes);
+        let data = val[16..].to_vec();
+        Ok((timestamp, data))
+    }
+
+    pub fn decode_history_key(key: &[u8]) -> anyhow::Result<(crate::storage::timestamp::Timestamp, u64, String)> {
+        if key.len() < 24 { // 16 (TS) + 8 (UID) + Min 0 (Pred)
+            return Err(anyhow::anyhow!("History key too short"));
+        }
+        let ts_bytes: [u8; 16] = key[0..16].try_into().unwrap();
+        let timestamp = crate::storage::timestamp::Timestamp::from_bytes(&ts_bytes);
+        
+        use byteorder::ByteOrder;
+        let uid = byteorder::BigEndian::read_u64(&key[16..24]);
+        
+        let pred_bytes = &key[24..];
+        let predicate = std::str::from_utf8(pred_bytes)?.to_string();
+        
+        Ok((timestamp, uid, predicate))
+    }
 }
