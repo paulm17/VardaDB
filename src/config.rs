@@ -14,6 +14,8 @@ pub struct ServerConfig {
     pub storage_path: String,
     pub schema_path: Option<String>,
     pub node_id: Option<u64>,
+    #[serde(default)]
+    pub is_mcp: bool,
 }
 
 #[derive(Deserialize, Debug, Clone)]

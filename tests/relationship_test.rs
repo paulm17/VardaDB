@@ -8,17 +8,15 @@ use serde_json::Value;
 #[tokio::test]
 async fn test_relationship_flow() {
     let dir = tempdir().unwrap();
-    let storage = Arc::new(Storage::new(dir.path()).unwrap());
+    let storage = Arc::new(Storage::new(dir.path(), None).unwrap());
     
     // 1. Define Schema with Relationships
     let sdl = "
         type User {
-            id: ID!
             name: String
             posts: [Post]
         }
         type Post {
-            id: ID!
             title: String
             author: User
         }
@@ -27,50 +25,50 @@ async fn test_relationship_flow() {
     let resolver = Box::new(FjallResolver::new(storage.clone()));
     
     // 2. Create User "Alice"
-    let m1 = "mutation { createUser(input: {name: \"Alice\"}) { id } }";
+    let m1 = "mutation { createUser(input: {name: \"Alice\"}) { uid } }";
     let r1 = schema.execute_with_resolver(m1, resolver.clone()).await;
     let v1: Value = serde_json::from_str(&r1).unwrap();
-    let user_id = v1["data"]["createUser"]["id"].as_str().unwrap().to_string();
+    let user_id = v1["data"]["createUser"]["uid"].as_str().unwrap().to_string();
     println!("Created User: {}", user_id);
 
     // 3. Create Post 1 linked to Alice
-    // Note: 'author' input expects ID as Object { uid: "..." }
+    // Note: 'author' input expects ID as Object { uuid: "..." }
     let m2 = format!(
-        "mutation {{ createPost(input: {{title: \"Post 1\", author: {{ uid: \"{}\" }} }}) {{ id }} }}", 
+        "mutation {{ createPost(input: {{title: \"Post 1\", author: {{ uid: \"{}\" }} }}) {{ uid }} }}", 
         user_id
     );
     let r2 = schema.execute_with_resolver(&m2, resolver.clone()).await;
     let v2: Value = serde_json::from_str(&r2).unwrap();
     assert!(v2["errors"].is_null());
-    let post1_id = v2["data"]["createPost"]["id"].as_str().unwrap().to_string();
+    let post1_id = v2["data"]["createPost"]["uid"].as_str().unwrap().to_string();
 
     // 4. Create Post 2 linked to Alice
     let m3 = format!(
-        "mutation {{ createPost(input: {{title: \"Post 2\", author: {{ uid: \"{}\" }} }}) {{ id }} }}", 
+        "mutation {{ createPost(input: {{title: \"Post 2\", author: {{ uid: \"{}\" }} }}) {{ uid }} }}", 
         user_id
     );
     let r3 = schema.execute_with_resolver(&m3, resolver.clone()).await;
     let v3: Value = serde_json::from_str(&r3).unwrap();
-    let post2_id = v3["data"]["createPost"]["id"].as_str().unwrap().to_string();
+    let post2_id = v3["data"]["createPost"]["uid"].as_str().unwrap().to_string();
 
     // 5. Update Alice to have these posts?
     // Currently we don't have @hasInverse, so we must manually link if we want 2-way.
     // Let's manually link for now to test List Edge.
-    // 'posts' input expects List of Objects [{ uid: "..." }].
+    // 'posts' input expects List of Objects [{ uuid: "..." }].
     // We don't have UPDATE yet. So we create a new user with posts?
     // Or we create another user "Bob" with posts.
     let m4 = format!(
-        "mutation {{ createUser(input: {{name: \"Bob\", posts: [{{ uid: \"{}\" }}, {{ uid: \"{}\" }}] }}) {{ id }} }}",
+        "mutation {{ createUser(input: {{name: \"Bob\", posts: [{{ uid: \"{}\" }}, {{ uid: \"{}\" }}] }}) {{ uid }} }}",
         post1_id, post2_id
     );
     let r4 = schema.execute_with_resolver(&m4, resolver.clone()).await;
     let v4: Value = serde_json::from_str(&r4).unwrap();
     assert!(v4["errors"].is_null());
-    let bob_id = v4["data"]["createUser"]["id"].as_str().unwrap().to_string();
+    let bob_id = v4["data"]["createUser"]["uid"].as_str().unwrap().to_string();
 
     // 6. Verify Post -> Author (1-to-1)
     let q1 = format!(
-        "query {{ getPost(id: \"{}\") {{ title author {{ name }} }} }}",
+        "query {{ getPost(uid: \"{}\") {{ title author {{ name }} }} }}",
         post1_id
     );
     let rq1 = schema.execute_with_resolver(&q1, resolver.clone()).await;
@@ -81,7 +79,7 @@ async fn test_relationship_flow() {
 
     // 7. Verify User -> Posts (1-to-M)
     let q2 = format!(
-        "query {{ getUser(id: \"{}\") {{ name posts {{ title }} }} }}",
+        "query {{ getUser(uid: \"{}\") {{ name posts {{ title }} }} }}",
         bob_id
     );
     let rq2 = schema.execute_with_resolver(&q2, resolver.clone()).await;

@@ -143,4 +143,34 @@ impl Codec {
         
         Ok((timestamp, uid, predicate))
     }
+
+    // --- BM25 Stats ---
+    // Prefix: 0x05
+    // Key: [0x05][Pred][0x00][StatType]
+    // StatType: 0=DocCount, 1=TotalLen, 2=DF(Term)
+    
+    pub fn encode_stat_key(predicate: &str, stat_type: u8, term: Option<&str>) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.push(0x05);
+        buf.extend_from_slice(predicate.as_bytes());
+        buf.push(0x00);
+        buf.push(stat_type);
+        if let Some(t) = term {
+            buf.push(0x00);
+            buf.extend_from_slice(t.as_bytes());
+        }
+        buf
+    }
+
+    // --- Doc Meta (Length) ---
+    // Prefix: 0x06
+    // Key: [0x06][Pred][0x00][UID]
+    pub fn encode_doc_meta_key(predicate: &str, uid: u64) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.push(0x06);
+        buf.extend_from_slice(predicate.as_bytes());
+        buf.push(0x00);
+        buf.write_u64::<BigEndian>(uid).unwrap();
+        buf
+    }
 }

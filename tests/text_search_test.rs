@@ -8,7 +8,7 @@ use serde_json::Value;
 #[tokio::test]
 async fn test_text_search() {
     let dir = tempdir().unwrap();
-    let storage = Arc::new(Storage::new(dir.path()).unwrap());
+    let storage = Arc::new(Storage::new(dir.path(), None).unwrap());
     
     // 1. Define Schema with @search
     let sdl = "
@@ -78,7 +78,7 @@ async fn test_text_search() {
     // allofterms "run" -> Should FAIL (strict)
     // alloftext "run" -> Should PASS (stemmed)
     
-    let run_mut = "mutation { createPost(input: {title: \"Runner\", content: \"I am running fast\"}) { id } }";
+    let run_mut = "mutation { createPost(input: {title: \"Runner\", content: \"I am running fast\"}) { uid } }";
     schema.execute_with_resolver(run_mut, resolver.clone()).await;
     
     // Strict Term Search
@@ -116,12 +116,12 @@ async fn test_text_search() {
     // Find ID first... simplifying test, assume single update by unique logic if needed, 
     // but here we just need to ensure indices update. 
     // Let's create a new node and update it.
-    let create_mut_id = "mutation { createPost(input: {title: \"Temp\", content: \"Old\"}) { id } }";
+    let create_mut_id = "mutation { createPost(input: {title: \"Temp\", content: \"Old\"}) { uid } }";
      let res_create = schema.execute_with_resolver(create_mut_id, resolver.clone()).await;
     let res_create_val: Value = serde_json::from_str(&res_create).unwrap();
-    let uid_str = res_create_val["data"]["createPost"]["id"].as_str().unwrap();
+    let uid_str = res_create_val["data"]["createPost"]["uid"].as_str().unwrap();
     
-    let update_mut = format!("mutation {{ updatePost(id: \"{}\", input: {{title: \"Temp\", content: \"New\"}}) }}", uid_str);
+    let update_mut = format!("mutation {{ updatePost(uid: \"{}\", input: {{title: \"Temp\", content: \"New\"}}) }}", uid_str);
     schema.execute_with_resolver(&update_mut, resolver.clone()).await;
     
     // Search "Old" -> 0

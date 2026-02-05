@@ -9,7 +9,7 @@ use serde_json::Value;
 #[tokio::test]
 async fn test_e2e_storage_query() {
     let dir = tempdir().unwrap();
-    let storage = Arc::new(Storage::new(dir.path()).unwrap());
+    let storage = Arc::new(Storage::new(dir.path(), None).unwrap());
     
     // Seed Data: User 1 -> name: "Alice"
     let uid = 1u64;
@@ -41,8 +41,8 @@ async fn test_e2e_storage_query() {
     let resolver = Box::new(FjallResolver::new(storage.clone()));
     
     // 3. Execute Query
-    // Query: { getUser(id: "1") { name } }
-    let query = "{ getUser(id: \"1\") { name } }"; 
+    // Query: { getUser(uid: "1") { name } }
+    let query = "{ getUser(uid: \"1\") { name } }"; 
          
     let response_json = schema.execute_with_resolver(query, resolver).await;
     

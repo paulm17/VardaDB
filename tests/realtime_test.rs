@@ -20,7 +20,7 @@ async fn test_realtime_subscription() {
     let db_path = tmp_dir.path().join("vardadb_realtime_test");
     // let options = fjall::Config::new(db_path.clone());
     // let keyspace = fjall::Keyspace::open(options).unwrap();
-    let storage = Arc::new(vardadb::storage::backend::Storage::new(db_path).unwrap());
+    let storage = Arc::new(vardadb::storage::backend::Storage::new(db_path, None).unwrap());
     let resolver = Arc::new(FjallResolver::new(storage.clone()));
     
     let schema = Arc::new(Schema::load_from_sdl(SDL).unwrap());

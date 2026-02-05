@@ -6,7 +6,7 @@ use std::sync::Arc;
 #[test]
 fn test_cache_view_creation() {
     let dir = tempdir().unwrap();
-    let storage = Arc::new(Storage::new(dir.path()).unwrap());
+    let storage = Arc::new(Storage::new(dir.path(), None).unwrap());
     
     let manager = CacheManager::new(storage.clone());
     

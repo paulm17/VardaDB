@@ -8,7 +8,7 @@ use serde_json::Value;
 #[tokio::test]
 async fn test_filtering_flow() {
     let dir = tempdir().unwrap();
-    let storage = Arc::new(Storage::new(dir.path()).unwrap());
+    let storage = Arc::new(Storage::new(dir.path(), None).unwrap());
     
     // 1. Define Schema
     let sdl = "

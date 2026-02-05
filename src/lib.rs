@@ -23,17 +23,20 @@ impl crate::engine::resolver::Resolver for DummyResolver {
         _: std::collections::HashMap<String, async_graphql::Value>,
         _: &[String],
         _: &[crate::engine::resolver::InverseInfo],
-        _: &std::collections::HashMap<String, Vec<String>>
+        _: &std::collections::HashMap<String, Vec<String>>,
+        _: Option<&str>
     ) -> Result<u64, String> {
         Ok(0)
     }
     fn scan_nodes(&self, _: &str, _: std::collections::HashMap<String, async_graphql::Value>, _: std::collections::HashMap<String, async_graphql::Value>, _: Option<usize>, _: Option<String>) -> Vec<u64> { vec![] }
-    fn update_node(&self, _: &str, _: u64, _: std::collections::HashMap<String, async_graphql::Value>, _: &[String], _: &[crate::engine::resolver::InverseInfo], _: &std::collections::HashMap<String, Vec<String>>) -> Result<(), String> { Ok(()) }
+    fn update_node(&self, _: &str, _: u64, _: std::collections::HashMap<String, async_graphql::Value>, _: &[String], _: &[crate::engine::resolver::InverseInfo], _: &std::collections::HashMap<String, Vec<String>>, _: Option<&str>) -> Result<(), String> { Ok(()) }
 
     fn delete_node(&self, _: &str, _: u64, _: &[String], _: &[crate::engine::resolver::InverseInfo], _: &std::collections::HashMap<String, Vec<String>>) -> Result<(), String> { Ok(()) }
     fn node_exists(&self, _: &str, _: u64) -> bool { false }
     fn get_node_type(&self, _: u64) -> Option<String> { None }
     fn subscribe_events(&self) -> crate::realtime::bus::EventBus { crate::realtime::bus::EventBus::new() }
+    fn search_vectors(&self, _: &[f64], _: usize) -> Vec<(u64, f64)> { vec![] }
+    fn search_hybrid(&self, _: &str, _: &str, _: &[f64], _: usize) -> Vec<(u64, f64)> { vec![] }
 }
 
 use axum::{
@@ -105,7 +108,7 @@ pub async fn run(config: crate::config::VardaConfig) {
         schema: Arc::new(RwLock::new(Arc::new(initial_schema))),
         storage: storage.clone(),
         cache: Arc::new(crate::engine::cache::QueryCache::new(100)), // Bounded LRU: 100 entries
-        event_bus: shared_event_bus,
+        event_bus: shared_event_bus.clone(),
     };
 
     // Start Anti-Gravity (Zenoh) Sync
@@ -132,16 +135,38 @@ pub async fn run(config: crate::config::VardaConfig) {
         .route("/playground", get(playground_handler))
         .route("/admin/schema", post(admin_schema_handler))
         .layer(CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any))
-        .with_state(state);
+        .with_state(state.clone());
 
     // 4. Run Server
-    let addr = format!("0.0.0.0:{}", port);
-    let listener = TcpListener::bind(&addr).await.expect("Failed to bind to address");
-    println!("Server running at http://127.0.0.1:{}", port);
-    println!("GraphiQL playground at http://127.0.0.1:{}/playground", port);
-    println!("Admin Schema Endpoint at http://127.0.0.1:{}/admin/schema", port);
-    
-    axum::serve(listener, app).await.expect("Server error");
+    if config.server.is_mcp {
+        // Run MCP Server
+        let mcp_schema = state.schema.clone();
+        // Since resolver is not cloneable as Box<dyn Resolver>, we need to create a new one or rethink structure.
+        // But we have `resolver` variable above (FjallResolver). We can clone it before boxing?
+        // Wait, line 95: `let resolver = FjallResolver::with_bus...`. This is concrete type.
+        // We boxing it? Not yet in `run`.
+        
+        let mcp_resolver = Box::new(FjallResolver::with_bus(storage.clone(), shared_event_bus.clone()));
+        
+        // We can use the concrete resolver we created earlier:
+        // let mcp_resolver = Box::new(resolver.clone()); // FjallResolver implements Clone? Let's assume so or check.
+        // Looking at `src/bridge/fjall_resolver.rs`, it derives Clone.
+        
+        let mcp_server = crate::bridge::mcp::MCPServer::new(mcp_schema, mcp_resolver);
+        
+        if let Err(e) = mcp_server.run_stdio_server().await {
+            eprintln!("MCP Server Error: {}", e);
+        }
+    } else {
+        // Run HTTP Server
+        let addr = format!("0.0.0.0:{}", port);
+        let listener = TcpListener::bind(&addr).await.expect("Failed to bind to address");
+        println!("Server running at http://127.0.0.1:{}", port);
+        println!("GraphiQL playground at http://127.0.0.1:{}/playground", port);
+        println!("Admin Schema Endpoint at http://127.0.0.1:{}/admin/schema", port);
+        
+        axum::serve(listener, app).await.expect("Server error");
+    }
 }
 
 async fn graphql_handler(

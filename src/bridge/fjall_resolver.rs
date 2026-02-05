@@ -288,32 +288,204 @@ impl FjallResolver {
          Ok(())
     }
 
+    // Helper for BM25 Stats
+    fn increment_stat(&self, key: &[u8], delta: i64) -> Result<(), String> {
+        let val_opt = self.storage.main_keyspace.get(key).map_err(|e| e.to_string())?;
+        let current = if let Some(bytes) = val_opt {
+            if bytes.len() >= 8 {
+               byteorder::BigEndian::read_i64(&bytes)
+            } else { 0 }
+        } else { 0 };
+        
+        let new_val = current + delta;
+        let mut buf = [0u8; 8];
+        byteorder::BigEndian::write_i64(&mut buf, new_val);
+        self.storage.main_keyspace.insert(key, &buf).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    fn get_stat(&self, key: &[u8]) -> Option<i64> {
+         if let Ok(Some(bytes)) = self.storage.main_keyspace.get(key) {
+             if bytes.len() >= 8 {
+                 Some(byteorder::BigEndian::read_i64(&bytes))
+             } else { None }
+         } else { None }
+    }
+
     fn write_term_index(&self, uid: u64, field: &str, text: &str, strategy: &str) -> Result<(), String> {
-        let terms = crate::engine::tokenizer::Tokenizer::tokenize(text, strategy);
-        for term in terms {
-            // Key: [0x04][Pred][Startgy?][Term][UID]
-            // We need to encode Strategy in the key now!
-            // Or prefix field name? "name" -> "name.hash", "name.term"
-            // Dgraph does <predicate> <token> <uid>. But it separates indices.
-            // Let's use `Codec::encode_term_index_key(field, &term, uid)` but modify field to `field + "." + strategy`?
-            // "name.exact", "name.hash".
-            // This is clean.
-            let index_field = if strategy == "term" { field.to_string() } else { format!("{}.{}", field, strategy) };
-            
+        let tokens = crate::engine::tokenizer::Tokenizer::tokenize(text, strategy);
+        let doc_len = tokens.len() as i64;
+        let index_field = if strategy == "term" { field.to_string() } else { format!("{}.{}", field, strategy) };
+
+        // 1. Update Doc Count (N)
+        let n_key = Codec::encode_stat_key(&index_field, 0, None);
+        self.increment_stat(&n_key, 1)?;
+
+        // 2. Update Total Length (for AvgDL)
+        let len_key = Codec::encode_stat_key(&index_field, 1, None);
+        self.increment_stat(&len_key, doc_len)?;
+        
+        // 3. Store Doc Length (Per Doc)
+        let doc_meta_key = Codec::encode_doc_meta_key(&index_field, uid);
+        let len_u32 = doc_len as u32;
+        self.storage.insert(&doc_meta_key, &len_u32.to_be_bytes()).map_err(|e| e.to_string())?;
+
+        // 4. Count Term Frequencies
+        let mut tf_map: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+        for term in tokens {
+            *tf_map.entry(term).or_insert(0) += 1;
+        }
+
+        // 5. Update Index and DF
+        for (term, tf) in tf_map {
             let key = Codec::encode_term_index_key(&index_field, &term, uid);
-            self.storage.insert(&key, &[]).map_err(|e| e.to_string())?;
+            // Value = TF (u32)
+            self.storage.insert(&key, &tf.to_be_bytes()).map_err(|e| e.to_string())?;
+
+            // Increment DF
+            let df_key = Codec::encode_stat_key(&index_field, 2, Some(&term));
+            self.increment_stat(&df_key, 1)?;
         }
         Ok(())
     }
 
     fn remove_term_index(&self, uid: u64, field: &str, text: &str, strategy: &str) -> Result<(), String> {
         let tokens = crate::engine::tokenizer::Tokenizer::tokenize(text, strategy);
+        let doc_len = tokens.len() as i64;
+        let index_field = if strategy == "term" { field.to_string() } else { format!("{}.{}", field, strategy) };
+
+        // 1. Decrement Doc Count (N)
+        let n_key = Codec::encode_stat_key(&index_field, 0, None);
+        self.increment_stat(&n_key, -1)?;
+
+        // 2. Decrement Total Length
+        let len_key = Codec::encode_stat_key(&index_field, 1, None);
+        self.increment_stat(&len_key, -doc_len)?;
+        
+        // 3. Remove Doc Length
+        let doc_meta_key = Codec::encode_doc_meta_key(&index_field, uid);
+        self.storage.remove(&doc_meta_key).map_err(|e| e.to_string())?;
+
+        // 4. Count TF
+        let mut tf_map: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
         for term in tokens {
-             let index_field = if strategy == "term" { field.to_string() } else { format!("{}.{}", field, strategy) };
+            *tf_map.entry(term).or_insert(0) += 1;
+        }
+
+        for (term, _) in tf_map {
             let key = Codec::encode_term_index_key(&index_field, &term, uid);
             self.storage.remove(&key).map_err(|e| e.to_string())?;
+
+            // Decrement DF
+            let df_key = Codec::encode_stat_key(&index_field, 2, Some(&term));
+            self.increment_stat(&df_key, -1)?;
         }
         Ok(())
+    }
+    
+    // Ranked Search (BM25)
+    pub fn search_text_bm25(&self, query: &str, field: &str, strategy: &str, k: usize) -> Vec<(u64, f64)> {
+        let index_field = if strategy == "term" { field.to_string() } else { format!("{}.{}", field, strategy) };
+        let tokens = crate::engine::tokenizer::Tokenizer::tokenize(query, strategy);
+        if tokens.is_empty() { return vec![]; }
+        
+        // 1. Get Global Stats
+        let n_key = Codec::encode_stat_key(&index_field, 0, None);
+        let n: f64 = self.get_stat(&n_key).unwrap_or(0) as f64;
+        
+        let len_key = Codec::encode_stat_key(&index_field, 1, None);
+        let total_len: f64 = self.get_stat(&len_key).unwrap_or(0) as f64;
+        let avg_dl = if n > 0.0 { total_len / n } else { 0.0 };
+
+        if n == 0.0 { return vec![]; }
+
+        let k1 = 1.2;
+        let b = 0.75;
+        
+        let mut scores: std::collections::HashMap<u64, f64> = std::collections::HashMap::new();
+
+        for term in tokens {
+            // Get DF
+            let df_key = Codec::encode_stat_key(&index_field, 2, Some(&term));
+            let df: f64 = self.get_stat(&df_key).unwrap_or(0) as f64;
+            
+            if df == 0.0 { continue; }
+            
+            // IDF (Dgraph uses this variant usually)
+            let idf = ((n - df + 0.5) / (df + 0.5) + 1.0).ln();
+            
+            // Scan Index
+            let prefix = Codec::encode_term_index_prefix(&index_field, &term);
+            use std::ops::Bound;
+            // Note: Directly accessing self.storage.main_keyspace from here requires pub visibility or getter.
+            // backend.rs has `pub main_keyspace`.
+            let iter = self.storage.main_keyspace.range((Bound::Included(prefix.clone()), Bound::Unbounded));
+            
+            for guard in iter {
+                if let Ok((key, val)) = guard.into_inner() {
+                    if !key.starts_with(&prefix) { break; }
+                    
+                    // Decode UID and TF
+                    if key.len() < 8 { continue; }
+                    let uid = byteorder::BigEndian::read_u64(&key[key.len()-8..]);
+                    let tf = if val.len() >= 4 { byteorder::BigEndian::read_u32(&val) as f64 } else { 1.0 };
+                    
+                    // Get document length (dl)
+                    let dl_key = Codec::encode_doc_meta_key(&index_field, uid);
+                    let dl = if let Ok(Some(bytes)) = self.storage.main_keyspace.get(&dl_key) {
+                        if bytes.len() >= 4 { byteorder::BigEndian::read_u32(&bytes) as f64 } else { 10.0 }
+                    } else { 10.0 };
+                    
+                    let score = idf * (tf * (k1 + 1.0)) / (tf + k1 * (1.0 - b + b * (dl / avg_dl)));
+                    
+                    *scores.entry(uid).or_insert(0.0) += score;
+                }
+            }
+        }
+        
+        // Sort and Take K
+        let mut result: Vec<(u64, f64)> = scores.into_iter().collect();
+        result.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        result.truncate(k);
+        result
+    }
+
+    // Hybrid Search (RRF)
+    pub fn search_hybrid(&self, text_query: &str, field: &str, vector: &[f64], k: usize) -> Vec<(u64, f64)> {
+        let k_limit = k * 2; // Fetch more candidates
+        
+        // 1. Vector Search
+        let vec_res = match self.storage.search_vectors(vector, k_limit) {
+            Ok(res) => res, // [(uid, dist)]
+            Err(_) => vec![]
+        };
+        
+        // 2. Text Search (Assuming fulltext strategy)
+        let text_res = self.search_text_bm25(text_query, field, "fulltext", k_limit); // [(uid, score)]
+        
+        // 3. RRF Fusion
+        // Score = 1 / (C + rank)
+        let c_const = 60.0;
+        let mut rrf_scores: std::collections::HashMap<u64, f64> = std::collections::HashMap::new();
+        
+        // Process Vector Results (Rank based on distance asc: 0 is best)
+        for (rank, (uid, _dist)) in vec_res.iter().enumerate() {
+            let score = 1.0 / (c_const + (rank as f64) + 1.0);
+            *rrf_scores.entry(*uid).or_insert(0.0) += score;
+        }
+
+        // Process Text Results (Rank based on score desc: 0 is best)
+        for (rank, (uid, _score)) in text_res.iter().enumerate() {
+            let score = 1.0 / (c_const + (rank as f64) + 1.0);
+            *rrf_scores.entry(*uid).or_insert(0.0) += score;
+        }
+        
+        // Result sorted by RRF Score DESC
+        let mut result: Vec<(u64, f64)> = rrf_scores.into_iter().collect();
+        result.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        result.truncate(k);
+        
+        result
     }
 
 
@@ -1012,7 +1184,11 @@ impl FjallResolver {
         let type_key = Codec::encode_type_index_key(type_name, uid);
         self.storage.remove(&type_key).map_err(|e| e.to_string())?;
 
-        // 4. Remove Data Keys (Scan Prefix)
+        // 4. Remove Vector Data (Soft Delete)
+        // We delete indiscriminately; if no vector existed, it's a safe no-op.
+        self.storage.delete_vector(uid).map_err(|e| e.to_string())?;
+
+        // 5. Remove Data Keys (Scan Prefix)
         let prefix = Codec::encode_data_prefix(uid);
         use std::ops::Bound;
         let iter = self.storage.main_keyspace.range((Bound::Included(prefix.clone()), Bound::Unbounded));
@@ -1083,6 +1259,20 @@ impl FjallResolver {
 }
 
 impl Resolver for FjallResolver {
+    fn search_vectors(&self, query: &[f64], k: usize) -> Vec<(u64, f64)> {
+        match self.storage.search_vectors(query, k) {
+            Ok(res) => res,
+            Err(e) => {
+                eprintln!("Vector Search Error: {}", e);
+                vec![]
+            }
+        }
+    }
+
+    fn search_hybrid(&self, text: &str, field: &str, vector: &[f64], k: usize) -> Vec<(u64, f64)> {
+        self.search_hybrid(text, field, vector, k)
+    }
+
     fn resolve(&self, uid: u64, field_name: &str) -> Option<Value> {
         if field_name == "id" {
             return Some(Value::String(uid.to_string()));
@@ -1116,10 +1306,24 @@ impl Resolver for FjallResolver {
         }
     }
 
-    fn create_node(&self, type_name: &str, fields: std::collections::HashMap<String, Value>, uniques: &[String], inverses: &[crate::engine::resolver::InverseInfo], search_fields: &std::collections::HashMap<String, Vec<String>>) -> Result<u64, String> {
+    fn create_node(&self, type_name: &str, fields: std::collections::HashMap<String, Value>, uniques: &[String], inverses: &[crate::engine::resolver::InverseInfo], search_fields: &std::collections::HashMap<String, Vec<String>>, vector_field: Option<&str>) -> Result<u64, String> {
         let start = std::time::SystemTime::now();
         let since_the_epoch = start.duration_since(std::time::UNIX_EPOCH).expect("Time went backwards");
         let uid = since_the_epoch.as_nanos() as u64;
+
+        if let Some(vf) = vector_field {
+            if let Some(val) = fields.get(vf) {
+                if let Value::List(list) = val {
+                    let vec_data: Vec<f64> = list.iter().filter_map(|v| match v {
+                        Value::Number(n) => n.as_f64(),
+                        _ => None
+                    }).collect();
+                    if !vec_data.is_empty() {
+                        self.storage.put_vector(uid, vec_data).map_err(|e| e.to_string())?;
+                    }
+                }
+            }
+        }
 
         let payload: std::collections::HashMap<String, serde_json::Value> = fields.iter()
             .map(|(k, v)| (k.clone(), serde_json::to_value(v).unwrap_or(serde_json::Value::Null)))
@@ -1296,7 +1500,21 @@ impl Resolver for FjallResolver {
         uids
     }
 
-    fn update_node(&self, type_name: &str, uid: u64, fields: std::collections::HashMap<String, Value>, uniques: &[String], inverses: &[crate::engine::resolver::InverseInfo], search_fields: &std::collections::HashMap<String, Vec<String>>) -> Result<(), String> {
+    fn update_node(&self, type_name: &str, uid: u64, fields: std::collections::HashMap<String, Value>, uniques: &[String], inverses: &[crate::engine::resolver::InverseInfo], search_fields: &std::collections::HashMap<String, Vec<String>>, vector_field: Option<&str>) -> Result<(), String> {
+        if let Some(vf) = vector_field {
+            if let Some(val) = fields.get(vf) {
+                if let Value::List(list) = val {
+                    let vec_data: Vec<f64> = list.iter().filter_map(|v| match v {
+                        Value::Number(n) => n.as_f64(),
+                        _ => None
+                    }).collect();
+                     if !vec_data.is_empty() {
+                        self.storage.put_vector(uid, vec_data).map_err(|e| e.to_string())?;
+                    }
+                }
+            }
+        }
+
         let payload: std::collections::HashMap<String, serde_json::Value> = fields.iter()
             .map(|(k, v)| (k.clone(), serde_json::to_value(v).unwrap_or(serde_json::Value::Null)))
             .collect();

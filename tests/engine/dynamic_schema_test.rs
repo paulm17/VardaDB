@@ -32,6 +32,8 @@ impl Resolver for MockDynamicResolver {
     fn node_exists(&self, _: &str, _: u64) -> bool { true }
     fn get_node_type(&self, _: u64) -> Option<String> { None }
     fn subscribe_events(&self) -> vardadb::realtime::bus::EventBus { vardadb::realtime::bus::EventBus::new() }
+    fn search_vectors(&self, _: &[f64], _: usize) -> Vec<(u64, f64)> { vec![] }
+    fn search_hybrid(&self, _: &str, _: &str, _: &[f64], _: usize) -> Vec<(u64, f64)> { vec![] }
 }
 
 impl MockDynamicResolver {

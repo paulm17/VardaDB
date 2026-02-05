@@ -12,6 +12,7 @@ struct TypeMetadata {
     interface_implementations: Vec<String>, // Interfaces this type implements
     validate_fields: std::collections::HashMap<String, Vec<ValidationRule>>,
     relations: std::collections::HashMap<String, String>,
+    vector_field: Option<String>,
     kind: TypeKind,
 }
 
@@ -117,6 +118,8 @@ impl Schema {
                         let mut inverses: Vec<crate::engine::resolver::InverseInfo> = Vec::new();
                         let mut type_search_fields: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
                         let mut cascade_fields: Vec<(String, String)> = Vec::new();
+
+                        let mut vector_field: Option<String> = None;
                         let mut relations: std::collections::HashMap<String, String> = std::collections::HashMap::new();
 
                         for field in &obj_def.fields {
@@ -163,6 +166,10 @@ impl Schema {
                                     },
                                 };
                                 cascade_fields.push((field_name.clone(), field_type_name));
+                            }
+                            // Vector
+                            if field.node.directives.iter().any(|d| d.node.name.node == "vector") {
+                                vector_field = Some(field_name.clone());
                             }
 
                             // Inverse
@@ -266,6 +273,7 @@ impl Schema {
                             interface_implementations: interfaces,
                             validate_fields,
                             relations,
+                            vector_field,
                             kind: TypeKind::Object,
                         });
                     },
@@ -279,6 +287,7 @@ impl Schema {
                             interface_implementations: vec![],
                             validate_fields: std::collections::HashMap::new(),
                             relations: std::collections::HashMap::new(),
+                            vector_field: None,
                             kind: TypeKind::Interface,
                         });
                     },
@@ -293,6 +302,7 @@ impl Schema {
                             interface_implementations: vec![],
                             validate_fields: std::collections::HashMap::new(),
                             relations: std::collections::HashMap::new(),
+                            vector_field: None,
                             kind: TypeKind::Union(possible_types),
                         });
                     },
@@ -560,19 +570,20 @@ impl Schema {
                             // Input fields
                              if is_scalar && field_type_name != "ID" {
                                 let input_ty_ref = match field_type_name.as_str() {
-                                    "String" => dynamic::TypeRef::named(dynamic::TypeRef::STRING),
-                                    "Int" => dynamic::TypeRef::named(dynamic::TypeRef::INT),
-                                    "Boolean" => dynamic::TypeRef::named(dynamic::TypeRef::BOOLEAN),
-                                    "Float" => dynamic::TypeRef::named(dynamic::TypeRef::FLOAT),
-                                    "Int64" => dynamic::TypeRef::named("Int64"),
-                                    "DateTime" => dynamic::TypeRef::named("DateTime"),
-                                    "GeoPoint" => dynamic::TypeRef::named("GeoPointInput"),
+                                    "String" => if is_list { dynamic::TypeRef::named_list(dynamic::TypeRef::STRING) } else { dynamic::TypeRef::named(dynamic::TypeRef::STRING) },
+                                    "Int" => if is_list { dynamic::TypeRef::named_list(dynamic::TypeRef::INT) } else { dynamic::TypeRef::named(dynamic::TypeRef::INT) },
+                                    "Boolean" => if is_list { dynamic::TypeRef::named_list(dynamic::TypeRef::BOOLEAN) } else { dynamic::TypeRef::named(dynamic::TypeRef::BOOLEAN) },
+                                    "Float" => if is_list { dynamic::TypeRef::named_list(dynamic::TypeRef::FLOAT) } else { dynamic::TypeRef::named(dynamic::TypeRef::FLOAT) },
+                                    "Int64" => if is_list { dynamic::TypeRef::named_list("Int64") } else { dynamic::TypeRef::named("Int64") },
+                                    "DateTime" => if is_list { dynamic::TypeRef::named_list("DateTime") } else { dynamic::TypeRef::named("DateTime") },
+                                    "GeoPoint" => if is_list { dynamic::TypeRef::named_list("GeoPointInput") } else { dynamic::TypeRef::named("GeoPointInput") },
                                     _ => {
-                                        if crate::engine::scalars::is_scalar_type(&field_type_name) {
-                                            dynamic::TypeRef::named(field_type_name.clone())
+                                        let base_name = if crate::engine::scalars::is_scalar_type(&field_type_name) {
+                                            field_type_name.clone()
                                         } else {
-                                            dynamic::TypeRef::named(format!("{}Input", field_type_name))
-                                        }
+                                            format!("{}Input", field_type_name)
+                                        };
+                                        if is_list { dynamic::TypeRef::named_list(base_name) } else { dynamic::TypeRef::named(base_name) }
                                     },
                                 };
                                 input = input.field(dynamic::InputValue::new(field_name.clone(), input_ty_ref.clone()));
@@ -656,7 +667,7 @@ impl Schema {
                             dynamic::FieldFuture::new(async move {
                                 use crate::engine::resolver::Resolver;
                                 let resolver = ctx.data::<Box<dyn Resolver + Send + Sync>>().unwrap();
-                                if let Ok(id_arg) = ctx.args.try_get("id") {
+                                if let Ok(id_arg) = ctx.args.try_get("uid") {
                                     let id_str = id_arg.string()?.to_string();
                                     let uid = if id_str.starts_with("0x") { u64::from_str_radix(&id_str[2..], 16).unwrap_or(0) } else { id_str.parse::<u64>().unwrap_or(0) };
                                     if uid > 0 && resolver.node_exists(&t_name, uid) { return Ok(Some(dynamic::FieldValue::owned_any(uid))); }
@@ -670,7 +681,7 @@ impl Schema {
                                 }
                                 Ok(None)
                             })
-                        }).argument(dynamic::InputValue::new("id", dynamic::TypeRef::named(dynamic::TypeRef::ID)));
+                        }).argument(dynamic::InputValue::new("uid", dynamic::TypeRef::named(dynamic::TypeRef::ID)));
                         for f in unique_fields { query_field = query_field.argument(dynamic::InputValue::new(f.clone(), dynamic::TypeRef::named(dynamic::TypeRef::STRING))); }
                         query_fields.push(query_field);
 
@@ -721,7 +732,7 @@ impl Schema {
                              let s_fields = search_fields_update.clone();
                              let meta_arc = meta_arc_update.clone();
                              dynamic::FieldFuture::new(async move {
-                                let id_arg = ctx.args.try_get("id")?;
+                                let id_arg = ctx.args.try_get("uid")?;
                                 let uid = id_arg.string()?.parse::<u64>().map_err(|_| "Invalid ID")?;
                                 let input_arg = ctx.args.try_get("input")?;
                                 let fields: std::collections::HashMap<String, async_graphql::Value> = input_arg.deserialize()?;
@@ -732,12 +743,12 @@ impl Schema {
 
                                 use crate::engine::resolver::Resolver;
                                 let resolver = ctx.data::<Box<dyn Resolver + Send + Sync>>().unwrap();
-                                match resolver.update_node(&t_name, uid, fields, &u_fields, &inv_fields, &s_fields) {
+                                match resolver.update_node(&t_name, uid, fields, &u_fields, &inv_fields, &s_fields, meta.vector_field.as_deref()) {
                                     Ok(_) => Ok(Some(dynamic::FieldValue::value(async_graphql::Value::Boolean(true)))),
                                     Err(e) => Err(e.into()),
                                 }
                              })
-                        }).argument(dynamic::InputValue::new("id", dynamic::TypeRef::named_nn(dynamic::TypeRef::ID)))
+                        }).argument(dynamic::InputValue::new("uid", dynamic::TypeRef::named_nn(dynamic::TypeRef::ID)))
                           .argument(dynamic::InputValue::new("input", dynamic::TypeRef::named_nn(format!("{}Input", type_name)))));
                           
                         // 5. Delete (Recall: RECURSIVE DELETE LOGIC HERE)
@@ -749,7 +760,7 @@ impl Schema {
                             let t_name = type_name_delete.clone();
                             let meta_arc = meta_arc_delete.clone();
                             dynamic::FieldFuture::new(async move {
-                                let id_arg = ctx.args.try_get("id")?;
+                                let id_arg = ctx.args.try_get("uid")?;
                                 let uid = id_arg.string()?.parse::<u64>().map_err(|_| "Invalid ID")?;
                                 
                                 use crate::engine::resolver::Resolver;
@@ -801,7 +812,7 @@ impl Schema {
                                     Err(e) => Err(e.into()),
                                 }
                             })
-                        }).argument(dynamic::InputValue::new("id", dynamic::TypeRef::named_nn(dynamic::TypeRef::ID))));
+                        }).argument(dynamic::InputValue::new("uid", dynamic::TypeRef::named_nn(dynamic::TypeRef::ID))));
 
                     },
                     AstTypeKind::Interface(int_def) => {
@@ -972,6 +983,22 @@ impl Schema {
                 })
             }));
 
+
+        // Define SearchResult Object for Vector Search
+        let search_result_obj = dynamic::Object::new("SearchResult")
+            .field(dynamic::Field::new("uid", dynamic::TypeRef::named_nn("ID"), |ctx| {
+                dynamic::FieldFuture::new(async move {
+                    let val = ctx.parent_value.try_downcast_ref::<(u64, f64)>()?;
+                    Ok(Some(dynamic::FieldValue::value(async_graphql::Value::String(val.0.to_string()))))
+                })
+            }))
+            .field(dynamic::Field::new("distance", dynamic::TypeRef::named_nn("Float"), |ctx| {
+                dynamic::FieldFuture::new(async move {
+                    let val = ctx.parent_value.try_downcast_ref::<(u64, f64)>()?;
+                    Ok(Some(dynamic::FieldValue::value(async_graphql::Value::Number(async_graphql::Number::from_f64(val.1).unwrap()))))
+                })
+            }));
+
         // Generic Subscription Field: "subscribe(types: [String!])"
         subscription_fields.push(dynamic::SubscriptionField::new("event", dynamic::TypeRef::named_nn("MutationEvent"), |ctx| {
             dynamic::SubscriptionFieldFuture::new(async move {
@@ -1044,6 +1071,51 @@ impl Schema {
         // Build Schema
         let mut query_root = dynamic::Object::new("Query");
         for field in query_fields { query_root = query_root.field(field); }
+
+        // Inject Vector Search Query
+        query_root = query_root.field(dynamic::Field::new("search", dynamic::TypeRef::named_nn_list("SearchResult"), |ctx| {
+            dynamic::FieldFuture::new(async move {
+                let vector: Vec<f64> = ctx.args.try_get("vector")?.list()?.iter()
+                    .map(|v| v.f64().unwrap_or(0.0))
+                    .collect();
+                
+                let k = ctx.args.try_get("k").ok().and_then(|v| v.u64().ok()).unwrap_or(10) as usize;
+
+                use crate::engine::resolver::Resolver;
+                let resolver = ctx.data::<Box<dyn Resolver + Send + Sync>>().unwrap();
+                
+                let results = resolver.search_vectors(&vector, k);
+                let list: Vec<dynamic::FieldValue> = results.into_iter().map(|r| dynamic::FieldValue::owned_any(r)).collect();
+                
+                Ok(Some(dynamic::FieldValue::list(list)))
+            })
+        })
+        .argument(dynamic::InputValue::new("vector", dynamic::TypeRef::named_nn_list(dynamic::TypeRef::FLOAT)))
+        .argument(dynamic::InputValue::new("k", dynamic::TypeRef::named(dynamic::TypeRef::INT))));
+
+        // Inject Hybrid Search Query
+        query_root = query_root.field(dynamic::Field::new("hybridSearch", dynamic::TypeRef::named_nn_list("SearchResult"), |ctx| {
+            dynamic::FieldFuture::new(async move {
+                let vector: Vec<f64> = ctx.args.try_get("vector")?.list()?.iter()
+                    .map(|v| v.f64().unwrap_or(0.0))
+                    .collect();
+                let text = ctx.args.try_get("text")?.string()?.to_string();
+                let field = ctx.args.try_get("field")?.string()?.to_string();
+                let k = ctx.args.try_get("k").ok().and_then(|v| v.u64().ok()).unwrap_or(10) as usize;
+
+                use crate::engine::resolver::Resolver;
+                let resolver = ctx.data::<Box<dyn Resolver + Send + Sync>>().unwrap();
+                
+                let results = resolver.search_hybrid(&text, &field, &vector, k);
+                let list: Vec<dynamic::FieldValue> = results.into_iter().map(|r| dynamic::FieldValue::owned_any(r)).collect();
+                
+                Ok(Some(dynamic::FieldValue::list(list)))
+            })
+        })
+        .argument(dynamic::InputValue::new("vector", dynamic::TypeRef::named_nn_list(dynamic::TypeRef::FLOAT)))
+        .argument(dynamic::InputValue::new("text", dynamic::TypeRef::named_nn(dynamic::TypeRef::STRING)))
+        .argument(dynamic::InputValue::new("field", dynamic::TypeRef::named_nn(dynamic::TypeRef::STRING)))
+        .argument(dynamic::InputValue::new("k", dynamic::TypeRef::named(dynamic::TypeRef::INT))));
         
         let mut mutation_root = dynamic::Object::new("Mutation");
         for field in mutation_fields { mutation_root = mutation_root.field(field); }
@@ -1057,6 +1129,7 @@ impl Schema {
         schema_builder = schema_builder.register(subscription_root);
         schema_builder = schema_builder.register(mutation_type_enum);
         schema_builder = schema_builder.register(mutation_event_obj);
+        schema_builder = schema_builder.register(search_result_obj);
 
         types.push(dynamic::Type::Scalar(dynamic::Scalar::new("Int64")));
         types.push(dynamic::Type::Scalar(dynamic::Scalar::new("DateTime")));
@@ -1383,7 +1456,7 @@ fn deep_create_node<'a>(
             validate_input(&fields, &meta.validate_fields)?;
 
             // 3. Create Self
-            resolver.create_node(type_name, fields, &meta.uniques, &meta.inverses, &meta.search_fields)
+            resolver.create_node(type_name, fields, &meta.uniques, &meta.inverses, &meta.search_fields, meta.vector_field.as_deref())
         } else {
             Err(format!("Type {} not found", type_name))
         }

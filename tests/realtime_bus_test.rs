@@ -1,4 +1,4 @@
-use vardadb::realtime::bus::{EventBus, MutationEvent, MutationType};
+use vardadb::realtime::bus::{EventBus, MutationEvent, MutationType, MutationSource};
 
 #[tokio::test]
 async fn test_bus_publish_subscribe() {
@@ -10,6 +10,10 @@ async fn test_bus_publish_subscribe() {
         type_name: "User".to_string(),
         uid: 123,
         mutation_type: MutationType::Update,
+        source: MutationSource::Local,
+        payload: None,
+        metadata: None,
+        timestamp: None,
     };
 
     bus.publish(event.clone());

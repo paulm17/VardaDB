@@ -12,7 +12,7 @@ async fn test_execution_flow() {
     let schema = Schema::load_from_sdl(sdl).expect("Failed to load schema");
 
     // 2. Define Query
-    let query = "{ getUser(id: \"1\") { name } }";
+    let query = "{ getUser(uid: \"1\") { name } }";
 
     // 3. Execute with Mock Resolver
     use vardadb::engine::resolver::Resolver;
@@ -37,15 +37,17 @@ async fn test_execution_flow() {
             None
         }
 
-        fn create_node(&self, _type_name: &str, _fields: std::collections::HashMap<String, async_graphql::Value>, _uniques: &[String], _inverses: &[vardadb::engine::resolver::InverseInfo], _search: &std::collections::HashMap<String, Vec<String>>) -> Result<u64, String> {
+        fn create_node(&self, _type_name: &str, _fields: std::collections::HashMap<String, async_graphql::Value>, _uniques: &[String], _inverses: &[vardadb::engine::resolver::InverseInfo], _search: &std::collections::HashMap<String, Vec<String>>, _: Option<&str>) -> Result<u64, String> {
              Ok(100)
         }
         fn scan_nodes(&self, _t: &str, _f: std::collections::HashMap<String, async_graphql::Value>, _sort: std::collections::HashMap<String, async_graphql::Value>, _lim: Option<usize>, _cur: Option<String>) -> Vec<u64> { vec![] }
-        fn update_node(&self, _: &str, _: u64, _: std::collections::HashMap<String, async_graphql::Value>, _: &[String], _: &[vardadb::engine::resolver::InverseInfo], _search: &std::collections::HashMap<String, Vec<String>>) -> Result<(), String> { Ok(()) }
+        fn update_node(&self, _: &str, _: u64, _: std::collections::HashMap<String, async_graphql::Value>, _: &[String], _: &[vardadb::engine::resolver::InverseInfo], _search: &std::collections::HashMap<String, Vec<String>>, _: Option<&str>) -> Result<(), String> { Ok(()) }
         fn delete_node(&self, _: &str, _: u64, _: &[String], _: &[vardadb::engine::resolver::InverseInfo], _search: &std::collections::HashMap<String, Vec<String>>) -> Result<(), String> { Ok(()) }
         fn node_exists(&self, _: &str, _: u64) -> bool { true }
         fn get_node_type(&self, _: u64) -> Option<String> { None }
         fn subscribe_events(&self) -> vardadb::realtime::bus::EventBus { vardadb::realtime::bus::EventBus::new() }
+        fn search_vectors(&self, _: &[f64], _: usize) -> Vec<(u64, f64)> { vec![] }
+        fn search_hybrid(&self, _: &str, _: &str, _: &[f64], _: usize) -> Vec<(u64, f64)> { vec![] }
     }
     
     let resolver = Box::new(MockMapResolver::default());

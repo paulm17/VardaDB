@@ -9,7 +9,7 @@ use async_graphql::Value;
 #[test]
 fn test_bridge_resolution() {
     let dir = tempdir().unwrap();
-    let storage = Arc::new(Storage::new(dir.path()).unwrap());
+    let storage = Arc::new(Storage::new(dir.path(), None).unwrap());
     
     // 1. Setup Data manually (Stubbing the "Mutation" part)
     // User: Alice (UID 100)

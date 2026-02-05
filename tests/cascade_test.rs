@@ -8,7 +8,7 @@ async fn test_cascade_delete() {
     use vardadb::storage::backend::Storage; // Correct struct name
 
     let tmp_dir = tempfile::tempdir().unwrap();
-    let storage = Storage::new(tmp_dir.path()).unwrap();
+    let storage = Storage::new(tmp_dir.path(), None).unwrap();
     // Assuming FjallResolver::new takes Storage (or Arc<Storage>?)
     // Let's check FjallResolver signature. Usually it takes Arc<Storage> or just Storage if lightweight.
     // Based on previous code, it likely takes `Storage` or `Arc<Storage>`. Storage holds Keyspace (Arc-like internally) + Partition (Arc-like).
@@ -18,12 +18,10 @@ async fn test_cascade_delete() {
     // Schema with Cascade
     let sdl = "
         type User {
-            id: ID
             name: String
             posts: [Post] @cascade
         }
         type Post {
-            id: ID
             title: String
             author: User @hasInverse(field: \"posts\")
         }
@@ -35,44 +33,44 @@ async fn test_cascade_delete() {
     let mutation_create_user = "
         mutation {
             createUser(input: { name: \"Alice\" }) {
-                id
+                uid
             }
         }
     ";
     let res_user = schema.execute_with_resolver(mutation_create_user, resolver.clone()).await;
     let user_json: JsonValue = serde_json::from_str(&res_user).unwrap();
-    let user_id_node = &user_json["data"]["createUser"]["id"];
+    let user_id_node = &user_json["data"]["createUser"]["uid"];
     let user_id_str = user_id_node.as_str().expect("User ID not found"); 
     
     // 2. Create Posts linked to User
     let mutation_create_post1 = format!("
         mutation {{
             createPost(input: {{ title: \"Post 1\", author: \"{}\" }}) {{
-                id
+                uid
             }}
         }}
     ", user_id_str);
     
     let res_post1 = schema.execute_with_resolver(&mutation_create_post1, resolver.clone()).await;
     let post1_json: JsonValue = serde_json::from_str(&res_post1).unwrap();
-    let post1_id_str = post1_json["data"]["createPost"]["id"].as_str().expect("Post1 ID").to_string();
+    let post1_id_str = post1_json["data"]["createPost"]["uid"].as_str().expect("Post1 ID").to_string();
 
     let mutation_create_post2 = format!("
         mutation {{
             createPost(input: {{ title: \"Post 2\", author: \"{}\" }}) {{
-                id
+                uid
             }}
         }}
     ", user_id_str);
     let res_post2 = schema.execute_with_resolver(&mutation_create_post2, resolver.clone()).await;
     let post2_json: JsonValue = serde_json::from_str(&res_post2).unwrap();
-    let post2_id_str = post2_json["data"]["createPost"]["id"].as_str().expect("Post2 ID").to_string();
+    let post2_id_str = post2_json["data"]["createPost"]["uid"].as_str().expect("Post2 ID").to_string();
 
     // Verify Relationship
     let query_user = format!("
         query {{
-            getUser(id: \"{}\") {{
-                posts {{ id }}
+            getUser(uid: \"{}\") {{
+                posts {{ uid }}
             }}
         }}
     ", user_id_str);
@@ -84,7 +82,7 @@ async fn test_cascade_delete() {
     // 3. Delete User (Should Trigger Cascade)
     let mutation_delete = format!("
         mutation {{
-            deleteUser(id: \"{}\")
+            deleteUser(uid: \"{}\")
         }}
     ", user_id_str);
     let res_del = schema.execute_with_resolver(&mutation_delete, resolver.clone()).await;
@@ -93,8 +91,8 @@ async fn test_cascade_delete() {
     // 4. Verify User Gone
     let query_user_gone = format!("
         query {{
-            getUser(id: \"{}\") {{
-                id
+            getUser(uid: \"{}\") {{
+                uid
             }}
         }}
     ", user_id_str);
@@ -104,7 +102,7 @@ async fn test_cascade_delete() {
 
     // 5. Verify Posts Gone (Cascade Worked)
     for pid in [post1_id_str, post2_id_str] {
-        let q = format!("query {{ getPost(id: \"{}\") {{ id }} }}", pid);
+        let q = format!("query {{ getPost(uid: \"{}\") {{ uid }} }}", pid);
         let r = schema.execute_with_resolver(&q, resolver.clone()).await;
         let v: JsonValue = serde_json::from_str(&r).unwrap();
         assert!(v["data"]["getPost"].is_null(), "Post {} should be deleted", pid);

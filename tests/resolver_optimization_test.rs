@@ -10,7 +10,7 @@ use serde_json::Value as JsonValue;
 #[tokio::test]
 async fn test_resolver_optimization() {
     let tmp_dir = tempfile::tempdir().unwrap();
-    let storage = Arc::new(Storage::new(tmp_dir.path()).unwrap());
+    let storage = Arc::new(Storage::new(tmp_dir.path(), None).unwrap());
     let resolver = Box::new(FjallResolver::new(storage.clone()));
 
     // Schema
@@ -44,7 +44,8 @@ async fn test_resolver_optimization() {
         fields0, 
         &["email".to_string()], // Uniques
         &[], // Inverses
-        &search_map // Search
+        &search_map, // Search
+        None
     ).expect("Failed to create User 0");
 
     // Other Users
@@ -60,7 +61,8 @@ async fn test_resolver_optimization() {
             fields,
             &["email".to_string()],
             &[],
-            &search_map
+            &search_map,
+            None
         ).expect(&format!("Failed to create User {}", i));
     }
 

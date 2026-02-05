@@ -8,7 +8,7 @@ use serde_json::Value;
 #[tokio::test]
 async fn test_sorting() {
     let dir = tempdir().unwrap();
-    let storage = Arc::new(Storage::new(dir.path()).unwrap());
+    let storage = Arc::new(Storage::new(dir.path(), None).unwrap());
     
     // 1. Define Schema
     let sdl = "
@@ -30,7 +30,7 @@ async fn test_sorting() {
     
     for (name, age) in ops {
         let mutation = format!(
-            "mutation {{ createUser(input: {{name: \"{}\", age: {}}}) {{ id }} }}",
+            "mutation {{ createUser(input: {{name: \"{}\", age: {}}}) {{ uid }} }}",
             name, age
         );
         schema.execute_with_resolver(&mutation, resolver.clone()).await;

@@ -24,7 +24,7 @@ async fn test_deep_mutation() {
         fn resolve(&self, _uid: u64, _field: &str) -> Option<Value> { None }
         fn find_uid(&self, _index: &str, _value: &str) -> Option<u64> { None }
         fn scan_nodes(&self, _type_name: &str, _filter: HashMap<String, Value>, _sort: HashMap<String, Value>, _first: Option<usize>, _after: Option<String>) -> Vec<u64> { vec![] }
-        fn create_node(&self, type_name: &str, fields: HashMap<String, Value>, _uniques: &[String], _inverses: &[InverseInfo], _search_fields: &HashMap<String, Vec<String>>) -> Result<u64, String> {
+        fn create_node(&self, type_name: &str, fields: HashMap<String, Value>, _uniques: &[String], _inverses: &[InverseInfo], _search_fields: &HashMap<String, Vec<String>>, _: Option<&str>) -> Result<u64, String> {
             let mut calls = self.calls.lock().unwrap();
             
             // Serialize fields for inspection
@@ -37,11 +37,13 @@ async fn test_deep_mutation() {
             *uid_lock += 1;
             Ok(uid)
         }
-        fn update_node(&self, _: &str, _: u64, _: HashMap<String, Value>, _: &[String], _: &[InverseInfo], _: &HashMap<String, Vec<String>>) -> Result<(), String> { Ok(()) }
+        fn update_node(&self, _: &str, _: u64, _: HashMap<String, Value>, _: &[String], _: &[InverseInfo], _: &HashMap<String, Vec<String>>, _: Option<&str>) -> Result<(), String> { Ok(()) }
         fn delete_node(&self, _: &str, _: u64, _: &[String], _: &[InverseInfo], _: &HashMap<String, Vec<String>>) -> Result<(), String> { Ok(()) }
         fn node_exists(&self, _: &str, _: u64) -> bool { true }
         fn get_node_type(&self, _: u64) -> Option<String> { None }
-        fn subscribe_events(&self) -> vardadb::realtime::bus::EventBus { vardadb::realtime::bus::EventBus::new() }
+    fn subscribe_events(&self) -> vardadb::realtime::bus::EventBus { vardadb::realtime::bus::EventBus::new() }
+        fn search_vectors(&self, _: &[f64], _: usize) -> Vec<(u64, f64)> { vec![] }
+        fn search_hybrid(&self, _: &str, _: &str, _: &[f64], _: usize) -> Vec<(u64, f64)> { vec![] }
     }
 
     let calls = Arc::new(Mutex::new(Vec::new()));

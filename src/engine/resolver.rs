@@ -21,8 +21,8 @@ pub trait Resolver {
     fn scan_nodes(&self, type_name: &str, filter: std::collections::HashMap<String, Value>, sort: std::collections::HashMap<String, Value>, first: Option<usize>, after: Option<String>) -> Vec<u64>;
 
     // CRUD with Inverses
-    fn create_node(&self, type_name: &str, fields: std::collections::HashMap<String, Value>, uniques: &[String], inverses: &[InverseInfo], search_fields: &std::collections::HashMap<String, Vec<String>>) -> Result<u64, String>;
-    fn update_node(&self, type_name: &str, uid: u64, fields: std::collections::HashMap<String, Value>, uniques: &[String], inverses: &[InverseInfo], search_fields: &std::collections::HashMap<String, Vec<String>>) -> Result<(), String>;
+    fn create_node(&self, type_name: &str, fields: std::collections::HashMap<String, Value>, uniques: &[String], inverses: &[InverseInfo], search_fields: &std::collections::HashMap<String, Vec<String>>, vector_field: Option<&str>) -> Result<u64, String>;
+    fn update_node(&self, type_name: &str, uid: u64, fields: std::collections::HashMap<String, Value>, uniques: &[String], inverses: &[InverseInfo], search_fields: &std::collections::HashMap<String, Vec<String>>, vector_field: Option<&str>) -> Result<(), String>;
     fn delete_node(&self, type_name: &str, uid: u64, uniques: &[String], inverses: &[InverseInfo], search_fields: &std::collections::HashMap<String, Vec<String>>) -> Result<(), String>;
     
     // Check existence
@@ -34,4 +34,10 @@ pub trait Resolver {
 
     // Realtime Events
     fn subscribe_events(&self) -> crate::realtime::bus::EventBus;
+
+    // Vector Search
+    fn search_vectors(&self, query: &[f64], k: usize) -> Vec<(u64, f64)>;
+
+    // Advanced Search
+    fn search_hybrid(&self, text: &str, field: &str, vector: &[f64], k: usize) -> Vec<(u64, f64)>;
 }

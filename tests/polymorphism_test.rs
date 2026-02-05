@@ -8,29 +8,26 @@ async fn test_polymorphism() {
     use std::sync::Arc;
 
     let tmp_dir = tempfile::tempdir().unwrap();
-    let storage = Storage::new(tmp_dir.path()).unwrap();
+    let storage = Storage::new(tmp_dir.path(), None).unwrap();
     let resolver = Box::new(FjallResolver::new(Arc::new(storage)));
 
     let sdl = "
         interface Node {
-            id: ID
+            uid: ID
             name: String
         }
 
         type User implements Node {
-            id: ID
             name: String
             email: String
         }
 
         type Organization implements Node {
-            id: ID
             name: String
             industry: String
         }
 
         type Container {
-            id: ID
             content: Node
             contents: [Node]
         }
@@ -42,25 +39,25 @@ async fn test_polymorphism() {
     let mut_user = "
         mutation {
             createUser(input: { name: \"Alice\", email: \"alice@example.com\" }) {
-                id
+                uid
             }
         }
     ";
     let res = schema.execute_with_resolver(mut_user, resolver.clone()).await;
     let json: JsonValue = serde_json::from_str(&res).unwrap();
-    let user_id = json["data"]["createUser"]["id"].as_str().unwrap().to_string();
+    let user_id = json["data"]["createUser"]["uid"].as_str().unwrap().to_string();
 
     // 2. Create Organization
     let mut_org = "
         mutation {
             createOrganization(input: { name: \"Acme Corp\", industry: \"Tech\" }) {
-                id
+                uid
             }
         }
     ";
     let res = schema.execute_with_resolver(mut_org, resolver.clone()).await;
     let json: JsonValue = serde_json::from_str(&res).unwrap();
-    let org_id = json["data"]["createOrganization"]["id"].as_str().unwrap().to_string();
+    let org_id = json["data"]["createOrganization"]["uid"].as_str().unwrap().to_string();
 
     // 3. Create Container linked to User (content) and [User, Org] (contents)
     // Note: Input handling for Polymorphic Types in `create` might be tricky.
@@ -77,7 +74,7 @@ async fn test_polymorphism() {
                 content: {{ uid: \"{}\" }},
                 contents: [{{ uid: \"{}\" }}, {{ uid: \"{}\" }}]
             }}) {{
-                id
+                uid
             }}
         }}
     ", user_id, user_id, org_id);
@@ -87,14 +84,14 @@ async fn test_polymorphism() {
     if json["errors"].is_array() {
         panic!("Container creation failed: {:?}", json);
     }
-    let container_id = json["data"]["createContainer"]["id"].as_str().unwrap().to_string();
+    let container_id = json["data"]["createContainer"]["uid"].as_str().unwrap().to_string();
 
     // 4. Query Polymorphically
     let query = format!("
         query {{
-            getContainer(id: \"{}\") {{
+            getContainer(uid: \"{}\") {{
                 content {{
-                    id
+                    uid
                     name
                     ... on User {{
                         email

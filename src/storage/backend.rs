@@ -9,6 +9,7 @@ pub struct Storage {
     pub history_keyspace: Keyspace,     // HISTORY: [Timestamp][UID][Pred] -> [Value]
     pub quarantine_keyspace: Keyspace,  // QUARANTINE: [UID][Pred] -> [Timestamp][Value] (Wait for schema)
     pub sys_keyspace: Keyspace,         // SYSTEM: Config (NodeID, etc)
+    pub vector_store: crate::storage::vector::store::VectorStore, // VECTORS
     pub node_id: u64,
     pub clock: std::sync::Mutex<crate::storage::timestamp::Timestamp>,
 }
@@ -22,6 +23,12 @@ impl Storage {
         let history_keyspace = db.keyspace("history", || KeyspaceCreateOptions::default())?;
         let quarantine_keyspace = db.keyspace("quarantine", || KeyspaceCreateOptions::default())?;
         let sys_keyspace = db.keyspace("sys", || KeyspaceCreateOptions::default())?;
+        let vectors_keyspace = db.keyspace("vectors", || KeyspaceCreateOptions::default())?;
+
+        let vector_store = crate::storage::vector::store::VectorStore::new(
+            vectors_keyspace, 
+            crate::storage::vector::config::HNSWConfig::default()
+        );
 
         // Load or Generate Node ID
         let node_id = if let Some(id) = node_id_override {
@@ -72,6 +79,7 @@ impl Storage {
             history_keyspace,
             quarantine_keyspace,
             sys_keyspace,
+            vector_store,
             node_id,
             clock,
         })
@@ -269,5 +277,26 @@ impl Storage {
         *clock = next;
         // Persist Clock
         let _ = self.sys_keyspace.insert("clock", &next.to_bytes());
+    }
+
+    // --- Vector Operations ---
+
+    pub fn put_vector(&self, uid: u64, vector: Vec<f64>) -> anyhow::Result<()> {
+        self.vector_store.insert(uid as u128, vector)?;
+        Ok(())
+    }
+
+    pub fn delete_vector(&self, uid: u64) -> anyhow::Result<()> {
+        self.vector_store.delete(uid as u128)?;
+        Ok(())
+    }
+
+    pub fn search_vectors(&self, query: &[f64], k: usize) -> anyhow::Result<Vec<(u64, f64)>> {
+        let results = self.vector_store.search(query, k)?;
+        // Convert u128 IDs back to u64. 
+        // Note: Use try_into or simple casting if we are sure IDs are u64.
+        // Since we cast u64->u128 on insert, this is safe downcast if source was u64.
+        let converted = results.into_iter().map(|(id, dist)| (id as u64, dist)).collect();
+        Ok(converted)
     }
 }

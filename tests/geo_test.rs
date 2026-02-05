@@ -19,7 +19,7 @@ async fn test_geo_support() {
 
     // Setup Resolver
     let tmp_dir = tempfile::tempdir().unwrap();
-    let storage = Arc::new(Storage::new(tmp_dir.path()).unwrap());
+    let storage = Arc::new(Storage::new(tmp_dir.path(), None).unwrap());
     let resolver = FjallResolver::new(storage.clone());
     let boxed_resolver: Box<dyn vardadb::engine::resolver::Resolver + Send + Sync> = Box::new(resolver.clone());
 

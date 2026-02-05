@@ -17,7 +17,7 @@ async fn test_query_parity() {
     ).unwrap();
 
     let tmp_dir = tempfile::tempdir().unwrap();
-    let storage = Arc::new(Storage::new(tmp_dir.path()).unwrap());
+    let storage = Arc::new(Storage::new(tmp_dir.path(), None).unwrap());
     let resolver = FjallResolver::new(storage.clone());
 
     // 1. Create Data
