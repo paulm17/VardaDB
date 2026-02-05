@@ -2,6 +2,8 @@ use fjall::{Database, Keyspace, KeyspaceCreateOptions};
 use std::path::Path;
 use uuid::Uuid;
 use byteorder::{BigEndian, ByteOrder};
+use jobs::{JobStore, Queue};
+use std::sync::Arc;
 
 pub struct Storage {
     pub db: Database,
@@ -10,6 +12,8 @@ pub struct Storage {
     pub quarantine_keyspace: Keyspace,  // QUARANTINE: [UID][Pred] -> [Timestamp][Value] (Wait for schema)
     pub sys_keyspace: Keyspace,         // SYSTEM: Config (NodeID, etc)
     pub vector_store: crate::storage::vector::store::VectorStore, // VECTORS
+    pub jobs_store: Arc<JobStore>,      // JOB STORE
+    pub system_queue: Arc<Queue>,       // DEFAULT QUEUE
     pub node_id: u64,
     pub clock: std::sync::Mutex<crate::storage::timestamp::Timestamp>,
 }
@@ -29,6 +33,12 @@ impl Storage {
             vectors_keyspace, 
             crate::storage::vector::config::HNSWConfig::default()
         );
+
+        // Open Jobs Keyspace
+        let jobs_keyspace = db.keyspace("jobs", || KeyspaceCreateOptions::default())?;
+        let jobs_store = Arc::new(JobStore::new(Arc::new(jobs_keyspace)));
+        // Create Default "System" Queue
+        let system_queue = Arc::new(Queue::new("system_queue".to_string(), jobs_store.clone()));
 
         // Load or Generate Node ID
         let node_id = if let Some(id) = node_id_override {
@@ -80,6 +90,8 @@ impl Storage {
             quarantine_keyspace,
             sys_keyspace,
             vector_store,
+            jobs_store,
+            system_queue,
             node_id,
             clock,
         })

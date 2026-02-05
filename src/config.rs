@@ -6,6 +6,12 @@ use std::path::Path;
 pub struct VardaConfig {
     pub server: ServerConfig,
     pub zenoh: ZenohConfig,
+    #[serde(default = "default_jobs_config")]
+    pub jobs: JobsConfig,
+}
+
+fn default_jobs_config() -> JobsConfig {
+    JobsConfig { workers: default_workers() }
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -28,6 +34,16 @@ pub struct ZenohConfig {
     pub listen: Vec<String>,
     #[serde(default = "default_prefix")]
     pub prefix: String,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct JobsConfig {
+    #[serde(default = "default_workers")]
+    pub workers: usize,
+}
+
+fn default_workers() -> usize {
+    2
 }
 
 fn default_mode() -> String {

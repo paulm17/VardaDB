@@ -6,6 +6,8 @@ pub mod bridge;
 pub mod caching;
 pub mod sync;
 pub mod config;
+pub mod worker;
+// pub mod vardajobs; // Refactored to external crate
 
 
 pub struct DummyResolver;
@@ -128,6 +130,20 @@ pub async fn run(config: crate::config::VardaConfig) {
              Err(e) => eprintln!("Failed to initialize SyncManager: {}", e),
          }
     });
+
+    // Start Job Workers
+    let worker_count = config.jobs.workers.min(10); // Enforce max 10
+    println!("Starting {} Job Workers...", worker_count);
+    
+    // Set concurrency limit on queue to match workers (or higher? default 100 is fine)
+    // storage.system_queue.set_concurrency_limit(worker_count * 5); 
+    
+    for i in 0..worker_count {
+        let worker = crate::worker::Worker::new(storage.clone(), i);
+        tokio::spawn(async move {
+            worker.run().await;
+        });
+    }
 
     // 3. Setup Routes
     let app = Router::new()
