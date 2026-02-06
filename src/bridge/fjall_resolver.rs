@@ -12,32 +12,49 @@ use crate::realtime::bus::{EventBus, MutationEvent, MutationType};
 pub struct FjallResolver {
     pub storage: Arc<Storage>,
     pub bus: EventBus,
+    pub db_name: String,
 }
 
 impl FjallResolver {
-    pub fn new(storage: Arc<Storage>) -> Self {
-        Self { storage, bus: EventBus::new() }
+    pub fn new(storage: Arc<Storage>, db_name: &str) -> Self {
+        Self {
+            storage,
+            db_name: db_name.to_string(),
+            bus: EventBus::new(),
+        }
     }
 
     /// Create a FjallResolver with a shared EventBus.
     /// Use this to ensure all resolver instances publish to the same bus.
     pub fn with_bus(storage: Arc<Storage>, bus: EventBus) -> Self {
-        Self { storage, bus }
+        Self {
+            storage,
+            bus,
+            db_name: "default".to_string(),
+        }
+    }
+    
+    pub fn with_db(storage: Arc<Storage>, bus: EventBus, db_name: String) -> Self {
+        Self {
+            storage,
+            bus,
+            db_name,
+        }
     }
 
     pub fn compute_fingerprint(&self) -> anyhow::Result<crate::sync::reconciliation::RangeFingerprint> {
         // Full range fingerprint
         let start = crate::storage::timestamp::Timestamp::new(0, 0, 0);
         let end = crate::storage::timestamp::Timestamp::new(u64::MAX, u16::MAX, u64::MAX);
-        crate::sync::reconciliation::compute_fingerprint(&self.storage, &start, &end)
+        crate::sync::reconciliation::compute_fingerprint(&self.storage, &self.db_name, &start, &end)
     }
 
     pub fn compute_fingerprint_range(&self, start: &Timestamp, end: &Timestamp) -> anyhow::Result<crate::sync::reconciliation::RangeFingerprint> {
-        crate::sync::reconciliation::compute_fingerprint(&self.storage, start, end)
+        crate::sync::reconciliation::compute_fingerprint(&self.storage, &self.db_name, start, end)
     }
 
     pub fn get_history_range(&self, start: &Timestamp, end: &Timestamp) -> anyhow::Result<Vec<(Vec<u8>, Vec<u8>)>> {
-        self.storage.get_history_range(Some(start), Some(end))
+        self.storage.get_history_range(&self.db_name, Some(start), Some(end))
     }
 
     pub fn apply_batch(&self, items: Vec<(Vec<u8>, Vec<u8>)>) -> anyhow::Result<()> {
@@ -87,10 +104,10 @@ impl FjallResolver {
                      // 1. Index Maintenance (Type Index Deletion)
                      if pred == "_type" {
                           let data_key = crate::storage::codec::Codec::encode_data_key(uid, "_type");
-                          if let Ok(Some(current_bytes)) = self.storage.get(&data_key) {
+                          if let Ok(Some(current_bytes)) = self.storage.get(&self.db_name, &data_key) {
                                if let Ok(serde_json::Value::String(current_type)) = serde_json::from_slice(&current_bytes) {
                                     let type_idx_key = crate::storage::codec::Codec::encode_type_index_key(&current_type, uid);
-                                    let _ = self.storage.remove(&type_idx_key);
+                                    let _ = self.storage.remove(&self.db_name, &type_idx_key);
                                     
                                     event_type_name = current_type;
                                     mutation_type = crate::realtime::bus::MutationType::Delete;
@@ -103,7 +120,7 @@ impl FjallResolver {
                          }
                      }
 
-                     self.storage.delete_with_lww(uid, &pred, &ts)?;
+                     self.storage.delete_with_lww(&self.db_name, uid, &pred, &ts)?;
                      
                      if should_emit {
                          // Emit Event Immediately for Delete (Atomic enough usually)
@@ -126,7 +143,7 @@ impl FjallResolver {
                      }
 
                  } else {
-                     self.storage.put_with_lww(uid, &pred, &v, &ts)?;
+                     self.storage.put_with_lww(&self.db_name, uid, &pred, &v, &ts)?;
                      
                      // 1. Buffer Event Emission
                      if let Ok(json_val) = serde_json::from_slice::<serde_json::Value>(&v) {
@@ -136,7 +153,7 @@ impl FjallResolver {
                          if pred == "_type" {
                              if let serde_json::Value::String(ref type_name) = json_val {
                                  let type_idx_key = Codec::encode_type_index_key(type_name, uid);
-                                 let _res = self.storage.insert(&type_idx_key, &[]);
+                                 let _res = self.storage.insert(&self.db_name, &type_idx_key, &[]);
                                  println!("Sync: Insert Type Index Key: {:?}, Result: {:?}", type_idx_key, _res);
                                  resolved_type_name = type_name.clone();
                              } else {
@@ -145,7 +162,7 @@ impl FjallResolver {
                          } else {
                              // Try to lookup type from storage
                              let type_key = crate::storage::codec::Codec::encode_data_key(uid, "_type");
-                             if let Ok(Some(type_bytes)) = self.storage.get(&type_key) {
+                             if let Ok(Some(type_bytes)) = self.storage.get(&self.db_name, &type_key) {
                                  if let Ok(serde_json::Value::String(t)) = serde_json::from_slice(&type_bytes) {
                                      resolved_type_name = t;
                                  }
@@ -209,7 +226,7 @@ impl FjallResolver {
                  if valid_predicates.contains(&pred) {
                      if let Ok((ts, data)) = Codec::decode_quarantine_value(&v) {
                          // Restore to LATEST/HISTORY using LWW
-                         self.storage.put_with_lww(uid, &pred, &data, &ts)?;
+                         self.storage.put_with_lww(&self.db_name, uid, &pred, &data, &ts)?;
                          // Remove from Quarantine
                          self.storage.delete_quarantine(&k)?;
                          restored += 1;
@@ -224,7 +241,7 @@ impl FjallResolver {
          let key = Codec::encode_data_key(target_uid, inverse_field);
          
          if is_list {
-             let mut list = if let Ok(Some(bytes)) = self.storage.get(&key) {
+             let mut list = if let Ok(Some(bytes)) = self.storage.get(&self.db_name, &key) {
                  serde_json::from_slice::<Vec<Value>>(&bytes).unwrap_or_default()
              } else {
                  Vec::new()
@@ -235,13 +252,13 @@ impl FjallResolver {
              if !list.contains(&val_to_add) {
                   list.push(val_to_add);
                   let bytes = serde_json::to_vec(&list).map_err(|e| e.to_string())?;
-                  self.storage.put_with_lww(target_uid, inverse_field, &bytes, timestamp).map_err(|e| e.to_string())?;
+                  self.storage.put_with_lww(&self.db_name, target_uid, inverse_field, &bytes, timestamp).map_err(|e| e.to_string())?;
              }
          } else {
              // 1:1 or N:1 - Overwrite
              let val = Value::String(self_uid.to_string());
              let bytes = serde_json::to_vec(&val).map_err(|e| e.to_string())?;
-             self.storage.put_with_lww(target_uid, inverse_field, &bytes, timestamp).map_err(|e| e.to_string())?;
+             self.storage.put_with_lww(&self.db_name, target_uid, inverse_field, &bytes, timestamp).map_err(|e| e.to_string())?;
          }
          Ok(())
     }
@@ -250,7 +267,7 @@ impl FjallResolver {
          let key = Codec::encode_data_key(target_uid, inverse_field);
          
          if is_list {
-             if let Ok(Some(bytes)) = self.storage.get(&key) {
+             if let Ok(Some(bytes)) = self.storage.get(&self.db_name, &key) {
                  if let Ok(mut list) = serde_json::from_slice::<Vec<Value>>(&bytes) {
                       let val_to_remove = Value::String(self_uid.to_string());
                       // Filter out
@@ -267,12 +284,12 @@ impl FjallResolver {
                       });
                       
                       let bytes = serde_json::to_vec(&list).map_err(|e| e.to_string())?;
-                      self.storage.put_with_lww(target_uid, inverse_field, &bytes, timestamp).map_err(|e| e.to_string())?;
+                      self.storage.put_with_lww(&self.db_name, target_uid, inverse_field, &bytes, timestamp).map_err(|e| e.to_string())?;
                  }
              }
          } else {
              // 1:1 - If the current value IS self, remove it (delete key)
-             if let Ok(Some(bytes)) = self.storage.get(&key) {
+             if let Ok(Some(bytes)) = self.storage.get(&self.db_name, &key) {
                  if let Ok(val) = serde_json::from_slice::<Value>(&bytes) {
                       let matches = match val {
                           Value::String(s) => s == self_uid.to_string(),
@@ -280,7 +297,7 @@ impl FjallResolver {
                           _ => false
                       };
                       if matches {
-                          self.storage.delete_with_lww(target_uid, inverse_field, timestamp).map_err(|e| e.to_string())?;
+                          self.storage.delete_with_lww(&self.db_name, target_uid, inverse_field, timestamp).map_err(|e| e.to_string())?;
                       }
                  }
              }
@@ -290,7 +307,7 @@ impl FjallResolver {
 
     // Helper for BM25 Stats
     fn increment_stat(&self, key: &[u8], delta: i64) -> Result<(), String> {
-        let val_opt = self.storage.main_keyspace.get(key).map_err(|e| e.to_string())?;
+        let val_opt = self.storage.get(&self.db_name, key).map_err(|e| e.to_string())?;
         let current = if let Some(bytes) = val_opt {
             if bytes.len() >= 8 {
                byteorder::BigEndian::read_i64(&bytes)
@@ -300,12 +317,12 @@ impl FjallResolver {
         let new_val = current + delta;
         let mut buf = [0u8; 8];
         byteorder::BigEndian::write_i64(&mut buf, new_val);
-        self.storage.main_keyspace.insert(key, &buf).map_err(|e| e.to_string())?;
+        self.storage.insert(&self.db_name, key, &buf).map_err(|e| e.to_string())?;
         Ok(())
     }
 
     fn get_stat(&self, key: &[u8]) -> Option<i64> {
-         if let Ok(Some(bytes)) = self.storage.main_keyspace.get(key) {
+         if let Ok(Some(bytes)) = self.storage.get(&self.db_name, key) {
              if bytes.len() >= 8 {
                  Some(byteorder::BigEndian::read_i64(&bytes))
              } else { None }
@@ -328,7 +345,7 @@ impl FjallResolver {
         // 3. Store Doc Length (Per Doc)
         let doc_meta_key = Codec::encode_doc_meta_key(&index_field, uid);
         let len_u32 = doc_len as u32;
-        self.storage.insert(&doc_meta_key, &len_u32.to_be_bytes()).map_err(|e| e.to_string())?;
+        self.storage.insert(&self.db_name, &doc_meta_key, &len_u32.to_be_bytes()).map_err(|e| e.to_string())?;
 
         // 4. Count Term Frequencies
         let mut tf_map: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
@@ -340,7 +357,7 @@ impl FjallResolver {
         for (term, tf) in tf_map {
             let key = Codec::encode_term_index_key(&index_field, &term, uid);
             // Value = TF (u32)
-            self.storage.insert(&key, &tf.to_be_bytes()).map_err(|e| e.to_string())?;
+            self.storage.insert(&self.db_name, &key, &tf.to_be_bytes()).map_err(|e| e.to_string())?;
 
             // Increment DF
             let df_key = Codec::encode_stat_key(&index_field, 2, Some(&term));
@@ -364,7 +381,7 @@ impl FjallResolver {
         
         // 3. Remove Doc Length
         let doc_meta_key = Codec::encode_doc_meta_key(&index_field, uid);
-        self.storage.remove(&doc_meta_key).map_err(|e| e.to_string())?;
+        self.storage.remove(&self.db_name, &doc_meta_key).map_err(|e| e.to_string())?;
 
         // 4. Count TF
         let mut tf_map: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
@@ -374,7 +391,7 @@ impl FjallResolver {
 
         for (term, _) in tf_map {
             let key = Codec::encode_term_index_key(&index_field, &term, uid);
-            self.storage.remove(&key).map_err(|e| e.to_string())?;
+            self.storage.remove(&self.db_name, &key).map_err(|e| e.to_string())?;
 
             // Decrement DF
             let df_key = Codec::encode_stat_key(&index_field, 2, Some(&term));
@@ -419,7 +436,15 @@ impl FjallResolver {
             use std::ops::Bound;
             // Note: Directly accessing self.storage.main_keyspace from here requires pub visibility or getter.
             // backend.rs has `pub main_keyspace`.
-            let iter = self.storage.main_keyspace.range((Bound::Included(prefix.clone()), Bound::Unbounded));
+// use std::ops::Bound; // Removed redundant import
+            let (main_ks, _) = match self.storage.get_database(&self.db_name) {
+                 Some(d) => d,
+                 None => return vec![],
+            };
+
+            // Note: Directly accessing self.storage.main_keyspace from here requires pub visibility or getter.
+            // backend.rs has `pub main_keyspace`.
+            let iter = main_ks.range((Bound::Included(prefix.clone()), Bound::Unbounded));
             
             for guard in iter {
                 if let Ok((key, val)) = guard.into_inner() {
@@ -432,7 +457,7 @@ impl FjallResolver {
                     
                     // Get document length (dl)
                     let dl_key = Codec::encode_doc_meta_key(&index_field, uid);
-                    let dl = if let Ok(Some(bytes)) = self.storage.main_keyspace.get(&dl_key) {
+                    let dl = if let Ok(Some(bytes)) = self.storage.get(&self.db_name, &dl_key) {
                         if bytes.len() >= 4 { byteorder::BigEndian::read_u32(&bytes) as f64 } else { 10.0 }
                     } else { 10.0 };
                     
@@ -733,7 +758,7 @@ impl FjallResolver {
                 if let Ok(val_str) = serde_json::to_string(val) {
                     let index_pred = format!("{}.{}", type_name, field);
                     let idx_key = Codec::encode_unique_index_key(&index_pred, &val_str);
-                    if let Ok(Some(bytes)) = self.storage.get(&idx_key) {
+                    if let Ok(Some(bytes)) = self.storage.get(&self.db_name, &idx_key) {
                         if bytes.len() == 8 {
                            let uid = BigEndian::read_u64(&bytes);
                            let mut set = std::collections::HashSet::new();
@@ -762,7 +787,12 @@ impl FjallResolver {
                     for term in terms {
                         let prefix = Codec::encode_term_index_prefix(field, &term);
                         use std::ops::Bound;
-                        let iter = self.storage.main_keyspace.range((Bound::Included(prefix.clone()), Bound::Unbounded));
+                        let (main_ks, _) = match self.storage.get_database(&self.db_name) {
+                             Some(d) => d,
+                             None => return Some(std::collections::HashSet::new()),
+                        };
+                        // use std::ops::Bound; // Removed redundant import
+                        let iter = main_ks.range((Bound::Included(prefix.clone()), Bound::Unbounded));
                         
                         let mut term_uids = std::collections::HashSet::new();
                         for guard in iter {
@@ -798,7 +828,12 @@ impl FjallResolver {
                      for term in terms {
                         let prefix = Codec::encode_term_index_prefix(field, &term);
                         use std::ops::Bound;
-                        let iter = self.storage.main_keyspace.range((Bound::Included(prefix.clone()), Bound::Unbounded));
+                        let (main_ks, _) = match self.storage.get_database(&self.db_name) {
+                             Some(d) => d,
+                             None => return Some(std::collections::HashSet::new()),
+                        };
+                        // use std::ops::Bound; // Removed redundant import
+                        let iter = main_ks.range((Bound::Included(prefix.clone()), Bound::Unbounded));
                         
                         for guard in iter {
                             if let Ok(key) = guard.key() {
@@ -826,7 +861,12 @@ impl FjallResolver {
                     for term in terms {
                         let prefix = Codec::encode_term_index_prefix(&index_field, &term);
                         use std::ops::Bound;
-                        let iter = self.storage.main_keyspace.range((Bound::Included(prefix.clone()), Bound::Unbounded));
+                        let (main_ks, _) = match self.storage.get_database(&self.db_name) {
+                             Some(d) => d,
+                             None => return Some(std::collections::HashSet::new()),
+                        };
+                        // use std::ops::Bound; // Removed redundant import
+                        let iter = main_ks.range((Bound::Included(prefix.clone()), Bound::Unbounded));
                         
                         let mut term_uids = std::collections::HashSet::new();
                         for guard in iter {
@@ -863,7 +903,12 @@ impl FjallResolver {
                      for term in terms {
                         let prefix = Codec::encode_term_index_prefix(&index_field, &term);
                         use std::ops::Bound;
-                        let iter = self.storage.main_keyspace.range((Bound::Included(prefix.clone()), Bound::Unbounded));
+                        let (main_ks, _) = match self.storage.get_database(&self.db_name) {
+                             Some(d) => d,
+                             None => return Some(std::collections::HashSet::new()),
+                        };
+                        // use std::ops::Bound; // Removed redundant import
+                        let iter = main_ks.range((Bound::Included(prefix.clone()), Bound::Unbounded));
                         
                         for guard in iter {
                             if let Ok(key) = guard.key() {
@@ -916,7 +961,7 @@ impl FjallResolver {
                 _ => {
                     // Regular Field
                      let d_key = Codec::encode_data_key(uid, key);
-                     let stored_val = if let Ok(Some(bytes)) = self.storage.get(&d_key) {
+                     let stored_val = if let Ok(Some(bytes)) = self.storage.get(&self.db_name, &d_key) {
                          serde_json::from_slice::<Value>(&bytes).ok()
                      } else { None };
 
@@ -943,22 +988,22 @@ impl FjallResolver {
                  let index_pred = format!("{}.{}", type_name, field);
                  let val_str = serde_json::to_string(&value).map_err(|e| e.to_string())?;
                  let idx_key = Codec::encode_unique_index_key(&index_pred, &val_str);
-                 if let Ok(Some(_)) = self.storage.get(&idx_key) {
+                 if let Ok(Some(_)) = self.storage.get(&self.db_name, &idx_key) {
                      return Err(format!("Duplicate value for unique field: {}", field));
                  }
                  let mut uid_bytes = vec![0u8; 8];
                  BigEndian::write_u64(&mut uid_bytes, uid);
-                 self.storage.insert(&idx_key, &uid_bytes).map_err(|e| e.to_string())?;
+                 self.storage.insert(&self.db_name, &idx_key, &uid_bytes).map_err(|e| e.to_string())?;
             }
             // Use LWW Put
-            self.storage.put_with_lww(uid, field, &val_bytes, &timestamp).map_err(|e| e.to_string())?;
+            self.storage.put_with_lww(&self.db_name, uid, field, &val_bytes, &timestamp).map_err(|e| e.to_string())?;
         }
         
         let type_key_idx = Codec::encode_type_index_key(type_name, uid);
-        self.storage.insert(&type_key_idx, &[]).map_err(|e| e.to_string())?; // Index
+        self.storage.insert(&self.db_name, &type_key_idx, &[]).map_err(|e| e.to_string())?; // Index
         
         let type_val_bytes = serde_json::to_vec(&serde_json::Value::String(type_name.to_string())).expect("Serialization failed");
-        self.storage.put_with_lww(uid, "_type", &type_val_bytes, &timestamp).map_err(|e| e.to_string())?; // Data
+        self.storage.put_with_lww(&self.db_name, uid, "_type", &type_val_bytes, &timestamp).map_err(|e| e.to_string())?; // Data
 
         // Link New Inverses
         for info in inverses {
@@ -1011,7 +1056,7 @@ impl FjallResolver {
         for (field, _) in &fields {
              if let Some(tokenizers) = search_fields.get(field) {
                  let data_key = Codec::encode_data_key(uid, field);
-                 if let Ok(Some(bytes)) = self.storage.get(&data_key) {
+                 if let Ok(Some(bytes)) = self.storage.get(&self.db_name, &data_key) {
                      if let Ok(serde_json::Value::String(s)) = serde_json::from_slice::<serde_json::Value>(&bytes) {
                           for strategy in tokenizers {
                               self.remove_term_index(uid, field, &s, strategy)?;
@@ -1024,7 +1069,7 @@ impl FjallResolver {
         for info in inverses {
              if fields.contains_key(&info.field) {
                  let data_key = Codec::encode_data_key(uid, &info.field);
-                 if let Ok(Some(bytes)) = self.storage.get(&data_key) {
+                 if let Ok(Some(bytes)) = self.storage.get(&self.db_name, &data_key) {
                      let mut old_targets = Vec::new();
                      if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&bytes) {
                           match val {
@@ -1052,12 +1097,12 @@ impl FjallResolver {
         for field in uniques {
              if fields.contains_key(field) {
                  let data_key = Codec::encode_data_key(uid, field);
-                 if let Ok(Some(val_bytes)) = self.storage.get(&data_key) {
+                 if let Ok(Some(val_bytes)) = self.storage.get(&self.db_name, &data_key) {
                      if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&val_bytes) {
                           let val_str = serde_json::to_string(&val).unwrap_or_default();
                           let index_pred = format!("{}.{}", type_name, field);
                           let idx_key = Codec::encode_unique_index_key(&index_pred, &val_str);
-                          self.storage.remove(&idx_key).map_err(|e| e.to_string())?;
+                          self.storage.remove(&self.db_name, &idx_key).map_err(|e| e.to_string())?;
                      }
                  }
              }
@@ -1076,14 +1121,14 @@ impl FjallResolver {
                  let index_pred = format!("{}.{}", type_name, field);
                  let val_str = serde_json::to_string(&value).map_err(|e| e.to_string())?;
                  let idx_key = Codec::encode_unique_index_key(&index_pred, &val_str);
-                 if let Ok(Some(_)) = self.storage.get(&idx_key) {
+                 if let Ok(Some(_)) = self.storage.get(&self.db_name, &idx_key) {
                      return Err(format!("Duplicate value for unique field: {}", field));
                  }
                  let mut uid_bytes = vec![0u8; 8];
                  BigEndian::write_u64(&mut uid_bytes, uid);
-                 self.storage.insert(&idx_key, &uid_bytes).map_err(|e| e.to_string())?;
+                 self.storage.insert(&self.db_name, &idx_key, &uid_bytes).map_err(|e| e.to_string())?;
             }
-            self.storage.put_with_lww(uid, field, &val_bytes, &timestamp).map_err(|e| e.to_string())?;
+            self.storage.put_with_lww(&self.db_name, uid, field, &val_bytes, &timestamp).map_err(|e| e.to_string())?;
         }
         // 4. Link New Inverses
         for info in inverses {
@@ -1134,7 +1179,7 @@ impl FjallResolver {
         // 0. Remove Search Indexes
         for (field, tokenizers) in search_fields {
             let data_key = Codec::encode_data_key(uid, field);
-            if let Ok(Some(bytes)) = self.storage.get(&data_key) {
+            if let Ok(Some(bytes)) = self.storage.get(&self.db_name, &data_key) {
                 if let Ok(serde_json::Value::String(s)) = serde_json::from_slice::<serde_json::Value>(&bytes) {
                      for strategy in tokenizers {
                          self.remove_term_index(uid, field, &s, strategy)?;
@@ -1145,7 +1190,7 @@ impl FjallResolver {
         // 1. Handle Inverses (Unlink)
         for info in inverses {
              let data_key = Codec::encode_data_key(uid, &info.field);
-             if let Ok(Some(bytes)) = self.storage.get(&data_key) {
+             if let Ok(Some(bytes)) = self.storage.get(&self.db_name, &data_key) {
                  let mut targets = Vec::new();
                  if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&bytes) {
                       match val {
@@ -1171,18 +1216,18 @@ impl FjallResolver {
         // 2. Remove Unique Indexes
         for field in uniques {
             let data_key = Codec::encode_data_key(uid, field);
-            if let Ok(Some(val_bytes)) = self.storage.get(&data_key) {
+            if let Ok(Some(val_bytes)) = self.storage.get(&self.db_name, &data_key) {
                 if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&val_bytes) {
                      let val_str = serde_json::to_string(&val).unwrap_or_default();
                      let index_pred = format!("{}.{}", type_name, field);
                      let idx_key = Codec::encode_unique_index_key(&index_pred, &val_str);
-                     self.storage.remove(&idx_key).map_err(|e| e.to_string())?;
+                     self.storage.remove(&self.db_name, &idx_key).map_err(|e| e.to_string())?;
                 }
              }
         }
         // 3. Remove Type Index
         let type_key = Codec::encode_type_index_key(type_name, uid);
-        self.storage.remove(&type_key).map_err(|e| e.to_string())?;
+        self.storage.remove(&self.db_name, &type_key).map_err(|e| e.to_string())?;
 
         // 4. Remove Vector Data (Soft Delete)
         // We delete indiscriminately; if no vector existed, it's a safe no-op.
@@ -1191,7 +1236,8 @@ impl FjallResolver {
         // 5. Remove Data Keys (Scan Prefix)
         let prefix = Codec::encode_data_prefix(uid);
         use std::ops::Bound;
-        let iter = self.storage.main_keyspace.range((Bound::Included(prefix.clone()), Bound::Unbounded));
+        let (main_ks, _) = self.storage.get_database(&self.db_name).ok_or("Database not found".to_string())?;
+        let iter = main_ks.range((Bound::Included(prefix.clone()), Bound::Unbounded));
         let mut keys_to_delete: Vec<Vec<u8>> = Vec::new();
         for guard in iter {
              if let Ok(key) = guard.key() {
@@ -1202,7 +1248,7 @@ impl FjallResolver {
         for k in keys_to_delete {
             if k.len() > 9 {
                 if let Ok(pred) = std::str::from_utf8(&k[9..]) {
-                     self.storage.delete_with_lww(uid, pred, &timestamp).map_err(|e| e.to_string())?;
+                     self.storage.delete_with_lww(&self.db_name, uid, pred, &timestamp).map_err(|e| e.to_string())?;
                 }
             }
         }
@@ -1279,7 +1325,7 @@ impl Resolver for FjallResolver {
         }
 
         let key = Codec::encode_data_key(uid, field_name);
-        match self.storage.get(&key) {
+        match self.storage.get(&self.db_name, &key) {
             Ok(Some(bytes)) => {
                 let res = serde_json::from_slice(&bytes).ok();
                 if field_name == "title" {
@@ -1298,7 +1344,7 @@ impl Resolver for FjallResolver {
 
     fn find_uid(&self, index_name: &str, value: &str) -> Option<u64> {
         let key = Codec::encode_unique_index_key(index_name, value);
-        match self.storage.get(&key) {
+        match self.storage.get(&self.db_name, &key) {
              Ok(Some(bytes)) if bytes.len() == 8 => {
                  Some(BigEndian::read_u64(&bytes))
              }
@@ -1410,7 +1456,8 @@ impl Resolver for FjallResolver {
             };
 
             use std::ops::Bound;
-            let iter = self.storage.main_keyspace.range((Bound::Included(start_key.clone()), Bound::Unbounded));
+            let (main_ks, _) = self.storage.get_database(&self.db_name).ok_or_else(|| anyhow::anyhow!("Database not found")).expect("Database not found");
+            let iter = main_ks.range((Bound::Included(start_key.clone()), Bound::Unbounded));
             println!("Scan: Starting Full Scan for type: {}. Prefix/StartKey: {:?}", type_name, start_key);
             for guard in iter {
                  if let Ok(key) = guard.key() {
@@ -1528,12 +1575,12 @@ impl Resolver for FjallResolver {
 
     fn node_exists(&self, type_name: &str, uid: u64) -> bool {
         let type_key = Codec::encode_type_index_key(type_name, uid);
-        self.storage.contains_key(&type_key).unwrap_or(false)
+        self.storage.contains_key(&self.db_name, &type_key).unwrap_or(false)
     }
 
     fn get_node_type(&self, uid: u64) -> Option<String> {
         let type_key = Codec::encode_data_key(uid, "_type");
-        if let Ok(Some(bytes)) = self.storage.get(&type_key) {
+        if let Ok(Some(bytes)) = self.storage.get(&self.db_name, &type_key) {
             if let Ok(Value::String(s)) = serde_json::from_slice(&bytes) {
                 return Some(s);
             }

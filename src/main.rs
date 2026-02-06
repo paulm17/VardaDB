@@ -56,6 +56,11 @@ enum Commands {
         #[arg(short, long)]
         output: Option<String>,
     },
+    /// Database Management
+    #[command(subcommand)]
+    Db(vardadb::cli::DbCommands),
+    /// Interactive Shell (REPL)
+    Cli,
 }
 
 #[tokio::main]
@@ -137,6 +142,17 @@ async fn main() {
                     eprintln!("Error building schema: {}", e);
                     std::process::exit(1);
                 }
+            }
+        }
+        Some(Commands::Db(cmd)) => {
+            if let Err(e) = vardadb::cli::handle_db_command(&cmd, &config).await {
+                eprintln!("Command failed: {}", e);
+                std::process::exit(1);
+            }
+        }
+        Some(Commands::Cli) => {
+            if let Err(e) = vardadb::repl::run_repl(&config).await {
+                eprintln!("REPL Error: {}", e);
             }
         }
     }

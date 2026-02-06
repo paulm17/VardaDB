@@ -18,8 +18,8 @@ impl RangeFingerprint {
 /// Compute fingerprint for a time range
 /// Using XOR of (TimestampHash + KeyHash + ValueHash) is order-independent and allows easy diffing?
 /// Actually, RBSR usually checks "is set identical". XOR sum is good for that.
-pub fn compute_fingerprint(storage: &Storage, start: &Timestamp, end: &Timestamp) -> anyhow::Result<RangeFingerprint> {
-    let items = storage.get_history_range(Some(start), Some(end))?;
+pub fn compute_fingerprint(storage: &Storage, db_name: &str, start: &Timestamp, end: &Timestamp) -> anyhow::Result<RangeFingerprint> {
+    let items = storage.get_history_range(db_name, Some(start), Some(end))?;
     
     let mut hash: u64 = 0;
     let mut count = 0;

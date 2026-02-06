@@ -151,13 +151,51 @@ The **QueryCache** (`src/engine/cache.rs`) implements an in-memory Bounded LRU (
 ### 6. Realtime
 VardaDB supports realtime capability groundwork through its event bus system (`src/realtime`).
 *   Currently, likely used for **Live Query** codegen or internal event subscriptions.
-*   Future roadmap includes full WebSocket-based GraphQL Subscriptions.
 
 ### 7. Conflict Resolution (Last-Write-Wins)
 VardaDB implements a robust **Last-Write-Wins (LWW)** consistency model, inspired by **Evolu**, to handle distributed data synchronization and conflicts.
 *   **Timestamp-Based**: Every storage operation (Put/Delete) is associated with a timestamp.
 *   **Idempotency**: "Stale" writes (writes with an older timestamp than what is currently stored) are safely ignored without error.
 *   **Convergence**: This ensures that all replicas eventually converge to the same state, provided they receive the same set of updates, regardless of order.
+
+### 8. CLI / Management
+VardaDB provides a built-in CLI for managing databases. The server must be running for these commands to work (as they use the HTTP Management API).
+
+*   **List Databases**:
+    ```bash
+    cargo run -- db list
+    ```
+
+*   **Create Database**:
+    ```bash
+    cargo run -- db create my_new_db
+    ```
+
+*   **Delete Database**:
+    ```bash
+    cargo run -- db delete my_old_db
+    ```
+
+### 9. Interactive Shell (REPL)
+For a psql-like experience, use the `cli` command. This opens an interactive shell where you can switch databases and run queries.
+
+```bash
+cargo run -- cli
+```
+
+**Commands:**
+*   `use <dbname>`: Switch the active database context.
+*   `create database <name>`: Create a new database.
+*   `drop database <name>`: Delete a database.
+*   `show databases`: List all available databases.
+*   `<query>`: Any other input is treated as a GraphQL query/mutation.
+
+**Example Session:**
+```
+vardadb(default)> create database sales
+vardadb(default)> use sales
+vardadb(sales)> { queryUser { name } }
+```
 
 ---
 

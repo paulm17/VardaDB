@@ -18,13 +18,14 @@ impl FjallState {
     // In reality, this would take a batch of changes from the dataflow.
     pub fn process_update(&self, key: &str, value: &str) -> anyhow::Result<()> {
         let view_key = format!("view:{}:{}", self.view_name, key);
-        self.storage.insert(view_key.as_bytes(), value.as_bytes())?;
+        // TODO: Make DB configurable for Views?
+        self.storage.insert("default", view_key.as_bytes(), value.as_bytes())?;
         Ok(())
     }
     
     pub fn get(&self, key: &str) -> anyhow::Result<Option<String>> {
         let view_key = format!("view:{}:{}", self.view_name, key);
-        let val = self.storage.get(view_key.as_bytes())?;
+        let val = self.storage.get("default", view_key.as_bytes())?;
         Ok(val.map(|v| String::from_utf8(v).unwrap()))
     }
 }

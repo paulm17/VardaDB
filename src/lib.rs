@@ -7,6 +7,9 @@ pub mod caching;
 pub mod sync;
 pub mod config;
 pub mod worker;
+pub mod cli;
+pub mod server;
+pub mod repl; // Added
 // pub mod vardajobs; // Refactored to external crate
 
 
@@ -59,7 +62,8 @@ use tokio::sync::RwLock;
 
 #[derive(Clone)]
 struct ServerState {
-    schema: Arc<RwLock<Arc<crate::engine::schema::Schema>>>,
+    // Map<db_name, Arc<RwLock<Arc<crate::engine::schema::Schema>>>>
+    schemas: Arc<dashmap::DashMap<String, Arc<RwLock<Arc<crate::engine::schema::Schema>>>>>, 
     storage: Arc<Storage>,
     cache: Arc<crate::engine::cache::QueryCache>,
     event_bus: EventBus,
@@ -106,8 +110,11 @@ pub async fn run(config: crate::config::VardaConfig) {
         })
         .expect("Failed to build schema");
 
+    let schemas = Arc::new(dashmap::DashMap::new());
+    schemas.insert("default".to_string(), Arc::new(RwLock::new(Arc::new(initial_schema))));
+
     let state = ServerState {
-        schema: Arc::new(RwLock::new(Arc::new(initial_schema))),
+        schemas,
         storage: storage.clone(),
         cache: Arc::new(crate::engine::cache::QueryCache::new(100)), // Bounded LRU: 100 entries
         event_bus: shared_event_bus.clone(),
@@ -116,7 +123,7 @@ pub async fn run(config: crate::config::VardaConfig) {
     // Start Anti-Gravity (Zenoh) Sync
     let sync_resolver = Arc::new(resolver.clone());
     let zenoh_config = config.zenoh.clone();
-    let sync_schema = state.schema.clone();
+    let sync_schema = state.schemas.get("default").expect("Default schema missing").clone();
     let sync_cache = state.cache.clone();
     
     tokio::spawn(async move {
@@ -146,21 +153,21 @@ pub async fn run(config: crate::config::VardaConfig) {
     }
 
     // 3. Setup Routes
+    let mgmt_routes = crate::server::management::routes(state.storage.clone());
+
     let app = Router::new()
         .route("/graphql", post(graphql_handler).get(subscription_handler))
         .route("/playground", get(playground_handler))
         .route("/admin/schema", post(admin_schema_handler))
+        .nest_service("/_mgmt", mgmt_routes)
         .layer(CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any))
         .with_state(state.clone());
 
     // 4. Run Server
     if config.server.is_mcp {
         // Run MCP Server
-        let mcp_schema = state.schema.clone();
-        // Since resolver is not cloneable as Box<dyn Resolver>, we need to create a new one or rethink structure.
-        // But we have `resolver` variable above (FjallResolver). We can clone it before boxing?
-        // Wait, line 95: `let resolver = FjallResolver::with_bus...`. This is concrete type.
-        // We boxing it? Not yet in `run`.
+        // Use default schema for MCP for now
+        let mcp_schema = state.schemas.get("default").expect("Default schema missing").value().clone();
         
         let mcp_resolver = Box::new(FjallResolver::with_bus(storage.clone(), shared_event_bus.clone()));
         
@@ -186,10 +193,44 @@ pub async fn run(config: crate::config::VardaConfig) {
 }
 
 async fn graphql_handler(
+    headers: axum::http::HeaderMap,
     axum::extract::State(state): axum::extract::State<ServerState>,
     req: GraphQLRequest,
 ) -> GraphQLResponse {
-    let schema = state.schema.read().await;
+    let db_name = headers
+        .get("x-varda-db")
+        .and_then(|val| val.to_str().ok())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "default".to_string());
+
+    let schema = if let Some(s) = state.schemas.get(&db_name) {
+        s.read().await.clone()
+    } else {
+        // Lazy Load / Create Schema for DB
+        // Check if DB exists in Storage
+        if state.storage.get_database(&db_name).is_some() {
+             println!("Lazy loading schema for database: {}", db_name);
+             let resolver = FjallResolver::new(state.storage.clone(), &db_name);
+             
+             let db_schema_path = format!("{}/{}_schema.graphql", "varda_db_data", db_name);
+             let sdl = std::fs::read_to_string(&db_schema_path).unwrap_or_else(|_| "type Health { status: String }".to_string());
+             
+             let new_schema = crate::engine::schema::Schema::load_with_resolver(&sdl, resolver)
+                .expect("Failed to load lazy schema");
+             let arc_schema = Arc::new(RwLock::new(Arc::new(new_schema)));
+             state.schemas.insert(db_name.clone(), arc_schema.clone());
+             let x = arc_schema.read().await.clone();
+             x
+        } else {
+            println!("Database {} not found/loaded, defaulting to default schema context.", db_name);
+             if let Some(s) = state.schemas.get("default") { s.read().await.clone() } else { 
+                 let mut resp = async_graphql::Response::new(async_graphql::Value::Null);
+                 resp.errors = vec![async_graphql::ServerError::new("Internal Error: Default schema missing", None)];
+                 return resp.into();
+             }
+        }
+    };
+    
     let request = req.into_inner();
     
     // Check if Mutation (Simple check: contains "mutation")
@@ -199,15 +240,17 @@ async fn graphql_handler(
 
     if is_mutation {
         let resp = schema.execute(request).await;
-        // Invalidate Cache on Mutation
+        // Invalidate Cache on Mutation (Global for now, ideally scoped to DB)
         state.cache.invalidate();
         return resp.into();
     }
 
     // Read Path (Caching)
+    // Key needs to include DB Name!
     let vars_str = serde_json::to_string(&request.variables).unwrap_or_default();
+    let cache_key_suffix = format!("{}:{}", db_name, vars_str);
     
-    if let Some(cached_json) = state.cache.get(&query_string, &vars_str) {
+    if let Some(cached_json) = state.cache.get(&query_string, &cache_key_suffix) {
         // Return Cached Response
         if let Ok(resp) = serde_json::from_str::<async_graphql::Response>(&cached_json) {
             return resp.into();
@@ -221,7 +264,7 @@ async fn graphql_handler(
     // But for us, let's cache successful queries.
     if resp.errors.is_empty() {
         if let Ok(json) = serde_json::to_string(&resp) {
-            state.cache.put(&query_string, &vars_str, json);
+            state.cache.put(&query_string, &cache_key_suffix, json);
         }
     }
 
@@ -240,8 +283,15 @@ async fn admin_schema_handler(
     
     match crate::engine::schema::Schema::load_with_resolver(&body, resolver) {
         Ok(new_schema) => {
-            let mut lock = state.schema.write().await;
-            *lock = Arc::new(new_schema);
+             // Update DashMap
+             // We need to fetch the existing entry and update the WRITE lock
+             if let Some(entry) = state.schemas.get("default") {
+                 let mut lock = entry.write().await;
+                 *lock = Arc::new(new_schema);
+             } else {
+                 // Should not happen, but insert new
+                 state.schemas.insert("default".to_string(), Arc::new(RwLock::new(Arc::new(new_schema))));
+             }
             
             // Persist Schema
             let storage_path = "varda_db_data"; // Consistent with run()
@@ -267,7 +317,22 @@ async fn subscription_handler(
     headers: axum::http::HeaderMap,
     upgrade: axum::extract::ws::WebSocketUpgrade,
 ) -> axum::response::Response {
-    let schema_wrapper = state.schema.read().await.clone();
+    let schema_wrapper = state.schemas.get("default").expect("Default schema missing from map").read().await.clone();
+    // Inner Schema (likely async_graphql::Schema) usually implements execution/protocols
+    // But we need to ensure we pass a type that implements Executor + Send + Sync + Clone
+    // crate::engine::schema::Schema is likely our wrapper.
+    // If it is just a wrapper around async_graphql::Schema, we can use it.
+    // But if we need the inner async_graphql::Schema:
+    // let schema = schema_wrapper.inner().clone(); // Assuming inner() exists? 
+    // Wait, in previous code: `state.schema.read().await.clone()` was passed.
+    // `state.schema` was `Arc<RwLock<Arc<Schema>>>`. read() -> `Arc<Schema>`. clone() -> `Arc<Schema>`.
+    // So we are passing `Arc<Schema>`.
+    
+    // The ERROR said: `trait Executor is not implemented for Arc<Schema>`.
+    // This implies `Schema` implements `Executor`, but `Arc<Schema>` does not.
+    // We should deference the Arc if possible, OR clone the inner Schema if it's cheap (async_graphql::Schema is cheap).
+    
+    // Let's try to get the inner schema.
     let schema = schema_wrapper.inner().clone();
 
     let protocol_str = headers

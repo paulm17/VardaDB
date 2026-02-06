@@ -47,6 +47,7 @@ pub struct GeoMultiPolygonData {
     pub polygons: Vec<GeoPolygonData>,
 }
 
+#[derive(Clone)]
 pub struct Schema {
     inner: async_graphql::dynamic::Schema,
     #[allow(dead_code)]
