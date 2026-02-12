@@ -1,0 +1,154 @@
+# LocalGPT Configuration
+# Copy to ~/.localgpt/config.toml
+
+[agent]
+# Default model to use for chat
+#
+# Format: "provider/model-id" (OpenClaw-compatible)
+#
+# Anthropic API (recommended, requires ANTHROPIC_API_KEY):
+#   - "anthropic/claude-opus-4-5" (recommended)
+#   - "anthropic/claude-sonnet-4-5"
+#
+# Short aliases (auto-resolved to latest 4.5 models):
+#   - "opus"   → anthropic/claude-opus-4-5
+#   - "sonnet" → anthropic/claude-sonnet-4-5
+#   - "gpt"    → openai/gpt-4o
+#
+# OpenAI API (requires OPENAI_API_KEY):
+#   - "openai/gpt-4o", "openai/gpt-4o-mini", "openai/gpt-4-turbo"
+#
+# GLM / Z.AI API (requires GLM API key):
+#   - "glm/glm-4.7" (or use alias "glm")
+#
+# Claude CLI (local, no API key needed):
+#   - "claude-cli/opus", "claude-cli/sonnet", "claude-cli/haiku"
+#
+# Ollama (local):
+#   - "ollama/llama3", "ollama/mistral", etc.
+#
+default_model = "claude-cli/opus"
+
+# Context window size (in tokens)
+context_window = 128000
+
+# Reserve tokens for response
+reserve_tokens = 8000
+
+# Anthropic configuration (REQUIRED for default model)
+# Get your API key at: https://console.anthropic.com/
+[providers.anthropic]
+api_key = "${ANTHROPIC_API_KEY}"  # Set: export ANTHROPIC_API_KEY="sk-ant-..."
+base_url = "https://api.anthropic.com"
+
+# OpenAI configuration (optional)
+# [providers.openai]
+# api_key = "${OPENAI_API_KEY}"
+# base_url = "https://api.openai.com/v1"
+
+# Ollama configuration (for local models)
+# [providers.ollama]
+# endpoint = "http://localhost:11434"
+# model = "llama3"
+
+# Claude CLI configuration (uses local claude CLI command)
+# Requires claude CLI to be installed: https://github.com/anthropics/claude-code
+# [providers.claude_cli]
+# command = "claude"
+# model = "opus"  # opus, sonnet, or haiku
+
+# GLM / Z.AI configuration (optional)
+# Get your API key at: https://z.ai/manage-apikey/apikey-list
+# [providers.glm]
+# api_key = "${GLM_API_KEY}"
+# base_url = "https://api.z.ai/api/coding/paas/v4"
+
+[heartbeat]
+# Enable automatic heartbeat
+enabled = true
+
+# How often to check HEARTBEAT.md
+interval = "30m"
+
+# Only run during these hours (optional)
+# [heartbeat.active_hours]
+# start = "09:00"
+# end = "22:00"
+
+[memory]
+# Where to store memory files
+workspace = "~/.localgpt/workspace"
+
+# Embedding provider for semantic search: "local" (default), "gguf", "openai", or "none"
+# - "local": Uses FastEmbed/ONNX (all-MiniLM-L6-v2), no API key needed
+# - "gguf": Uses llama.cpp for GGUF models (requires --features gguf build)
+# - "openai": Uses OpenAI embeddings (requires providers.openai config)
+# - "none": FTS-only search, no vector embeddings
+embedding_provider = "local"
+
+# Embedding model for local provider (FastEmbed):
+#
+# English:
+#   - all-MiniLM-L6-v2   (default, ~80MB, fastest)
+#   - bge-base-en-v1.5   (~430MB, higher quality)
+#
+# Chinese:
+#   - bge-small-zh-v1.5  (~95MB, Chinese-specific)
+#
+# Multilingual (Chinese, Japanese, Korean, 100+ languages):
+#   - multilingual-e5-small  (~470MB, compact)
+#   - multilingual-e5-base   (~1.1GB, recommended for Chinese)
+#   - bge-m3                 (~2.2GB, best quality)
+#
+# For OpenAI provider: text-embedding-3-small, text-embedding-3-large
+#
+# For GGUF provider (requires --features gguf):
+#   - embeddinggemma-300M-Q8_0.gguf  (~320MB, 1024 dims, multilingual)
+#   - nomic-embed-text-v1.5.Q8_0.gguf (~270MB, 768 dims)
+#   Note: Download models from HuggingFace and place in embedding_cache_dir
+embedding_model = "all-MiniLM-L6-v2"
+
+# Cache directory for local embedding models (ONNX format)
+# Models are downloaded from HuggingFace on first use
+# Default: ~/.cache/localgpt/models
+# Can also be set via FASTEMBED_CACHE_DIR environment variable
+# embedding_cache_dir = "~/.cache/localgpt/models"
+
+# Chunk size for indexing (tokens)
+chunk_size = 400
+
+# Overlap between chunks (tokens)
+chunk_overlap = 80
+
+[server]
+# Enable HTTP server
+enabled = true
+
+# Port to listen on
+port = 31327
+
+# Bind address (127.0.0.1 for localhost only)
+bind = "127.0.0.1"
+
+# Telegram bot (optional)
+# Create a bot via @BotFather on Telegram to get an API token
+# [telegram]
+# enabled = true
+# api_token = "${TELEGRAM_BOT_TOKEN}"
+
+[security]
+# Abort on tamper or suspicious content in LocalGPT.md (default: false)
+# strict_policy = false
+
+# Skip loading the LocalGPT.md workspace security policy (default: false)
+# disable_policy = false
+
+# Skip the hardcoded security suffix injected at end of context (default: false)
+# disable_suffix = false
+
+[logging]
+# Log level: trace, debug, info, warn, error
+level = "info"
+
+# Log file path
+file = "~/.localgpt/logs/agent.log"

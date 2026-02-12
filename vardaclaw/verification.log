@@ -1,0 +1,56 @@
+=== VardaClaw Verification ===
+Target URL: http://localhost:8000/graphql
+Binary: ./target/debug/vardaclaw
+Using workspace: /Volumes/Data/Users/paul/development/src/github/graphql/VardaDB/vardaclaw
+
+[1] Indexing Workspace (reindex)...
+[2m2026-02-11T23:56:27.593357Z[0m [32m INFO[0m [2mvardaclaw::memory::index[0m[2m:[0m Initializing VardaClaw MemoryIndex connected to http://localhost:8000/graphql
+[2m2026-02-11T23:56:27.597921Z[0m [34mDEBUG[0m [2mvardaclaw::memory::embeddings[0m[2m:[0m Set FASTEMBED_CACHE_DIR to /Volumes/Data/Users/paul/.cache/localgpt/models
+[2m2026-02-11T23:56:27.597964Z[0m [34mDEBUG[0m [2mvardaclaw::memory::embeddings[0m[2m:[0m Loading local embedding model: all-MiniLM-L6-v2
+[2m2026-02-11T23:56:27.598114Z[0m [32m INFO[0m [2mhf_hub[0m[2m:[0m Using token file found "/Volumes/Data/Users/paul/.cache/huggingface/token"
+[2m2026-02-11T23:56:27.770257Z[0m [32m INFO[0m [2mvardaclaw::memory[0m[2m:[0m Using local embedding provider: all-MiniLM-L6-v2
+Reindexing memory files...
+[2m2026-02-11T23:56:27.770539Z[0m [34mDEBUG[0m [2mvardaclaw::memory::index[0m[2m:[0m Indexing file to VardaDB: HEARTBEAT.md
+[2m2026-02-11T23:56:27.770803Z[0m [34mDEBUG[0m [2mreqwest::connect[0m[2m:[0m starting new connection: http://localhost:8000/
+[2m2026-02-11T23:56:27.771575Z[0m [34mDEBUG[0m [2mhyper_util::client::legacy::connect::http[0m[2m:[0m connecting to [::1]:8000
+[2m2026-02-11T23:56:27.771751Z[0m [34mDEBUG[0m [2mhyper_util::client::legacy::connect::http[0m[2m:[0m connecting to 127.0.0.1:8000
+[2m2026-02-11T23:56:27.771909Z[0m [34mDEBUG[0m [2mhyper_util::client::legacy::connect::http[0m[2m:[0m connected to 127.0.0.1:8000
+[2m2026-02-11T23:56:27.773032Z[0m [34mDEBUG[0m [2mhyper_util::client::legacy::pool[0m[2m:[0m pooling idle connection for ("http", localhost:8000)
+[2m2026-02-11T23:56:27.773228Z[0m [34mDEBUG[0m [2mvardaclaw::memory::index[0m[2m:[0m Indexing file to VardaDB: LocalGPT.md
+[2m2026-02-11T23:56:27.773338Z[0m [34mDEBUG[0m [2mhyper_util::client::legacy::pool[0m[2m:[0m reuse idle connection for ("http", localhost:8000)
+[2m2026-02-11T23:56:27.773946Z[0m [34mDEBUG[0m [2mhyper_util::client::legacy::pool[0m[2m:[0m pooling idle connection for ("http", localhost:8000)
+[2m2026-02-11T23:56:27.774043Z[0m [34mDEBUG[0m [2mvardaclaw::memory::index[0m[2m:[0m Indexing file to VardaDB: MEMORY.md
+[2m2026-02-11T23:56:27.774119Z[0m [34mDEBUG[0m [2mhyper_util::client::legacy::pool[0m[2m:[0m reuse idle connection for ("http", localhost:8000)
+[2m2026-02-11T23:56:27.774627Z[0m [34mDEBUG[0m [2mhyper_util::client::legacy::pool[0m[2m:[0m pooling idle connection for ("http", localhost:8000)
+[2m2026-02-11T23:56:27.774696Z[0m [34mDEBUG[0m [2mvardaclaw::memory::index[0m[2m:[0m Indexing file to VardaDB: SOUL.md
+[2m2026-02-11T23:56:27.774794Z[0m [34mDEBUG[0m [2mhyper_util::client::legacy::pool[0m[2m:[0m reuse idle connection for ("http", localhost:8000)
+[2m2026-02-11T23:56:27.775268Z[0m [34mDEBUG[0m [2mhyper_util::client::legacy::pool[0m[2m:[0m pooling idle connection for ("http", localhost:8000)
+[2m2026-02-11T23:56:27.775428Z[0m [34mDEBUG[0m [2mhyper_util::client::legacy::pool[0m[2m:[0m reuse idle connection for ("http", localhost:8000)
+[2m2026-02-11T23:56:27.775817Z[0m [34mDEBUG[0m [2mhyper_util::client::legacy::pool[0m[2m:[0m pooling idle connection for ("http", localhost:8000)
+[2m2026-02-11T23:56:27.775869Z[0m [32m INFO[0m [2mvardaclaw::memory[0m[2m:[0m Reindex complete: ReindexStats { files_processed: 4, files_updated: 4, chunks_indexed: 0, duration: 5.549375ms }
+Reindex complete:
+  Files processed: 4
+  Files updated: 4
+  Chunks indexed: 0
+  Duration: 5.549375ms
+
+Generating embeddings...
+[2m2026-02-11T23:56:27.775899Z[0m [32m INFO[0m [2mvardaclaw::memory[0m[2m:[0m Embedding generation complete: 0 chunks, 0 embedded, 0 cache hits
+  All chunks already have embeddings
+
+[2] Searching for 'VardaDB'...
+[2m2026-02-11T23:56:27.800390Z[0m [32m INFO[0m [2mvardaclaw::memory::index[0m[2m:[0m Initializing VardaClaw MemoryIndex connected to http://localhost:8000/graphql
+[2m2026-02-11T23:56:27.804218Z[0m [34mDEBUG[0m [2mvardaclaw::memory::embeddings[0m[2m:[0m Set FASTEMBED_CACHE_DIR to /Volumes/Data/Users/paul/.cache/localgpt/models
+[2m2026-02-11T23:56:27.804235Z[0m [34mDEBUG[0m [2mvardaclaw::memory::embeddings[0m[2m:[0m Loading local embedding model: all-MiniLM-L6-v2
+[2m2026-02-11T23:56:27.804377Z[0m [32m INFO[0m [2mhf_hub[0m[2m:[0m Using token file found "/Volumes/Data/Users/paul/.cache/huggingface/token"
+[2m2026-02-11T23:56:27.971334Z[0m [32m INFO[0m [2mvardaclaw::memory[0m[2m:[0m Using local embedding provider: all-MiniLM-L6-v2
+[2m2026-02-11T23:56:27.971474Z[0m [34mDEBUG[0m [2mvardaclaw::memory::embeddings[0m[2m:[0m Embedding 1 texts locally with all-MiniLM-L6-v2
+[2m2026-02-11T23:56:27.974959Z[0m [34mDEBUG[0m [2mvardaclaw::memory[0m[2m:[0m Using hybrid search with 384 dimensions
+[2m2026-02-11T23:56:27.975378Z[0m [34mDEBUG[0m [2mreqwest::connect[0m[2m:[0m starting new connection: http://localhost:8000/
+[2m2026-02-11T23:56:27.977074Z[0m [34mDEBUG[0m [2mhyper_util::client::legacy::connect::http[0m[2m:[0m connecting to [::1]:8000
+[2m2026-02-11T23:56:27.977263Z[0m [34mDEBUG[0m [2mhyper_util::client::legacy::connect::http[0m[2m:[0m connecting to 127.0.0.1:8000
+[2m2026-02-11T23:56:27.977446Z[0m [34mDEBUG[0m [2mhyper_util::client::legacy::connect::http[0m[2m:[0m connected to 127.0.0.1:8000
+[2m2026-02-11T23:56:27.978933Z[0m [34mDEBUG[0m [2mhyper_util::client::legacy::pool[0m[2m:[0m pooling idle connection for ("http", localhost:8000)
+No results found for 'VardaDB'
+
+[FAILURE] Search returned no results.
