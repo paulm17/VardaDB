@@ -10,6 +10,13 @@ pub struct InverseInfo {
     pub inverse_is_list: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VectorConfig {
+    pub field: String,
+    pub source: String,
+    // Future: pub model: String
+}
+
 pub trait Resolver {
     // Resolve a specific field for an entity (UID)
     fn resolve(&self, uid: u64, field_name: &str) -> Option<Value>;
@@ -18,11 +25,14 @@ pub trait Resolver {
     fn find_uid(&self, index_name: &str, value: &str) -> Option<u64>;
 
     // Scan nodes of a type with optional filter constraints and pagination
-    fn scan_nodes(&self, type_name: &str, filter: std::collections::HashMap<String, Value>, sort: std::collections::HashMap<String, Value>, first: Option<usize>, after: Option<String>) -> Vec<u64>;
+    fn scan_nodes(&self, type_name: &str, filter: std::collections::HashMap<String, Value>, sort: std::collections::HashMap<String, Value>, first: Option<usize>, after: Option<String>, uniques: &[String], near_vector: Option<Vec<f64>>) -> Vec<u64>;
+
+    // Resolve a list of related nodes (1:M) with filter/sort/pagination
+    fn resolve_list(&self, parent_uid: u64, field_name: &str, filter: std::collections::HashMap<String, Value>, sort: std::collections::HashMap<String, Value>, first: Option<usize>, after: Option<String>, near_vector: Option<Vec<f64>>) -> Result<Vec<u64>, String>;
 
     // CRUD with Inverses
-    fn create_node(&self, type_name: &str, fields: std::collections::HashMap<String, Value>, uniques: &[String], inverses: &[InverseInfo], search_fields: &std::collections::HashMap<String, Vec<String>>, vector_field: Option<&str>) -> Result<u64, String>;
-    fn update_node(&self, type_name: &str, uid: u64, fields: std::collections::HashMap<String, Value>, uniques: &[String], inverses: &[InverseInfo], search_fields: &std::collections::HashMap<String, Vec<String>>, vector_field: Option<&str>) -> Result<(), String>;
+    fn create_node(&self, type_name: &str, fields: std::collections::HashMap<String, Value>, uniques: &[String], inverses: &[InverseInfo], search_fields: &std::collections::HashMap<String, Vec<String>>, vector_config: Option<&VectorConfig>) -> Result<u64, String>;
+    fn update_node(&self, type_name: &str, uid: u64, fields: std::collections::HashMap<String, Value>, uniques: &[String], inverses: &[InverseInfo], search_fields: &std::collections::HashMap<String, Vec<String>>, vector_config: Option<&VectorConfig>) -> Result<(), String>;
     fn delete_node(&self, type_name: &str, uid: u64, uniques: &[String], inverses: &[InverseInfo], search_fields: &std::collections::HashMap<String, Vec<String>>) -> Result<(), String>;
     
     // Check existence
@@ -40,4 +50,9 @@ pub trait Resolver {
 
     // Advanced Search
     fn search_hybrid(&self, text: &str, field: &str, vector: &[f64], k: usize) -> Vec<(u64, f64)>;
+    
+    // Maintenance
+    fn flush(&self) -> Result<(), String>;
+    fn compact(&self) -> Result<u64, String>;  // Returns duration_ms
+    fn needs_compaction(&self) -> bool;
 }

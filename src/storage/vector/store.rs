@@ -60,6 +60,7 @@ impl PartialOrd for VisitorCandidate {
 }
 
 
+#[derive(Clone)]
 pub struct VectorStore {
     partition: Keyspace,
     config: HNSWConfig,
@@ -384,4 +385,12 @@ impl VectorStore {
         }
         Ok(neighbors)
     }
+
+    pub fn flush(&self) -> anyhow::Result<()> {
+        if let Err(e) = self.partition.rotate_memtable_and_wait() {
+            eprintln!("VectorStore: Failed to rotate memtable: {}", e);
+        }
+        Ok(())
+    }
 }
+

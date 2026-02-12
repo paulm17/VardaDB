@@ -173,4 +173,38 @@ impl Codec {
         buf.write_u64::<BigEndian>(uid).unwrap();
         buf
     }
+
+    // --- Edge Index (Inverse Links) ---
+    // Prefix: 0x07
+    // Key: [0x07][TargetUID:8][Field][0x00][SourceUID:8]
+    // O(1) write per edge, prefix scan to read all edges for a field
+    
+    pub fn encode_edge_key(target_uid: u64, field: &str, source_uid: u64) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(1 + 8 + field.len() + 1 + 8);
+        buf.push(0x07);
+        buf.write_u64::<BigEndian>(target_uid).unwrap();
+        buf.extend_from_slice(field.as_bytes());
+        buf.push(0x00);
+        buf.write_u64::<BigEndian>(source_uid).unwrap();
+        buf
+    }
+
+    pub fn encode_edge_prefix(target_uid: u64, field: &str) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(1 + 8 + field.len() + 1);
+        buf.push(0x07);
+        buf.write_u64::<BigEndian>(target_uid).unwrap();
+        buf.extend_from_slice(field.as_bytes());
+        buf.push(0x00);
+        buf
+    }
+
+    /// Decode a source_uid from an edge key. The source_uid is the last 8 bytes.
+    pub fn decode_edge_source_uid(key: &[u8]) -> Option<u64> {
+        if key.len() >= 8 {
+            use byteorder::ByteOrder;
+            Some(BigEndian::read_u64(&key[key.len()-8..]))
+        } else {
+            None
+        }
+    }
 }

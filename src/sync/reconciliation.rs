@@ -19,26 +19,30 @@ impl RangeFingerprint {
 /// Using XOR of (TimestampHash + KeyHash + ValueHash) is order-independent and allows easy diffing?
 /// Actually, RBSR usually checks "is set identical". XOR sum is good for that.
 pub fn compute_fingerprint(storage: &Storage, db_name: &str, start: &Timestamp, end: &Timestamp) -> anyhow::Result<RangeFingerprint> {
+    // Optimization: If full range (0 to MAX), return global incremental fingerprint
+    let is_min_start = start.millis == 0 && start.counter == 0 && start.node_id == 0;
+    let is_max_end = end.millis == u64::MAX && end.counter == u16::MAX && end.node_id == u64::MAX;
+
+    if is_min_start && is_max_end {
+        if let Some((h, c)) = storage.get_global_fingerprint(db_name) {
+             // println!("DEBUG: Using Cached Fingerprint for {} (Hash: {:x}, Count: {})", db_name, h, c);
+             return Ok(RangeFingerprint {
+                 start: *start,
+                 end: *end,
+                 count: c,
+                 hash: h,
+             });
+        }
+    }
+
     let items = storage.get_history_range(db_name, Some(start), Some(end))?;
     
     let mut hash: u64 = 0;
     let mut count = 0;
 
     for (k, v) in items {
-        // k is [Ts][UID][Pred]
-        // v for history can be [Val] or [] (Tombstone)
-        
-        // We hash the Key + Value. 
-        // We use a simple hash function for now (e.g. seahash or fxhash would be better, but we'll stick to std or simple math)
-        // Let's use a simple shifting XOR mix for 64-bit.
-        
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        use std::hash::{Hash, Hasher};
-        k.hash(&mut hasher);
-        v.hash(&mut hasher);
-        let item_hash = hasher.finish();
-        
-        hash ^= item_hash; // XOR allows adding/removing items order-independently
+        let item_hash = Storage::hash_item(&k, &v);
+        hash ^= item_hash; 
         count += 1;
     }
 
@@ -59,4 +63,10 @@ pub enum SyncMessage {
     DataResponse(Vec<(Vec<u8>, Vec<u8>)>),
     RequestSchema,
     SchemaResponse(String),
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SyncEnvelope {
+    pub sender: u64,
+    pub message: SyncMessage,
 }

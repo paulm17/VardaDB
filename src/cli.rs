@@ -31,6 +31,15 @@ pub enum DbCommands {
         /// Name of the database
         name: String,
     },
+    /// Apply a schema to a database
+    Apply {
+        /// Name of the database
+        #[arg(short, long)]
+        name: String,
+        /// Path to the schema SDL file
+        #[arg(short, long)]
+        schema: String,
+    },
 }
 
 pub async fn handle_db_command(command: &DbCommands, config: &VardaConfig) -> anyhow::Result<()> {
@@ -80,6 +89,22 @@ pub async fn handle_db_command(command: &DbCommands, config: &VardaConfig) -> an
             } else {
                 let err = res.text().await?;
                 eprintln!("Failed to delete database: {}", err);
+            }
+        },
+        DbCommands::Apply { name, schema } => {
+            let schema_content = std::fs::read_to_string(schema)
+                .map_err(|e| anyhow::anyhow!("Failed to read schema file: {}", e))?;
+
+            let res = client.post(format!("{}/db/{}/schema", base_url, name))
+                .body(schema_content)
+                .send()
+                .await?;
+            
+            if res.status().is_success() {
+                println!("Schema applied to database '{}' successfully.", name);
+            } else {
+                let err = res.text().await?;
+                eprintln!("Failed to apply schema: {}", err);
             }
         },
     }

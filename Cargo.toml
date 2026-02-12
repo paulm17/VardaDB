@@ -3,6 +3,12 @@ name = "vardadb"
 version = "0.1.0"
 edition = "2021"
 
+[workspace]
+members = [
+    "jobs",
+    "vardaclaw",
+]
+
 [dependencies]
 # Async Runtime
 tokio = { version = "1.36", features = ["full"] }
@@ -12,12 +18,21 @@ tokio-stream = "0.1"
 async-graphql = { version = "7.0" } 
 async-graphql-parser = "7.0"
 async-graphql-value = "7.0"
+async-trait = "0.1"
 # NOTE: dynamic schema support might be in the core or a different feature. 
 # Grafbase uses "async-graphql-value" and custom resolution.
 # We will verify feature availability.
 
 # Storage (Fjall)
-fjall = "2.0" 
+fjall = { version = "3.0.1", features = ["bytes_1", "lz4"] } 
+
+# Durable Execution Engine
+jobs = { path = "jobs" }
+vardaclaw = { path = "vardaclaw" }
+
+# Distribution (Zenoh)
+zenoh = { version = "1.7.2", features = ["unstable"] }
+# Using 1.7.2 as verified in the repo source. Unstable features enabled for advanced APIs.if needed 
 
 # Error Handling
 thiserror = "1.0"
@@ -37,6 +52,10 @@ futures-util = "0.3.31"
 regex = "1.12.2"
 rayon = "1.11.0"
 rust-stemmers = "1.2.0"
+metrics = "0.24"
+sysinfo = "0.33"
+humantime = "2.1"
+parking_lot = "0.12"
 clap = { version = "4.5.54", features = ["derive"] }
 chrono = "0.4.43"
 sha2 = "0.10.9"
@@ -52,7 +71,29 @@ async-graphql-axum = "7.0"
 lru = "0.16.3"
 uuid = { version = "1.20.0", features = ["v4", "fast-rng", "macro-diagnostics", "serde"] }
 url = "2.5.8"
+toml = "0.9.11"
+rand = "0.8.5"
+bincode = "1.3"
+prism-mcp-rs = { version = "0.1", features = ["stdio"] }
+
+
+# System
+comfy-table = "7.1"
+reqwest = { version = "0.13.1", features = ["json"] }
+dashmap = "6.1.0"
+rustyline = "17.0.2"
+fastembed = "5.9.0"
+tempfile = "3.24.0"
 
 [dev-dependencies]
-reqwest = { version = "0.13.1", features = ["json"] }
-tempfile = "3.24.0"
+
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "million_todos"
+harness = false
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

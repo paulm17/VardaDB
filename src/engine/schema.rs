@@ -1,4 +1,7 @@
 use async_graphql::dynamic::{self};
+use tokio::sync::Semaphore;
+
+static MUTATION_SEMAPHORE: Semaphore = Semaphore::const_new(64);
 
 // This is our "Engine" Schema, which currently wraps async-graphql
 #[derive(Clone)]
@@ -12,7 +15,8 @@ struct TypeMetadata {
     interface_implementations: Vec<String>, // Interfaces this type implements
     validate_fields: std::collections::HashMap<String, Vec<ValidationRule>>,
     relations: std::collections::HashMap<String, String>,
-    vector_field: Option<String>,
+
+    vector_config: Option<crate::engine::resolver::VectorConfig>,
     kind: TypeKind,
 }
 
@@ -86,8 +90,13 @@ impl Schema {
 
         use async_graphql_parser::types::{TypeSystemDefinition, TypeKind as AstTypeKind, BaseType};
 
-        // Pass 0: Pre-scan for field types (IsList map) for Inverse resolution
-        let mut type_field_is_list: std::collections::HashMap<String, std::collections::HashMap<String, bool>> = std::collections::HashMap::new();
+        // Pass 0: Pre-scan for field types to assist Inverse resolution
+        struct FieldInfo {
+            type_name: String,
+            is_list: bool,
+        }
+        let mut type_field_info: std::collections::HashMap<String, std::collections::HashMap<String, FieldInfo>> = std::collections::HashMap::new();
+        
         for def in &doc.definitions {
              if let TypeSystemDefinition::Type(type_def) = def {
                 if let AstTypeKind::Object(obj_def) = &type_def.node.kind {
@@ -95,16 +104,24 @@ impl Schema {
                     let mut fields_map = std::collections::HashMap::new();
                     for field in &obj_def.fields {
                         let f_name = field.node.name.node.to_string();
+                        let f_type_name = match &field.node.ty.node.base {
+                                BaseType::Named(n) => n.to_string(),
+                                BaseType::List(inner) => match &inner.base {
+                                    BaseType::Named(n) => n.to_string(),
+                                    _ => "String".to_string()
+                                },
+                            };
                         let is_list = matches!(field.node.ty.node.base, BaseType::List(_));
-                        fields_map.insert(f_name, is_list);
+                        fields_map.insert(f_name, FieldInfo { type_name: f_type_name, is_list });
                     }
-                    type_field_is_list.insert(type_name, fields_map);
+                    type_field_info.insert(type_name, fields_map);
                 }
              }
         }
 
         // Pass 1: Collect Metadata for ALL types
         let mut metadata_map: std::collections::HashMap<String, TypeMetadata> = std::collections::HashMap::new();
+        let mut enum_names: std::collections::HashSet<String> = std::collections::HashSet::new();
         
         for def in &doc.definitions {
             if let TypeSystemDefinition::Type(type_def) = def {
@@ -114,13 +131,16 @@ impl Schema {
                 }
 
                 match &type_def.node.kind {
+                    AstTypeKind::Enum(_) => {
+                         enum_names.insert(type_name.clone());
+                    },
                     AstTypeKind::Object(obj_def) => {
                         let mut unique_fields: Vec<String> = Vec::new();
                         let mut inverses: Vec<crate::engine::resolver::InverseInfo> = Vec::new();
                         let mut type_search_fields: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
                         let mut cascade_fields: Vec<(String, String)> = Vec::new();
 
-                        let mut vector_field: Option<String> = None;
+                        let mut vector_config: Option<crate::engine::resolver::VectorConfig> = None;
                         let mut relations: std::collections::HashMap<String, String> = std::collections::HashMap::new();
 
                         for field in &obj_def.fields {
@@ -169,8 +189,23 @@ impl Schema {
                                 cascade_fields.push((field_name.clone(), field_type_name));
                             }
                             // Vector
-                            if field.node.directives.iter().any(|d| d.node.name.node == "vector") {
-                                vector_field = Some(field_name.clone());
+                            if let Some(dir) = field.node.directives.iter().find(|d| d.node.name.node == "vector") {
+                                let mut source = "".to_string();
+                                if let Some((_, val)) = dir.node.arguments.iter().find(|(n, _)| n.node == "from") {
+                                    if let async_graphql::Value::String(s) = &val.node {
+                                        source = s.clone();
+                                    }
+                                }
+                                // Default source to parsed "text" if empty? Or required? 
+                                // For now, we assume user provides it, or if missing we can default to "text"?
+                                // But better to be explicit. If empty, maybe just field name? No, that's recursion.
+                                
+                                if !source.is_empty() {
+                                    vector_config = Some(crate::engine::resolver::VectorConfig {
+                                        field: field_name.clone(),
+                                        source,
+                                    });
+                                }
                             }
 
                             // Inverse
@@ -185,9 +220,10 @@ impl Schema {
                                             },
                                         };
                                         let inverse_type = field_type_name;
-                                        let inverse_is_list = type_field_is_list.get(&inverse_type)
+                                        // Use new map
+                                        let inverse_is_list = type_field_info.get(&inverse_type)
                                             .and_then(|f_map| f_map.get(inverse_field_name))
-                                            .cloned()
+                                            .map(|info| info.is_list)
                                             .unwrap_or(false);
 
                                         inverses.push(crate::engine::resolver::InverseInfo {
@@ -197,6 +233,50 @@ impl Schema {
                                             inverse_is_list,
                                         });
                                     }
+                                }
+                            } else {
+                                // Implicit Inverse Detection
+                                let target_type_name = match &field.node.ty.node.base {
+                                    BaseType::Named(n) => n.to_string(),
+                                    BaseType::List(inner) => match &inner.base {
+                                        BaseType::Named(n) => n.to_string(),
+                                        _ => "String".to_string()
+                                    },
+                                };
+                                
+                                // Check if target type has a field pointing back to us (of our type)
+                                if let Some(target_fields) = type_field_info.get(&target_type_name) {
+                                    // Iterate fields of target type to find one with type == our type_name
+                                    // Heuristic: First match? Or exact match on name?
+                                    // Dgraph rule: If A.b -> B, checks B.a -> A. Field names are arbitrary but types matter?
+                                    // Actually usually it's explicit. But here we want implicit based on relation existence?
+                                    // Better heuristic: Check if target type has a field that is of type `type_name`.
+                                    // If multiple, maybe we can't decide (or check names?).
+                                    // Let's try matching field name to type name first (common convention: author: Author).
+                                    // Or simply: ANY field in B that points to A is an inverse candidate.
+                                    
+                                    // Let's look for field in B which has type A.
+                                    let mut candidates = Vec::new();
+                                    for (t_field_name, t_field_info) in target_fields {
+                                        if t_field_info.type_name == type_name {
+                                            candidates.push(t_field_name.clone());
+                                        }
+                                    }
+                                    
+                                    if candidates.len() == 1 {
+                                        let inverse_field_name = &candidates[0];
+                                        let inverse_is_list = target_fields.get(inverse_field_name).unwrap().is_list;
+                                        if !inverses.iter().any(|i| i.field == field_name) {
+                                            inverses.push(crate::engine::resolver::InverseInfo {
+                                                field: field_name.clone(),
+                                                inverse_type: target_type_name.clone(),
+                                                inverse_field: inverse_field_name.clone(),
+                                                inverse_is_list,
+                                            });
+                                        }
+                                    }
+                                    // If multiple candidates, usually ambiguous without @hasInverse.
+                                    // We'll skip for safety to avoid wrong linking.
                                 }
                             }
                         }
@@ -274,7 +354,7 @@ impl Schema {
                             interface_implementations: interfaces,
                             validate_fields,
                             relations,
-                            vector_field,
+                            vector_config,
                             kind: TypeKind::Object,
                         });
                     },
@@ -288,7 +368,7 @@ impl Schema {
                             interface_implementations: vec![],
                             validate_fields: std::collections::HashMap::new(),
                             relations: std::collections::HashMap::new(),
-                            vector_field: None,
+                            vector_config: None,
                             kind: TypeKind::Interface,
                         });
                     },
@@ -303,7 +383,7 @@ impl Schema {
                             interface_implementations: vec![],
                             validate_fields: std::collections::HashMap::new(),
                             relations: std::collections::HashMap::new(),
-                            vector_field: None,
+                            vector_config: None,
                             kind: TypeKind::Union(possible_types),
                         });
                     },
@@ -346,7 +426,8 @@ impl Schema {
                             }));
                         }
                         let mut input = dynamic::InputObject::new(format!("{}Input", type_name))
-                            .field(dynamic::InputValue::new("uid", dynamic::TypeRef::named(dynamic::TypeRef::ID)));
+                            .field(dynamic::InputValue::new("uid", dynamic::TypeRef::named(dynamic::TypeRef::ID)))
+                            .field(dynamic::InputValue::new("id", dynamic::TypeRef::named(dynamic::TypeRef::ID)));
                         let mut filter_input = dynamic::InputObject::new(format!("{}Filter", type_name));
                         
                         // Parse Fields
@@ -373,8 +454,9 @@ impl Schema {
                                 }
                             }
 
+                            let is_enum = enum_names.contains(&field_type_name);
                             let is_scalar = matches!(field_type_name.as_str(), "String" | "Int" | "Boolean" | "ID" | "Float" | "Int64" | "DateTime" | "GeoPoint" | "Polygon" | "MultiPolygon")
-                                            || crate::engine::scalars::is_scalar_type(&field_type_name);
+                                            || crate::engine::scalars::is_scalar_type(&field_type_name) || is_enum;
                             let is_relation = !is_scalar;
                            
                             // Check if field type is polymorphic (Interface or Union)
@@ -406,11 +488,12 @@ impl Schema {
                             let field_type_name_clone = field_type_name.clone();
                             let is_rel = is_relation;
                             let is_poly = is_polymorphic;
+                            let is_list = is_list;
                             
-                            obj = obj.field(dynamic::Field::new(field_name.clone(), ty_ref, move |ctx| { 
+                            let mut dynamic_field = dynamic::Field::new(field_name.clone(), ty_ref, move |ctx| { 
                                 let field_key = fname_clone.clone();
                                 let t_name = type_name_clone.clone();
-                                let f_type_name = field_type_name_clone.clone();
+                                let _f_type_name = field_type_name_clone.clone();
                                 dynamic::FieldFuture::new(async move {
                                     // Special handling for GeoPoint (Embedded Object)
                                     if t_name == "GeoPoint" {
@@ -429,144 +512,105 @@ impl Schema {
                                     use crate::engine::resolver::Resolver;
                                         let resolver = ctx.data::<Box<dyn Resolver + Send + Sync>>().unwrap();
                                         
-                                        if let Some(val) = resolver.resolve(*uid, &field_key) {
-                                            if is_rel {
+                                        if is_rel {
+                                            // 1. Parse Arguments for Relation
+                                            let mut filter_map = std::collections::HashMap::new();
+                                            if let Ok(filter_arg) = ctx.args.try_get("filter") { filter_map = filter_arg.deserialize()?; }
+                                            let mut sort_map = std::collections::HashMap::new();
+                                            if let Ok(sort_arg) = ctx.args.try_get("sort") { sort_map = sort_arg.deserialize()?; }
+                                            let mut first = None;
+                                            if let Ok(limit_arg) = ctx.args.try_get("first") { if let Ok(n) = limit_arg.u64() { first = Some(n as usize); } }
+                                            let mut after = None;
+                                            if let Ok(cursor_arg) = ctx.args.try_get("after") { if let Ok(s) = cursor_arg.string() { after = Some(s.to_string()); } }
+                                            
+                                            let mut near_vector = None;
+                                            if let Ok(nv_arg) = ctx.args.try_get("nearVector") {
+                                                if let Ok(list) = nv_arg.list() {
+                                                     let vec: Vec<f64> = list.iter().filter_map(|v| v.f64().ok()).collect();
+                                                     if !vec.is_empty() { near_vector = Some(vec); }
+                                                }
+                                            }
+
+                                            // 2. Call resolve_list
+                                            match resolver.resolve_list(*uid, &field_key, filter_map, sort_map, first, after, near_vector) {
+                                                Ok(uids) => {
+                                                    let mut fvs = Vec::new();
+                                                    for u in uids {
+                                                        // If polymorphic, need concrete type
+                                                        if is_poly {
+                                                            if let Some(ctype) = resolver.get_node_type(u) {
+                                                                fvs.push(dynamic::FieldValue::with_type(dynamic::FieldValue::owned_any(u), ctype));
+                                                            }
+                                                        } else {
+                                                            fvs.push(dynamic::FieldValue::owned_any(u)); 
+                                                        }
+                                                    }
+                                                    if is_list {
+                                                        Ok(Some(dynamic::FieldValue::list(fvs)))
+                                                    } else {
+                                                        if let Some(first) = fvs.into_iter().next() {
+                                                            Ok(Some(first))
+                                                        } else {
+                                                            Ok(None)
+                                                        }
+                                                    }
+                                                },
+                                                Err(_) => Ok(None)
+                                            }
+                                        } else {
+                                            // Scalar logic
+                                            if let Some(val) = resolver.resolve(*uid, &field_key) {
+                                                if _f_type_name == "GeoPoint" || _f_type_name == "Polygon" { 
+                                                     Ok(Some(dynamic::FieldValue::owned_any(val)))
+                                                } else {
                                                 match val {
                                                     async_graphql::Value::List(items) => {
-                                                        let mut fvs = Vec::new();
-                                                        for item in items {
-                                                            let uid_opt = match item {
-                                                                async_graphql::Value::String(s) => s.parse::<u64>().ok(),
-                                                                async_graphql::Value::Number(n) => n.as_u64(),
-                                                                _ => None
-                                                            };
-                                                            if let Some(u) = uid_opt { 
-                                                                // If polymorphic, need concrete type
-                                                                if is_poly {
-                                                                    if let Some(ctype) = resolver.get_node_type(u) {
-                                                                        fvs.push(dynamic::FieldValue::with_type(dynamic::FieldValue::owned_any(u), ctype));
-                                                                    } else {
-                                                                        // Cannot resolve type? Skip or Error? Skippping safe
-                                                                    }
-                                                                } else {
-                                                                    fvs.push(dynamic::FieldValue::owned_any(u)); 
-                                                                }
-                                                            }
-                                                        }
-                                                        Ok(Some(dynamic::FieldValue::list(fvs)))
+                                                         // Should not happen for Scalars usually, unless scalar list?
+                                                         // Existing logic for scalar list:
+                                                         let mut fvs = Vec::new();
+                                                         for item in items {
+                                                             fvs.push(dynamic::FieldValue::value(item));
+                                                         }
+                                                         Ok(Some(dynamic::FieldValue::list(fvs)))
                                                     },
                                                     async_graphql::Value::String(s) => {
-                                                         if let Ok(u) = s.parse::<u64>() {
-                                                             if is_poly {
-                                                                 if let Some(ctype) = resolver.get_node_type(u) {
-                                                                     Ok(Some(dynamic::FieldValue::with_type(dynamic::FieldValue::owned_any(u), ctype)))
-                                                                 } else { Ok(None) }
-                                                             } else {
-                                                                 Ok(Some(dynamic::FieldValue::owned_any(u)))
-                                                             }
-                                                         } else { Ok(None) }
+                                                         Ok(Some(dynamic::FieldValue::value(async_graphql::Value::String(s))))
                                                     },
                                                     async_graphql::Value::Number(n) => {
-                                                         if let Some(u) = n.as_u64() {
-                                                             if is_poly {
-                                                                 if let Some(ctype) = resolver.get_node_type(u) {
-                                                                     Ok(Some(dynamic::FieldValue::with_type(dynamic::FieldValue::owned_any(u), ctype)))
-                                                                 } else { Ok(None) }
-                                                             } else {
-                                                                 Ok(Some(dynamic::FieldValue::owned_any(u)))
-                                                             }
-                                                         } else { Ok(None) }
+                                                         Ok(Some(dynamic::FieldValue::value(async_graphql::Value::Number(n))))
                                                     },
-                                                    _ => Ok(None)
-                                                }
-                                            } else {
-                                                // Handle Scalar / Embedded GeoPoint
-                                                match val {
-                                                    async_graphql::Value::Object(map) if f_type_name == "GeoPoint" => {
-                                                        // Pass Object as Custom GeoPointData
-                                                        let mut lat_v = 0.0;
-                                                        let mut lon_v = 0.0;
-                                                        if let Some(lat) = map.get("latitude") { 
-                                                            if let async_graphql::Value::Number(n) = lat { lat_v = n.as_f64().unwrap_or(0.0); }
-                                                        }
-                                                        if let Some(lon) = map.get("longitude") { 
-                                                            if let async_graphql::Value::Number(n) = lon { lon_v = n.as_f64().unwrap_or(0.0); }
-                                                        }
-                                                        Ok(Some(dynamic::FieldValue::owned_any(GeoPointData { latitude: lat_v, longitude: lon_v })))
-                                                    },
-                                                    async_graphql::Value::Object(map) if f_type_name == "Polygon" => {
-                                                        // Helper to parse point
-                                                        let parse_point = |v: &async_graphql::Value| -> Option<GeoPointData> {
-                                                            if let async_graphql::Value::Object(m) = v {
-                                                                let lat = m.get("latitude").and_then(|v| if let async_graphql::Value::Number(n) = v { n.as_f64() } else { None }).unwrap_or(0.0);
-                                                                let lon = m.get("longitude").and_then(|v| if let async_graphql::Value::Number(n) = v { n.as_f64() } else { None }).unwrap_or(0.0);
-                                                                Some(GeoPointData { latitude: lat, longitude: lon })
-                                                            } else { None }
-                                                        };
-
-                                                        let mut exterior = vec![];
-                                                        if let Some(async_graphql::Value::List(l)) = map.get("exterior") {
-                                                            for item in l { if let Some(p) = parse_point(item) { exterior.push(p); } }
-                                                        }
-
-                                                        let mut interiors = vec![];
-                                                        if let Some(async_graphql::Value::List(l)) = map.get("interiors") {
-                                                            for ring_val in l {
-                                                                if let async_graphql::Value::List(ring_list) = ring_val {
-                                                                    let mut ring = vec![];
-                                                                    for item in ring_list { if let Some(p) = parse_point(item) { ring.push(p); } }
-                                                                    interiors.push(ring);
-                                                                }
-                                                            }
-                                                        }
-                                                        Ok(Some(dynamic::FieldValue::owned_any(GeoPolygonData { exterior, interiors })))
-                                                    },
-                                                    async_graphql::Value::Object(map) if f_type_name == "MultiPolygon" => {
-                                                        // Helper to parse point
-                                                        let parse_point = |v: &async_graphql::Value| -> Option<GeoPointData> {
-                                                            if let async_graphql::Value::Object(m) = v {
-                                                                let lat = m.get("latitude").and_then(|v| if let async_graphql::Value::Number(n) = v { n.as_f64() } else { None }).unwrap_or(0.0);
-                                                                let lon = m.get("longitude").and_then(|v| if let async_graphql::Value::Number(n) = v { n.as_f64() } else { None }).unwrap_or(0.0);
-                                                                Some(GeoPointData { latitude: lat, longitude: lon })
-                                                            } else { None }
-                                                        };
-                                                        let parse_poly = |v: &async_graphql::Value| -> Option<GeoPolygonData> {
-                                                            if let async_graphql::Value::Object(m) = v {
-                                                                let mut exterior = vec![];
-                                                                if let Some(async_graphql::Value::List(l)) = m.get("exterior") {
-                                                                    for item in l { if let Some(p) = parse_point(item) { exterior.push(p); } }
-                                                                }
-                                                                let mut interiors = vec![];
-                                                                if let Some(async_graphql::Value::List(l)) = m.get("interiors") {
-                                                                    for ring_val in l {
-                                                                        if let async_graphql::Value::List(ring_list) = ring_val {
-                                                                            let mut ring = vec![];
-                                                                            for item in ring_list { if let Some(p) = parse_point(item) { ring.push(p); } }
-                                                                            interiors.push(ring);
-                                                                        }
-                                                                    }
-                                                                }
-                                                                Some(GeoPolygonData { exterior, interiors })
-                                                            } else { None }
-                                                        };
-
-                                                        let mut polygons = vec![];
-                                                        if let Some(async_graphql::Value::List(l)) = map.get("polygons") {
-                                                            for item in l { if let Some(p) = parse_poly(item) { polygons.push(p); } }
-                                                        }
-                                                        Ok(Some(dynamic::FieldValue::owned_any(GeoMultiPolygonData { polygons })))
-                                                    },
-                                                    v => Ok(Some(dynamic::FieldValue::value(v))), 
+                                                    _ => {
+                                                        // Fallthrough to complex handling
+                                                        Ok(Some(dynamic::FieldValue::value(val)))
+                                                    }
                                                 }
                                             }
                                         } else {
-                                            Ok(None)
+                                                Ok(None)
+                                            }
                                         }
+
                                     } else {
                                         Ok(None)
                                     }
                                 })
-                            }));
+                            });
+                            
+                            if is_relation {
+                                dynamic_field = dynamic_field
+                                    .argument(dynamic::InputValue::new("filter", dynamic::TypeRef::named(format!("{}Filter", field_type_name))))
+                                    .argument(dynamic::InputValue::new("sort", dynamic::TypeRef::named(format!("{}Sort", field_type_name))))
+                                    .argument(dynamic::InputValue::new("first", dynamic::TypeRef::named(dynamic::TypeRef::INT)))
+                                    .argument(dynamic::InputValue::new("after", dynamic::TypeRef::named(dynamic::TypeRef::STRING)));
+                                
+                                // Check if target type has vector field
+                                if let Some(target_meta) = metadata_arc.get(&field_type_name) {
+                                    if target_meta.vector_config.is_some() {
+                                        dynamic_field = dynamic_field.argument(dynamic::InputValue::new("nearVector", dynamic::TypeRef::named_list(dynamic::TypeRef::FLOAT)));
+                                    }
+                                }
+                            }
+                            obj = obj.field(dynamic_field);
 
                             // Input fields
                              if is_scalar && field_type_name != "ID" {
@@ -579,7 +623,7 @@ impl Schema {
                                     "DateTime" => if is_list { dynamic::TypeRef::named_list("DateTime") } else { dynamic::TypeRef::named("DateTime") },
                                     "GeoPoint" => if is_list { dynamic::TypeRef::named_list("GeoPointInput") } else { dynamic::TypeRef::named("GeoPointInput") },
                                     _ => {
-                                        let base_name = if crate::engine::scalars::is_scalar_type(&field_type_name) {
+                                        let base_name = if crate::engine::scalars::is_scalar_type(&field_type_name) || is_enum {
                                             field_type_name.clone()
                                         } else {
                                             format!("{}Input", field_type_name)
@@ -592,6 +636,8 @@ impl Schema {
                                 
                                 let filter_ty_name = if crate::engine::scalars::is_scalar_type(&field_type_name) {
                                     crate::engine::scalars::get_scalar_filter_type(&field_type_name).to_string()
+                                } else if is_enum {
+                                    "StringFilter".to_string()
                                 } else {
                                     format!("{}Filter", field_type_name)
                                 };
@@ -604,6 +650,12 @@ impl Schema {
                                 } else {
                                     input = input.field(dynamic::InputValue::new(field_name.clone(), dynamic::TypeRef::named(rel_input_type)));
                                 }
+
+                                // RECURSIVE FILTER INPUT GENERATION
+                                let rel_filter_type = format!("{}Filter", field_type_name);
+                                // For 1:M (List), standard is usually "some: Filter". For simplicty/Dgraph-parity, we map field -> Filter.
+                                // If list, it implies "Any Match".
+                                filter_input = filter_input.field(dynamic::InputValue::new(field_name.clone(), dynamic::TypeRef::named(rel_filter_type)));
                             }
                         }
 
@@ -635,8 +687,11 @@ impl Schema {
                         let type_name_for_list = type_name.clone();
                         let filter_type_name = format!("{}Filter", type_name);
                         
-                        query_fields.push(dynamic::Field::new(list_query_name, dynamic::TypeRef::named_list(type_name_for_list.clone()), move |ctx| {
+                        let uniques = meta.uniques.clone();
+                        let has_vector = meta.vector_config.is_some();
+                        let mut list_field = dynamic::Field::new(list_query_name, dynamic::TypeRef::named_list(type_name_for_list.clone()), move |ctx| {
                             let t_name = type_name_for_list.clone();
+                            let uniques = uniques.clone();
                             dynamic::FieldFuture::new(async move {
                                 use crate::engine::resolver::Resolver;
                                 let resolver = ctx.data::<Box<dyn Resolver + Send + Sync>>().unwrap();
@@ -648,15 +703,34 @@ impl Schema {
                                 if let Ok(limit_arg) = ctx.args.try_get("first") { if let Ok(n) = limit_arg.u64() { first = Some(n as usize); } }
                                 let mut after = None;
                                 if let Ok(cursor_arg) = ctx.args.try_get("after") { if let Ok(s) = cursor_arg.string() { after = Some(s.to_string()); } }
+                                
+                                let mut near_vector = None;
+                                if let Ok(nv_arg) = ctx.args.try_get("nearVector") {
+                                    if let Ok(list) = nv_arg.list() {
+                                            let vec: Vec<f64> = list.iter().filter_map(|v| v.f64().ok()).collect();
+                                            if !vec.is_empty() { near_vector = Some(vec); }
+                                    }
+                                }
 
-                                let uids = resolver.scan_nodes(&t_name, filter_map, sort_map, first, after);
+                                let uids = resolver.scan_nodes(&t_name, filter_map, sort_map, first, after, &uniques, near_vector);
                                 let result: Vec<dynamic::FieldValue> = uids.into_iter().map(|uid| dynamic::FieldValue::owned_any(uid)).collect();
                                 Ok(Some(dynamic::FieldValue::list(result)))
                             })
                         }).argument(dynamic::InputValue::new("filter", dynamic::TypeRef::named(filter_type_name)))
                           .argument(dynamic::InputValue::new("sort", dynamic::TypeRef::named(format!("{}Sort", type_name))))
                           .argument(dynamic::InputValue::new("first", dynamic::TypeRef::named(dynamic::TypeRef::INT)))
-                          .argument(dynamic::InputValue::new("after", dynamic::TypeRef::named(dynamic::TypeRef::STRING))));
+                          .argument(dynamic::InputValue::new("after", dynamic::TypeRef::named(dynamic::TypeRef::STRING)));
+                        
+                        if has_vector {
+                            list_field = list_field.argument(dynamic::InputValue::new("nearVector", dynamic::TypeRef::named_list(dynamic::TypeRef::FLOAT)));
+                        }
+                        
+                        query_fields.push(list_field);
+
+
+                        // Define Relation Filter Type *Explicitly* here if needed or rely on dynamic
+                        // The loop below handles fields.
+
 
                         // 2. Query Single
                         let query_single_name = format!("get{}", type_name);
@@ -668,7 +742,8 @@ impl Schema {
                             dynamic::FieldFuture::new(async move {
                                 use crate::engine::resolver::Resolver;
                                 let resolver = ctx.data::<Box<dyn Resolver + Send + Sync>>().unwrap();
-                                if let Ok(id_arg) = ctx.args.try_get("uid") {
+                                let id_arg = if let Ok(arg) = ctx.args.try_get("uid") { Some(arg) } else { ctx.args.try_get("id").ok() };
+                                if let Some(id_arg) = id_arg {
                                     let id_str = id_arg.string()?.to_string();
                                     let uid = if id_str.starts_with("0x") { u64::from_str_radix(&id_str[2..], 16).unwrap_or(0) } else { id_str.parse::<u64>().unwrap_or(0) };
                                     if uid > 0 && resolver.node_exists(&t_name, uid) { return Ok(Some(dynamic::FieldValue::owned_any(uid))); }
@@ -682,7 +757,8 @@ impl Schema {
                                 }
                                 Ok(None)
                             })
-                        }).argument(dynamic::InputValue::new("uid", dynamic::TypeRef::named(dynamic::TypeRef::ID)));
+                        }).argument(dynamic::InputValue::new("uid", dynamic::TypeRef::named(dynamic::TypeRef::ID)))
+                          .argument(dynamic::InputValue::new("id", dynamic::TypeRef::named(dynamic::TypeRef::ID)));
                         for f in unique_fields { query_field = query_field.argument(dynamic::InputValue::new(f.clone(), dynamic::TypeRef::named(dynamic::TypeRef::STRING))); }
                         query_fields.push(query_field);
 
@@ -701,8 +777,10 @@ impl Schema {
                             let _s_fields = search_fields_create.clone();
                             let meta_arc = meta_arc_create.clone();
                             dynamic::FieldFuture::new(async move {
+                                let mut_start = std::time::Instant::now();
                                 let input_arg = ctx.args.try_get("input")?;
                                 let fields: std::collections::HashMap<String, async_graphql::Value> = input_arg.deserialize()?;
+                                let deser_time = mut_start.elapsed();
                                 
                                 // Validation
                                 let _meta = meta_arc.get(&t_name).unwrap();
@@ -710,8 +788,23 @@ impl Schema {
                                 use crate::engine::resolver::Resolver;
                                 let resolver = ctx.data::<Box<dyn Resolver + Send + Sync>>().unwrap();
 
+                                // Acquire Semaphore Permit
+                                let sem_start = std::time::Instant::now();
+                                let _permit = MUTATION_SEMAPHORE.acquire().await.map_err(|e| e.to_string())?;
+                                let sem_time = sem_start.elapsed();
+
                                 // Deep Creation
-                                match deep_create_node(resolver, &meta_arc, &t_name, fields).await {
+                                let create_start = std::time::Instant::now();
+                                let result = deep_create_node(resolver, &meta_arc, &t_name, fields).await;
+                                let create_time = create_start.elapsed();
+                                
+                                let total = mut_start.elapsed();
+                                if total.as_millis() > 5 {
+                                    eprintln!("[SERVER] create{} | deser={:?} sem_wait={:?} create={:?} total={:?}",
+                                             t_name, deser_time, sem_time, create_time, total);
+                                }
+                                
+                                match result {
                                     Ok(uid) => Ok(Some(dynamic::FieldValue::owned_any(uid))),
                                     Err(e) => Err(e.into()),
                                 }
@@ -736,7 +829,35 @@ impl Schema {
                                 let id_arg = ctx.args.try_get("uid")?;
                                 let uid = id_arg.string()?.parse::<u64>().map_err(|_| "Invalid ID")?;
                                 let input_arg = ctx.args.try_get("input")?;
-                                let fields: std::collections::HashMap<String, async_graphql::Value> = input_arg.deserialize()?;
+                                let mut fields: std::collections::HashMap<String, async_graphql::Value> = input_arg.deserialize()?;
+                                
+                                // Normalize fields: If value is Object with uid/id, flatten to String(uid)
+                                for (_, value) in fields.iter_mut() {
+                                    if let async_graphql::Value::Object(map) = value {
+                                        let uid_val = map.get("uid").or(map.get("id"));
+                                        if let Some(u) = uid_val {
+                                            match u {
+                                                async_graphql::Value::String(s) => *value = async_graphql::Value::String(s.clone()),
+                                                async_graphql::Value::Number(n) => *value = async_graphql::Value::String(n.to_string()),
+                                                _ => {}
+                                            }
+                                        }
+                                    } else if let async_graphql::Value::List(list) = value {
+                                        // Handle List of Objects
+                                        for item in list.iter_mut() {
+                                            if let async_graphql::Value::Object(map) = item {
+                                                let uid_val = map.get("uid").or(map.get("id"));
+                                                if let Some(u) = uid_val {
+                                                     match u {
+                                                        async_graphql::Value::String(s) => *item = async_graphql::Value::String(s.clone()),
+                                                        async_graphql::Value::Number(n) => *item = async_graphql::Value::String(n.to_string()),
+                                                        _ => {}
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
 
                                 // Validation
                                 let meta = meta_arc.get(&t_name).unwrap();
@@ -744,7 +865,7 @@ impl Schema {
 
                                 use crate::engine::resolver::Resolver;
                                 let resolver = ctx.data::<Box<dyn Resolver + Send + Sync>>().unwrap();
-                                match resolver.update_node(&t_name, uid, fields, &u_fields, &inv_fields, &s_fields, meta.vector_field.as_deref()) {
+                                match resolver.update_node(&t_name, uid, fields, &u_fields, &inv_fields, &s_fields, meta.vector_config.as_ref()) {
                                     Ok(_) => Ok(Some(dynamic::FieldValue::value(async_graphql::Value::Boolean(true)))),
                                     Err(e) => Err(e.into()),
                                 }
@@ -857,6 +978,12 @@ impl Schema {
                          let input = dynamic::InputObject::new(format!("{}Input", type_name))
                             .field(dynamic::InputValue::new("uid", dynamic::TypeRef::named(dynamic::TypeRef::ID)));
                          types.push(dynamic::Type::InputObject(input));
+                         
+                         // Generate Filter/Sort for Interface (Minimal implementation)
+                         let filter = dynamic::InputObject::new(format!("{}Filter", type_name));
+                         types.push(dynamic::Type::InputObject(filter));
+                         let sort = dynamic::InputObject::new(format!("{}Sort", type_name));
+                         types.push(dynamic::Type::InputObject(sort));
                     },
                     AstTypeKind::Union(union_def) => {
                         let mut union = dynamic::Union::new(type_name.clone());
@@ -939,6 +1066,31 @@ impl Schema {
                 }
             }
 
+
+        // Define MutationType Enum
+        // 4.5 Flush (System) - Added outside the loop to be a single root checking mutation
+        mutation_fields.push(dynamic::Field::new("flushDatabase", dynamic::TypeRef::named(dynamic::TypeRef::BOOLEAN), |ctx| {
+            dynamic::FieldFuture::new(async move {
+                use crate::engine::resolver::Resolver;
+                let resolver = ctx.data::<Box<dyn Resolver + Send + Sync>>().unwrap();
+                match resolver.flush() {
+                    Ok(_) => Ok(Some(dynamic::FieldValue::value(async_graphql::Value::Boolean(true)))),
+                    Err(e) => Err(e.into())
+                }
+            })
+        }));
+
+        // 4.6 Compact (System) - Trigger explicit compaction (blocking)
+        mutation_fields.push(dynamic::Field::new("compactDatabase", dynamic::TypeRef::named(dynamic::TypeRef::INT), |ctx| {
+            dynamic::FieldFuture::new(async move {
+                use crate::engine::resolver::Resolver;
+                let resolver = ctx.data::<Box<dyn Resolver + Send + Sync>>().unwrap();
+                match resolver.compact() {
+                    Ok(duration_ms) => Ok(Some(dynamic::FieldValue::value(async_graphql::Value::Number((duration_ms as i64).into())))),
+                    Err(e) => Err(e.into())
+                }
+            })
+        }));
 
         // Define MutationType Enum
         let mutation_type_enum = dynamic::Enum::new("MutationType")
@@ -1135,18 +1287,27 @@ impl Schema {
         types.push(dynamic::Type::Scalar(dynamic::Scalar::new("Int64")));
         types.push(dynamic::Type::Scalar(dynamic::Scalar::new("DateTime")));
 
-        // Manual Injection of Geo Types to ensure custom resolvers are used
         let geo_point = dynamic::Object::new("GeoPoint")
             .field(dynamic::Field::new("latitude", dynamic::TypeRef::named_nn(dynamic::TypeRef::FLOAT), |ctx| {
                 dynamic::FieldFuture::new(async move {
-                    let val = ctx.parent_value.try_downcast_ref::<GeoPointData>()?;
-                    Ok(Some(dynamic::FieldValue::value(val.latitude)))
+                    let val = ctx.parent_value.try_downcast_ref::<async_graphql::Value>()?;
+                    if let async_graphql::Value::Object(map) = val {
+                        if let Some(async_graphql::Value::Number(n)) = map.get("latitude") {
+                            return Ok(Some(dynamic::FieldValue::value(async_graphql::Value::Number(n.clone()))));
+                        }
+                    }
+                    Ok(None)
                 })
             }))
             .field(dynamic::Field::new("longitude", dynamic::TypeRef::named_nn(dynamic::TypeRef::FLOAT), |ctx| {
                 dynamic::FieldFuture::new(async move {
-                    let val = ctx.parent_value.try_downcast_ref::<GeoPointData>()?;
-                    Ok(Some(dynamic::FieldValue::value(val.longitude)))
+                    let val = ctx.parent_value.try_downcast_ref::<async_graphql::Value>()?;
+                    if let async_graphql::Value::Object(map) = val {
+                        if let Some(async_graphql::Value::Number(n)) = map.get("longitude") {
+                            return Ok(Some(dynamic::FieldValue::value(async_graphql::Value::Number(n.clone()))));
+                        }
+                    }
+                    Ok(None)
                 })
             }));
         types.push(dynamic::Type::Object(geo_point));
@@ -1183,20 +1344,32 @@ impl Schema {
         let polygon = dynamic::Object::new("Polygon")
             .field(dynamic::Field::new("exterior", point_list_type.clone(), |ctx| {
                 dynamic::FieldFuture::new(async move {
-                    let val = ctx.parent_value.try_downcast_ref::<GeoPolygonData>()?;
-                    let list: Vec<dynamic::FieldValue> = val.exterior.iter().map(|p| dynamic::FieldValue::owned_any(p.clone())).collect();
-                    Ok(Some(dynamic::FieldValue::list(list)))
+                    let val = ctx.parent_value.try_downcast_ref::<async_graphql::Value>()?;
+                    if let async_graphql::Value::Object(map) = val {
+                        if let Some(async_graphql::Value::List(list)) = map.get("exterior") {
+                            let mapped: Vec<dynamic::FieldValue> = list.iter().map(|v| dynamic::FieldValue::owned_any(v.clone())).collect();
+                            return Ok(Some(dynamic::FieldValue::list(mapped)));
+                        }
+                    }
+                    Ok(None)
                 })
             }))
             .field(dynamic::Field::new("interiors", ring_list_type.clone(), |ctx| {
                 dynamic::FieldFuture::new(async move {
-                    let val = ctx.parent_value.try_downcast_ref::<GeoPolygonData>()?;
-                    let mut rings = vec![];
-                    for ring in &val.interiors {
-                         let ring_list: Vec<dynamic::FieldValue> = ring.iter().map(|p| dynamic::FieldValue::owned_any(p.clone())).collect();
-                         rings.push(dynamic::FieldValue::list(ring_list));
+                    let val = ctx.parent_value.try_downcast_ref::<async_graphql::Value>()?;
+                    if let async_graphql::Value::Object(map) = val {
+                        if let Some(async_graphql::Value::List(rings)) = map.get("interiors") {
+                             let mut mapped_rings = Vec::new();
+                             for ring in rings {
+                                 if let async_graphql::Value::List(points) = ring {
+                                      let mapped_points: Vec<dynamic::FieldValue> = points.iter().map(|v| dynamic::FieldValue::owned_any(v.clone())).collect();
+                                      mapped_rings.push(dynamic::FieldValue::list(mapped_points));
+                                 }
+                             }
+                             return Ok(Some(dynamic::FieldValue::list(mapped_rings)));
+                        }
                     }
-                    Ok(Some(dynamic::FieldValue::list(rings)))
+                    Ok(None)
                 })
             }));
         types.push(dynamic::Type::Object(polygon));
@@ -1399,8 +1572,9 @@ fn deep_create_node<'a>(
     mut fields: std::collections::HashMap<String, async_graphql::Value>
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<u64, String>> + Send + 'a>> {
     Box::pin(async move {
-        // Check if Linking via UID
-        if let Some(uid_val) = fields.get("uid") {
+        // Check if Linking via UID or ID
+        let uid_val = fields.get("uid").or(fields.get("id"));
+        if let Some(uid_val) = uid_val {
             if let async_graphql::Value::String(s) = uid_val {
                  if let Ok(uid) = s.parse::<u64>() {
                      return Ok(uid);
@@ -1454,12 +1628,39 @@ fn deep_create_node<'a>(
             }
 
             // 2. Validate
+            // 2. Validate
             validate_input(&fields, &meta.validate_fields)?;
 
             // 3. Create Self
-            resolver.create_node(type_name, fields, &meta.uniques, &meta.inverses, &meta.search_fields, meta.vector_field.as_deref())
+            resolver.create_node(type_name, fields, &meta.uniques, &meta.inverses, &meta.search_fields, meta.vector_config.as_ref())
         } else {
             Err(format!("Type {} not found", type_name))
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_enum_input_generation_repro() {
+        let sdl = "
+            enum VideoStatus {
+                NEW
+                PUBLISHED
+            }
+            type Video {
+                status: VideoStatus
+            }
+        ";
+        let builder_res = Schema::create_builder(sdl);
+        assert!(builder_res.is_ok(), "Builder creation failed: {:?}", builder_res.err());
+        let builder = builder_res.unwrap();
+        let schema_res = builder.finish();
+        
+        // This is expected to fail before the fix because VideoStatus is treated as object/relation
+        // and it looks for VideoStatusInput, which doesn't exist.
+        assert!(schema_res.is_ok(), "Schema finish failed (likely missing Input type): {:?}", schema_res.err());
+    }
 }

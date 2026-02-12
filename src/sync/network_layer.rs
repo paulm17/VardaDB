@@ -78,6 +78,10 @@ impl NetworkLayer {
                  match serde_json::from_slice::<MutationEvent>(&payload) {
                      Ok(event) => {
                          println!("Zenoh: Received Event (Src: {:?}, Type: {}, UID: {})", event.source, event.type_name, event.uid);
+                         if event.source == crate::realtime::bus::MutationSource::Local {
+                             println!("Zenoh: Ignoring Local Event execution loop.");
+                             return;
+                         }
                          callback(event);
                      },
                      Err(e) => {
@@ -92,18 +96,23 @@ impl NetworkLayer {
         Ok(())
     }
 
-    pub async fn start_sync_listener<F>(&self, prefix: String, callback: F) -> Result<()> 
+    pub async fn start_sync_listener<F>(&self, prefix: String, node_id: u64, callback: F) -> Result<()> 
     where F: Fn(crate::sync::reconciliation::SyncMessage) + Send + Sync + 'static 
     {
         let key = format!("{}/sync/**", prefix);
         let subscriber = self.session.declare_subscriber(&key).await.map_err(|e| anyhow::anyhow!(e))?;
         
         tokio::spawn(async move {
-            println!("Element: Zenoh Sync Listener Started (Key: {})", key);
+            println!("Element: Zenoh Sync Listener Started (Key: {}, Filter Self: {})", key, node_id);
             while let Ok(sample) = subscriber.recv_async().await {
                  let payload = sample.payload().to_bytes();
-                 if let Ok(msg) = serde_json::from_slice::<crate::sync::reconciliation::SyncMessage>(&payload) {
-                      callback(msg);
+                 if let Ok(envelope) = serde_json::from_slice::<crate::sync::reconciliation::SyncEnvelope>(&payload) {
+                      if envelope.sender != node_id {
+                          callback(envelope.message);
+                      }
+                 } else {
+                     // Fallback for legacy/other messages? Or just ignore.
+                     // eprintln!("Sync Listener: Failed to deserialize Envelope");
                  }
             }
         });

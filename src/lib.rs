@@ -7,9 +7,14 @@ pub mod caching;
 pub mod sync;
 pub mod config;
 pub mod worker;
+pub mod vardaclaw_runner;
 pub mod cli;
+pub mod defaults;
 pub mod server;
-pub mod repl; // Added
+
+pub mod repl;
+pub mod observability;
+pub use jobs; 
 // pub mod vardajobs; // Refactored to external crate
 
 
@@ -22,19 +27,14 @@ impl crate::engine::resolver::Resolver for DummyResolver {
     fn find_uid(&self, _: &str, _: &str) -> Option<u64> {
         None
     }
-    fn create_node(
-        &self,
-        _: &str,
-        _: std::collections::HashMap<String, async_graphql::Value>,
-        _: &[String],
-        _: &[crate::engine::resolver::InverseInfo],
-        _: &std::collections::HashMap<String, Vec<String>>,
-        _: Option<&str>
-    ) -> Result<u64, String> {
+    fn create_node(&self, _type: &str, _fields: std::collections::HashMap<String, async_graphql::Value>, _uniques: &[String], _: &[crate::engine::resolver::InverseInfo], _: &std::collections::HashMap<String, Vec<String>>, _: Option<&crate::engine::resolver::VectorConfig>) -> Result<u64, String> {
         Ok(0)
     }
-    fn scan_nodes(&self, _: &str, _: std::collections::HashMap<String, async_graphql::Value>, _: std::collections::HashMap<String, async_graphql::Value>, _: Option<usize>, _: Option<String>) -> Vec<u64> { vec![] }
-    fn update_node(&self, _: &str, _: u64, _: std::collections::HashMap<String, async_graphql::Value>, _: &[String], _: &[crate::engine::resolver::InverseInfo], _: &std::collections::HashMap<String, Vec<String>>, _: Option<&str>) -> Result<(), String> { Ok(()) }
+    fn scan_nodes(&self, _: &str, _: std::collections::HashMap<String, async_graphql::Value>, _: std::collections::HashMap<String, async_graphql::Value>, _: Option<usize>, _: Option<String>, _: &[String], _: Option<Vec<f64>>) -> Vec<u64> { vec![] }
+    fn resolve_list(&self, _: u64, _: &str, _: std::collections::HashMap<String, async_graphql::Value>, _: std::collections::HashMap<String, async_graphql::Value>, _: Option<usize>, _: Option<String>, _: Option<Vec<f64>>) -> Result<Vec<u64>, String> {
+        Ok(vec![])
+    }
+    fn update_node(&self, _: &str, _: u64, _: std::collections::HashMap<String, async_graphql::Value>, _: &[String], _: &[crate::engine::resolver::InverseInfo], _: &std::collections::HashMap<String, Vec<String>>, _: Option<&crate::engine::resolver::VectorConfig>) -> Result<(), String> { Ok(()) }
 
     fn delete_node(&self, _: &str, _: u64, _: &[String], _: &[crate::engine::resolver::InverseInfo], _: &std::collections::HashMap<String, Vec<String>>) -> Result<(), String> { Ok(()) }
     fn node_exists(&self, _: &str, _: u64) -> bool { false }
@@ -42,6 +42,9 @@ impl crate::engine::resolver::Resolver for DummyResolver {
     fn subscribe_events(&self) -> crate::realtime::bus::EventBus { crate::realtime::bus::EventBus::new() }
     fn search_vectors(&self, _: &[f64], _: usize) -> Vec<(u64, f64)> { vec![] }
     fn search_hybrid(&self, _: &str, _: &str, _: &[f64], _: usize) -> Vec<(u64, f64)> { vec![] }
+    fn flush(&self) -> Result<(), String> { Ok(()) }
+    fn compact(&self) -> Result<u64, String> { Ok(0) }
+    fn needs_compaction(&self) -> bool { false }
 }
 
 use axum::{
@@ -55,10 +58,13 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 use tower_http::cors::{CorsLayer, Any};
 use crate::storage::backend::Storage;
+
 use crate::bridge::fjall_resolver::FjallResolver;
 use crate::realtime::bus::EventBus;
-
+use metrics::{counter, histogram};
+use tracing::info;
 use tokio::sync::RwLock;
+
 
 #[derive(Clone)]
 struct ServerState {
@@ -67,6 +73,26 @@ struct ServerState {
     storage: Arc<Storage>,
     cache: Arc<crate::engine::cache::QueryCache>,
     event_bus: EventBus,
+    storage_path: std::path::PathBuf,
+}
+
+impl axum::extract::FromRef<ServerState> for crate::server::management::ManagementState {
+    fn from_ref(state: &ServerState) -> Self {
+        Self {
+            storage: state.storage.clone(),
+            schemas: state.schemas.clone(),
+            event_bus: state.event_bus.clone(),
+            storage_path: state.storage_path.clone(),
+        }
+    }
+}
+
+impl axum::extract::FromRef<ServerState> for crate::observability::router::ObsState {
+    fn from_ref(state: &ServerState) -> Self {
+        Self {
+            storage: state.storage.clone(),
+        }
+    }
 }
 
 pub async fn run(config: crate::config::VardaConfig) {
@@ -76,7 +102,19 @@ pub async fn run(config: crate::config::VardaConfig) {
     // 1. Initialize Storage
     let storage_path = config.server.storage_path.clone(); 
     let storage = Arc::new(Storage::new(&storage_path, config.server.node_id).expect("Failed to open storage"));
+
     println!("Storage initialized at ./{}", storage_path);
+
+    // 1.5 Initialize Observability (Metrics + Tracing)
+    crate::observability::init(storage.clone());
+    
+    // Setup Tracing Subscriber with Storage Backend
+    // let trace_layer = crate::observability::backend::VardaTraceLayer::new(storage.clone());
+    // use tracing_subscriber::prelude::*;
+    // let registry = tracing_subscriber::registry().with(trace_layer);
+    // registry.init(); // This sets the global default. Might panic if called twice (e.g. tests)
+    
+    info!("Observability initialized (Metrics + Traces in sorted keyspaces)");
 
     // 2. Load Schema (from config path or default)
     // If config has schema_path, use it. Else default to storage/current_schema.graphql
@@ -118,17 +156,19 @@ pub async fn run(config: crate::config::VardaConfig) {
         storage: storage.clone(),
         cache: Arc::new(crate::engine::cache::QueryCache::new(100)), // Bounded LRU: 100 entries
         event_bus: shared_event_bus.clone(),
+        storage_path: std::path::PathBuf::from(&config.server.storage_path),
     };
 
     // Start Anti-Gravity (Zenoh) Sync
-    let sync_resolver = Arc::new(resolver.clone());
+    let sync_resolver = std::sync::Arc::new(resolver.clone());
     let zenoh_config = config.zenoh.clone();
+    let remote_append_path = config.remote_append.path.clone();
     let sync_schema = state.schemas.get("default").expect("Default schema missing").clone();
     let sync_cache = state.cache.clone();
     
     tokio::spawn(async move {
          println!("Initializing Zenoh Sync...");
-         match crate::sync::manager::SyncManager::new(sync_resolver, zenoh_config, sync_schema, sync_cache).await {
+         match crate::sync::manager::SyncManager::new(sync_resolver, zenoh_config, remote_append_path, sync_schema, sync_cache).await {
              Ok(manager) => {
                  if let Err(e) = manager.start().await {
                      eprintln!("SyncManager Error: {}", e);
@@ -145,6 +185,20 @@ pub async fn run(config: crate::config::VardaConfig) {
     // Set concurrency limit on queue to match workers (or higher? default 100 is fine)
     // storage.system_queue.set_concurrency_limit(worker_count * 5); 
     
+    // Register System Heartbeat (Run every 10 seconds)
+    // Expression: sec min hour day_of_month month day_of_week year(opt)
+    if let Err(e) = storage.system_queue.register_cron(
+        "heartbeat".to_string(), 
+        "0/10 * * * * * *".to_string(), 
+        "system_queue".to_string(), 
+        b"HEARTBEAT".to_vec()
+    ) {
+        eprintln!("Failed to register heartbeat cron: {}", e);
+    }
+
+    // Initialize LLM Gateway - MOVED TO VARDACLAW
+    // The native worker is now "dumb" and doesn't need LLM/Skills.
+    
     for i in 0..worker_count {
         let worker = crate::worker::Worker::new(storage.clone(), i);
         tokio::spawn(async move {
@@ -152,14 +206,21 @@ pub async fn run(config: crate::config::VardaConfig) {
         });
     }
 
+    // Start VardaClaw Background Runner
+    let claw_runner = crate::vardaclaw_runner::VardaClawRunner::new(storage.clone(), config.clone());
+    tokio::spawn(async move {
+        claw_runner.run().await;
+    });
+
     // 3. Setup Routes
-    let mgmt_routes = crate::server::management::routes(state.storage.clone());
+    let mgmt_routes = crate::server::management::routes::<ServerState>()
+        .merge(crate::observability::router::routes::<ServerState>());
 
     let app = Router::new()
         .route("/graphql", post(graphql_handler).get(subscription_handler))
         .route("/playground", get(playground_handler))
         .route("/admin/schema", post(admin_schema_handler))
-        .nest_service("/_mgmt", mgmt_routes)
+        .nest("/_mgmt", mgmt_routes)
         .layer(CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any))
         .with_state(state.clone());
 
@@ -196,7 +257,18 @@ async fn graphql_handler(
     headers: axum::http::HeaderMap,
     axum::extract::State(state): axum::extract::State<ServerState>,
     req: GraphQLRequest,
+
 ) -> GraphQLResponse {
+    let start = std::time::Instant::now();
+    counter!("graphql_requests_total").increment(1);
+    
+    // Extract Trace Context? (If we were using OTel HTTP prop, but we are embedded)
+    
+    // Span is automatically created by `instrument` if we add it, but we can also manually trace.
+    // Let's use the macro on the function or manually enter a span.
+    // Since we are inside the handler, let's wrap the logic in a span.
+    let span = tracing::info_span!("graphql_request", method = "POST");
+    let _enter = span.enter();
     let db_name = headers
         .get("x-varda-db")
         .and_then(|val| val.to_str().ok())
@@ -268,6 +340,12 @@ async fn graphql_handler(
         }
     }
 
+
+
+    // Record Latency
+    let duration = start.elapsed().as_secs_f64();
+    histogram!("graphql_request_duration_seconds").record(duration);
+    
     resp.into()
 }
 
@@ -394,7 +472,12 @@ async fn subscription_handler(
 
 
 async fn playground_handler() -> impl IntoResponse {
-    Html(GraphiQLSource::build().endpoint("/graphql").finish())
+    let source = GraphiQLSource::build().endpoint("/graphql").finish();
+    let source = source.replace(
+        "fetcher: GraphiQL.createFetcher({",
+        "headers: JSON.stringify({ 'x-varda-db': 'archondb' }), fetcher: GraphiQL.createFetcher({",
+    );
+    Html(source)
 }
 
 pub fn build_schema(sdl: &str) -> Result<crate::engine::schema::Schema, String> {

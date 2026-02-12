@@ -238,24 +238,12 @@ impl FjallResolver {
     }
 
     fn link_inverse(&self, target_uid: u64, inverse_field: &str, is_list: bool, self_uid: u64, timestamp: &Timestamp) -> Result<(), String> {
-         let key = Codec::encode_data_key(target_uid, inverse_field);
-         
          if is_list {
-             let mut list = if let Ok(Some(bytes)) = self.storage.get(&self.db_name, &key) {
-                 serde_json::from_slice::<Vec<Value>>(&bytes).unwrap_or_default()
-             } else {
-                 Vec::new()
-             };
-             
-             // Check if already exists
-             let val_to_add = Value::String(self_uid.to_string());
-             if !list.contains(&val_to_add) {
-                  list.push(val_to_add);
-                  let bytes = serde_json::to_vec(&list).map_err(|e| e.to_string())?;
-                  self.storage.put_with_lww(&self.db_name, target_uid, inverse_field, &bytes, timestamp).map_err(|e| e.to_string())?;
-             }
+             // O(1) write: just insert a single edge key
+             let edge_key = Codec::encode_edge_key(target_uid, inverse_field, self_uid);
+             self.storage.insert(&self.db_name, &edge_key, &[]).map_err(|e| e.to_string())?;
          } else {
-             // 1:1 or N:1 - Overwrite
+             // 1:1 or N:1 - Overwrite (unchanged, single value is fast)
              let val = Value::String(self_uid.to_string());
              let bytes = serde_json::to_vec(&val).map_err(|e| e.to_string())?;
              self.storage.put_with_lww(&self.db_name, target_uid, inverse_field, &bytes, timestamp).map_err(|e| e.to_string())?;
@@ -264,42 +252,24 @@ impl FjallResolver {
     }
 
     fn unlink_inverse(&self, target_uid: u64, inverse_field: &str, is_list: bool, self_uid: u64, timestamp: &Timestamp) -> Result<(), String> {
-         let key = Codec::encode_data_key(target_uid, inverse_field);
-         
          if is_list {
-             if let Ok(Some(bytes)) = self.storage.get(&self.db_name, &key) {
-                 if let Ok(mut list) = serde_json::from_slice::<Vec<Value>>(&bytes) {
-                      let val_to_remove = Value::String(self_uid.to_string());
-                      // Filter out
-                      list.retain(|v| {
-                          // Handle String vs Number comparison if needed, but strict equality for now
-                          v != &val_to_remove && 
-                          // Also try Number variant if we stored it as number?
-                          // For safety, convert both to string for comparison?
-                          match v {
-                              Value::String(s) => s != &self_uid.to_string(),
-                              Value::Number(n) => n.as_u64() != Some(self_uid),
-                              _ => true
-                          }
-                      });
-                      
-                      let bytes = serde_json::to_vec(&list).map_err(|e| e.to_string())?;
-                      self.storage.put_with_lww(&self.db_name, target_uid, inverse_field, &bytes, timestamp).map_err(|e| e.to_string())?;
-                 }
-             }
+             // O(1) delete: just remove the single edge key
+             let edge_key = Codec::encode_edge_key(target_uid, inverse_field, self_uid);
+             self.storage.delete_key(&self.db_name, &edge_key).map_err(|e| e.to_string())?;
          } else {
-             // 1:1 - If the current value IS self, remove it (delete key)
+             // 1:1 - If the current value IS self, remove it
+             let key = Codec::encode_data_key(target_uid, inverse_field);
              if let Ok(Some(bytes)) = self.storage.get(&self.db_name, &key) {
-                 if let Ok(val) = serde_json::from_slice::<Value>(&bytes) {
-                      let matches = match val {
-                          Value::String(s) => s == self_uid.to_string(),
-                          Value::Number(n) => n.as_u64() == Some(self_uid),
-                          _ => false
-                      };
-                      if matches {
-                          self.storage.delete_with_lww(&self.db_name, target_uid, inverse_field, timestamp).map_err(|e| e.to_string())?;
-                      }
-                 }
+                  if let Ok(val) = serde_json::from_slice::<Value>(&bytes) {
+                       let matches = match val {
+                           Value::String(s) => s == self_uid.to_string(),
+                           Value::Number(n) => n.as_u64() == Some(self_uid),
+                           _ => false
+                       };
+                       if matches {
+                           self.storage.delete_with_lww(&self.db_name, target_uid, inverse_field, timestamp).map_err(|e| e.to_string())?;
+                       }
+                  }
              }
          }
          Ok(())
@@ -698,6 +668,7 @@ impl FjallResolver {
                                                       let target_poly = geo::Polygon::new(geo::LineString::from(target_coords), vec![]);
                                                       use geo::intersects::Intersects;
                                                       if !stored_poly.intersects(&target_poly) { return false; }
+
                                                   }
                                               }
                                           }
@@ -737,7 +708,7 @@ impl FjallResolver {
         }
     }
 
-    fn get_candidates(&self, type_name: &str, filter: &std::collections::HashMap<String, Value>) -> Option<std::collections::HashSet<u64>> {
+    fn get_candidates(&self, type_name: &str, filter: &std::collections::HashMap<String, Value>, uniques: &[String]) -> Option<std::collections::HashSet<u64>> {
         // println!("Scan: get_candidates called for {} with filter {:?}", type_name, filter);
         let mut candidates: Option<std::collections::HashSet<u64>> = None;
 
@@ -750,11 +721,42 @@ impl FjallResolver {
             };
 
             if let Some(val) = eq_value {
-                // How do we know if it's a unique field? 
-                // The Resolver doesn't have the Schema metadata here. 
-                // We rely on trying to look it up in the Unique Index.
-                // Index Key: [0x03][Pred][Val]
-                // Pred: Type.Field
+                // If it IS a unique field, we can optimize heavily
+                if uniques.contains(field) {
+                    if let Ok(val_str) = serde_json::to_string(val) {
+                         let index_pred = format!("{}.{}", type_name, field);
+                         let idx_key = Codec::encode_unique_index_key(&index_pred, &val_str);
+                         
+                         match self.storage.get(&self.db_name, &idx_key) {
+                             Ok(Some(bytes)) if bytes.len() == 8 => {
+                                 let uid = BigEndian::read_u64(&bytes);
+                                 let mut set = std::collections::HashSet::new();
+                                 set.insert(uid);
+                                 
+                                 // Intersection
+                                 if let Some(current) = candidates {
+                                     candidates = Some(current.into_iter().filter(|u| set.contains(u)).collect());
+                                 } else {
+                                     candidates = Some(set);
+                                 }
+                                 continue;
+                             },
+                             _ => {
+                                 // Unique field queried, but NO entry found -> Return EMPTY set immediately
+                                 return Some(std::collections::HashSet::new());
+                             }
+                         }
+                    }
+                }
+
+                // Fallback for non-unique fields or legacy check (kept for safety if uniques list is incomplete?)
+                // Actually, if it's NOT in uniques list, we can't assume index exists, so we skip index lookup unless we know we have an index.
+                // But previously, it blindly tried to look up ANY field as if it were unique?
+                // "We rely on trying to look it up in the Unique Index."
+                // Since we now have explicit metadata, we should rely on it.
+                // However, let's keep the old logic for "maybe there's an index" if we want to be safe, 
+                // BUT the specific optimization of returning EMPTY set can only happen if we are SURE it's a unique field.
+                
                 if let Ok(val_str) = serde_json::to_string(val) {
                     let index_pred = format!("{}.{}", type_name, field);
                     let idx_key = Codec::encode_unique_index_key(&index_pred, &val_str);
@@ -930,6 +932,7 @@ impl FjallResolver {
         }
         candidates
     }
+    // Updated check_filter_recursive to support Deep Filtering (Relation Traversal)
     pub fn check_filter_recursive(&self, uid: u64, filter: &indexmap::IndexMap<async_graphql::Name, Value>) -> bool {
         for (key, condition) in filter {
             match key.as_str() {
@@ -958,12 +961,55 @@ impl FjallResolver {
                         if self.check_filter_recursive(uid, map) { return false; }
                     }
                 }
-                _ => {
-                    // Regular Field
-                     let d_key = Codec::encode_data_key(uid, key);
+                field_name => {
+                     let d_key = Codec::encode_data_key(uid, field_name);
                      let stored_val = if let Ok(Some(bytes)) = self.storage.get(&self.db_name, &d_key) {
                          serde_json::from_slice::<Value>(&bytes).ok()
                      } else { None };
+                     
+                     // relation traversal check
+                     // If condition is an Object and key is NOT a known operator (eq, gt...), it might be a Relation Filter
+                     if let Value::Object(sub_filter) = condition {
+                         // Check if this is a standard operator map (eq, gt) OR a nested filter
+                         let is_operator_map = sub_filter.keys().any(|k| ["eq", "gt", "lt", "ge", "le", "contains", "between", "near", "within", "intersects", "in", "ne", "allofterms", "anyofterms", "alloftext", "anyoftext"].contains(&k.as_str()));
+                         
+                         if !is_operator_map {
+                             // It's a Nested Relation Filter!
+                             // stored_val should be a UID (String/Number) or List of UIDs
+                             match stored_val {
+                                 Some(Value::String(s)) => {
+                                     if let Ok(child_uid) = s.parse::<u64>() {
+                                         if !self.check_filter_recursive(child_uid, sub_filter) { return false; }
+                                     } else { return false; }
+                                 },
+                                 Some(Value::Number(n)) => {
+                                     if let Some(child_uid) = n.as_u64() {
+                                         if !self.check_filter_recursive(child_uid, sub_filter) { return false; }
+                                     } else { return false; }
+                                 },
+                                 Some(Value::List(list)) => {
+                                     // 1:M Relation - "Some" semantics (match if ANY child matches)
+                                     let mut match_found = false;
+                                     for item in list {
+                                         let u_opt = match item {
+                                             Value::String(s) => s.parse::<u64>().ok(),
+                                             Value::Number(n) => n.as_u64(),
+                                             _ => None
+                                         };
+                                         if let Some(child_uid) = u_opt {
+                                             if self.check_filter_recursive(child_uid, sub_filter) {
+                                                 match_found = true;
+                                                 break;
+                                             }
+                                         }
+                                     }
+                                     if !match_found { return false; }
+                                 },
+                                 _ => return false // Relation field is null or invalid
+                             }
+                             continue;
+                         }
+                     }
 
                      if !self.check_condition(&stored_val, condition) { return false; }
                 }
@@ -971,19 +1017,27 @@ impl FjallResolver {
         }
         true
     }
-    pub fn create_node_internal(&self, type_name: &str, uid: u64, fields: std::collections::HashMap<String, serde_json::Value>, uniques: &[String], inverses: &[crate::engine::resolver::InverseInfo], search_fields: &std::collections::HashMap<String, Vec<String>>, source: crate::realtime::bus::MutationSource, timestamp_override: Option<crate::storage::timestamp::Timestamp>) -> Result<(), String> {
+
+    pub fn create_node_internal(&self, type_name: &str, uid: u64, fields: std::collections::HashMap<String, serde_json::Value>, uniques: &[String], inverses: &[crate::engine::resolver::InverseInfo], _search_fields: &std::collections::HashMap<String, Vec<String>>, _source: crate::realtime::bus::MutationSource, timestamp_override: Option<crate::storage::timestamp::Timestamp>) -> Result<(), String> {
+        let fn_start = std::time::Instant::now();
+        
         // Generate Timestamp for this Atomic Mutation or use override
         let timestamp = timestamp_override.unwrap_or_else(|| self.storage.next_timestamp());
 
+        let mut batch_items = Vec::new();
+        
+        // Type Index Insert
+        let idx_start = std::time::Instant::now();
+        let type_key_idx = Codec::encode_type_index_key(type_name, uid);
+        self.storage.insert(&self.db_name, &type_key_idx, &[]).map_err(|e| e.to_string())?;
+        let idx_time = idx_start.elapsed();
+
+        let type_val_bytes = serde_json::to_vec(&serde_json::Value::String(type_name.to_string())).expect("Serialization failed");
+        batch_items.push((uid, "_type".to_string(), type_val_bytes));
+
+        let uniq_start = std::time::Instant::now();
         for (field, value) in &fields {
             let val_bytes = serde_json::to_vec(&value).map_err(|e| e.to_string())?;
-            if let Some(tokenizers) = search_fields.get(field) {
-                if let serde_json::Value::String(s) = value {
-                     for strategy in tokenizers {
-                         self.write_term_index(uid, field, s, strategy)?;
-                     }
-                }
-            }
             if uniques.contains(&field) {
                  let index_pred = format!("{}.{}", type_name, field);
                  let val_str = serde_json::to_string(&value).map_err(|e| e.to_string())?;
@@ -995,17 +1049,17 @@ impl FjallResolver {
                  BigEndian::write_u64(&mut uid_bytes, uid);
                  self.storage.insert(&self.db_name, &idx_key, &uid_bytes).map_err(|e| e.to_string())?;
             }
-            // Use LWW Put
-            self.storage.put_with_lww(&self.db_name, uid, field, &val_bytes, &timestamp).map_err(|e| e.to_string())?;
+            batch_items.push((uid, field.clone(), val_bytes));
         }
+        let uniq_time = uniq_start.elapsed();
         
-        let type_key_idx = Codec::encode_type_index_key(type_name, uid);
-        self.storage.insert(&self.db_name, &type_key_idx, &[]).map_err(|e| e.to_string())?; // Index
-        
-        let type_val_bytes = serde_json::to_vec(&serde_json::Value::String(type_name.to_string())).expect("Serialization failed");
-        self.storage.put_with_lww(&self.db_name, uid, "_type", &type_val_bytes, &timestamp).map_err(|e| e.to_string())?; // Data
+        let batch_start = std::time::Instant::now();
+        self.storage.put_batch_lww(&self.db_name, batch_items, &timestamp).map_err(|e| e.to_string())?;
+        let batch_time = batch_start.elapsed();
 
-        // Link New Inverses
+        // Inverse linking
+        let inv_start = std::time::Instant::now();
+        let mut inv_count = 0u32;
         for info in inverses {
              if let Some(val) = fields.get(&info.field) {
                   let mut new_targets = Vec::new();
@@ -1025,28 +1079,18 @@ impl FjallResolver {
                   }
                   for target in new_targets {
                       self.link_inverse(target, &info.inverse_field, info.inverse_is_list, uid, &timestamp)?;
+                      inv_count += 1;
                   }
-             }
+              }
+        }
+        let inv_time = inv_start.elapsed();
+
+        let total = fn_start.elapsed();
+        if total.as_millis() > 2 {
+            eprintln!("[RESOLVER] create_node {} | idx={:?} uniq={:?} batch={:?} inv={:?}({}) total={:?}",
+                     type_name, idx_time, uniq_time, batch_time, inv_time, inv_count, total);
         }
 
-
-        // Inject ID into payload for Frontend Cache compatibility
-        let mut event_payload = fields;
-        event_payload.insert("id".to_string(), serde_json::Value::String(uid.to_string()));
-
-        self.bus.publish(MutationEvent {
-            type_name: type_name.to_string(),
-            uid,
-            mutation_type: MutationType::Create,
-            source,
-            payload: Some(event_payload),
-            metadata: Some(crate::realtime::bus::SchemaMetadata {
-                uniques: uniques.to_vec(),
-                inverses: inverses.to_vec(),
-                search_fields: search_fields.clone(),
-            }),
-            timestamp: Some(timestamp),
-        });
         Ok(())
     }
 
@@ -1073,18 +1117,37 @@ impl FjallResolver {
                      let mut old_targets = Vec::new();
                      if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&bytes) {
                           match val {
-                              serde_json::Value::String(s) => { if let Ok(id) = s.parse::<u64>() { old_targets.push(id); } }
-                              serde_json::Value::Number(n) => { if let Some(id) = n.as_u64() { old_targets.push(id); } }
-                              serde_json::Value::Array(items) => {
-                                  for item in items {
-                                      match item {
-                                            serde_json::Value::String(s) => { if let Ok(id) = s.parse::<u64>() { old_targets.push(id); } }
-                                            serde_json::Value::Number(n) => { if let Some(id) = n.as_u64() { old_targets.push(id); } }
-                                            _ => {}
-                                      }
-                                  }
-                              }
-                              _ => {}
+                               serde_json::Value::String(s) => { if let Ok(id) = s.parse::<u64>() { old_targets.push(id); } }
+                               serde_json::Value::Number(n) => { if let Some(id) = n.as_u64() { old_targets.push(id); } }
+                               serde_json::Value::Object(map) => {
+                                   // Try "uid" then "id"
+                                   if let Some(uid_val) = map.get("uid").or(map.get("id")) {
+                                       match uid_val {
+                                           serde_json::Value::String(s) => { if let Ok(id) = s.parse::<u64>() { old_targets.push(id); } }
+                                           serde_json::Value::Number(n) => { if let Some(id) = n.as_u64() { old_targets.push(id); } }
+                                           _ => {}
+                                       }
+                                   }
+                               }
+                               serde_json::Value::Array(items) => {
+                                   for item in items {
+                                       match item {
+                                             serde_json::Value::String(s) => { if let Ok(id) = s.parse::<u64>() { old_targets.push(id); } }
+                                             serde_json::Value::Number(n) => { if let Some(id) = n.as_u64() { old_targets.push(id); } }
+                                             serde_json::Value::Object(map) => {
+                                                  if let Some(uid_val) = map.get("uid").or(map.get("id")) {
+                                                       match uid_val {
+                                                           serde_json::Value::String(s) => { if let Ok(id) = s.parse::<u64>() { old_targets.push(id); } }
+                                                           serde_json::Value::Number(n) => { if let Some(id) = n.as_u64() { old_targets.push(id); } }
+                                                           _ => {}
+                                                       }
+                                                  }
+                                             }
+                                             _ => {}
+                                       }
+                                   }
+                               }
+                               _ => {}
                           }
                      }
                      for target in old_targets {
@@ -1108,6 +1171,7 @@ impl FjallResolver {
              }
         }
         // 3. Write New Data & Indexes
+        let mut batch_items = Vec::new();
         for (field, value) in &fields {
             let val_bytes = serde_json::to_vec(&value).map_err(|e| e.to_string())?;
             if let Some(tokenizers) = search_fields.get(field) {
@@ -1128,8 +1192,10 @@ impl FjallResolver {
                  BigEndian::write_u64(&mut uid_bytes, uid);
                  self.storage.insert(&self.db_name, &idx_key, &uid_bytes).map_err(|e| e.to_string())?;
             }
-            self.storage.put_with_lww(&self.db_name, uid, field, &val_bytes, &timestamp).map_err(|e| e.to_string())?;
+            batch_items.push((uid, field.clone(), val_bytes));
         }
+        
+        self.storage.put_batch_lww(&self.db_name, batch_items, &timestamp).map_err(|e| e.to_string())?;
         // 4. Link New Inverses
         for info in inverses {
              if let Some(val) = fields.get(&info.field) {
@@ -1137,11 +1203,30 @@ impl FjallResolver {
                   match val {
                       serde_json::Value::String(s) => { if let Ok(id) = s.parse::<u64>() { new_targets.push(id); } }
                       serde_json::Value::Number(n) => { if let Some(id) = n.as_u64() { new_targets.push(id); } }
+                      serde_json::Value::Object(map) => {
+                           // Try "uid" then "id"
+                           if let Some(uid_val) = map.get("uid").or(map.get("id")) {
+                               match uid_val {
+                                   serde_json::Value::String(s) => { if let Ok(id) = s.parse::<u64>() { new_targets.push(id); } }
+                                   serde_json::Value::Number(n) => { if let Some(id) = n.as_u64() { new_targets.push(id); } }
+                                   _ => {}
+                               }
+                           }
+                      }
                       serde_json::Value::Array(items) => {
                           for item in items {
                               match item {
                                     serde_json::Value::String(s) => { if let Ok(id) = s.parse::<u64>() { new_targets.push(id); } }
                                     serde_json::Value::Number(n) => { if let Some(id) = n.as_u64() { new_targets.push(id); } }
+                                    serde_json::Value::Object(map) => {
+                                         if let Some(uid_val) = map.get("uid").or(map.get("id")) {
+                                              match uid_val {
+                                                  serde_json::Value::String(s) => { if let Ok(id) = s.parse::<u64>() { new_targets.push(id); } }
+                                                  serde_json::Value::Number(n) => { if let Some(id) = n.as_u64() { new_targets.push(id); } }
+                                                  _ => {}
+                                              }
+                                         }
+                                    }
                                     _ => {}
                               }
                           }
@@ -1196,21 +1281,31 @@ impl FjallResolver {
                       match val {
                            serde_json::Value::String(s) => { if let Ok(id) = s.parse::<u64>() { targets.push(id); } }
                            serde_json::Value::Number(n) => { if let Some(id) = n.as_u64() { targets.push(id); } }
+                           serde_json::Value::Object(map) => {
+                               if let Some(uid_val) = map.get("uid").or_else(|| map.get("id")) {
+                                   if let Some(s) = uid_val.as_str() { if let Ok(id) = s.parse::<u64>() { targets.push(id); } }
+                               }
+                           }
                            serde_json::Value::Array(items) => {
                                for item in items {
                                    match item {
                                         serde_json::Value::String(s) => { if let Ok(id) = s.parse::<u64>() { targets.push(id); } }
                                         serde_json::Value::Number(n) => { if let Some(id) = n.as_u64() { targets.push(id); } }
+                                        serde_json::Value::Object(map) => {
+                                            if let Some(uid_val) = map.get("uid").or_else(|| map.get("id")) {
+                                                if let Some(s) = uid_val.as_str() { if let Ok(id) = s.parse::<u64>() { targets.push(id); } }
+                                            }
+                                        }
                                         _ => {}
                                    }
                                }
                            }
                            _ => {}
                       }
-                 }
-                 for target in targets {
-                     self.unlink_inverse(target, &info.inverse_field, info.inverse_is_list, uid, &timestamp)?;
-                 }
+                  }
+                  for target in targets {
+                      self.unlink_inverse(target, &info.inverse_field, info.inverse_is_list, uid, &timestamp)?;
+                  }
              }
         }
         // 2. Remove Unique Indexes
@@ -1305,6 +1400,152 @@ impl FjallResolver {
 }
 
 impl Resolver for FjallResolver {
+    fn resolve_list(&self, parent_uid: u64, field_name: &str, filter: std::collections::HashMap<String, Value>, sort: std::collections::HashMap<String, Value>, first: Option<usize>, after: Option<String>, near_vector: Option<Vec<f64>>) -> Result<Vec<u64>, String> {
+        // 1. Resolve the List Field from Storage
+        // First check the legacy data key (for directly-assigned lists)
+        let key = Codec::encode_data_key(parent_uid, field_name);
+        
+        let mut uids: Vec<u64> = if let Ok(Some(bytes)) = self.storage.get(&self.db_name, &key) {
+             if let Ok(val) = serde_json::from_slice::<Value>(&bytes) {
+                 match val {
+                     Value::List(list) => {
+                         let mut result = Vec::new();
+                         for item in list {
+                             match item {
+                                  Value::String(s) => { if let Ok(u) = s.parse::<u64>() { result.push(u); } },
+                                  Value::Number(n) => { if let Some(u) = n.as_u64() { result.push(u); } },
+                                  _ => {}
+                             }
+                         }
+                         result
+                     },
+                     Value::String(s) => { if let Ok(u) = s.parse::<u64>() { vec![u] } else { vec![] } },
+                     Value::Number(n) => { if let Some(u) = n.as_u64() { vec![u] } else { vec![] } },
+                     _ => vec![]
+                 }
+             } else { vec![] }
+        } else { vec![] };
+
+        // Also scan edge index keys (for inverse-linked lists)
+        let edge_prefix = Codec::encode_edge_prefix(parent_uid, field_name);
+        if let Some((main_ks, _)) = self.storage.get_database(&self.db_name) {
+            use std::ops::Bound;
+            let iter = main_ks.range((Bound::Included(edge_prefix.clone()), Bound::Unbounded));
+            for guard in iter {
+                if let Ok(key) = guard.key() {
+                    if !key.starts_with(&edge_prefix) { break; }
+                    if let Some(source_uid) = Codec::decode_edge_source_uid(&key) {
+                        uids.push(source_uid);
+                    }
+                }
+            }
+        }
+        
+        // 2. Vector Sort/Filter (Strategy B: Fetch & Sort)
+        if let Some(ref vec) = near_vector {
+             // We have the set of relevant UIDs.
+             // We want to sort them by distance to `vec`.
+             // We need to fetch the `embedding` field for each.
+             // What field name holds the embedding? Default: "embedding" per schema.
+             // Ideally we should know the vector field name from metadata, but schema.rs passes logic.
+             // Let's assume field is named "embedding".
+             // We can check `resolve(uid, "embedding")`.
+             
+             let mut uid_dists = Vec::new();
+             for uid in &uids {
+                 if let Some(val) = self.resolve(*uid, "embedding") {
+                     if let Value::List(floats) = val {
+                         let embed: Vec<f64> = floats.iter().filter_map(|v| match v {
+                             Value::Number(n) => n.as_f64(),
+                             _ => None
+                         }).collect();
+                         
+                         // Compute Cosine Distance
+                         // Check dims
+                         if embed.len() == vec.len() {
+                             // Simple Euclidean or Cosine? HNSW usually Cosine/Dot.
+                             // Let's use Cosine Similarity -> Distance = 1 - Sim
+                             let dot: f64 = embed.iter().zip(vec.iter()).map(|(a, b)| a * b).sum();
+                             let norm_a: f64 = embed.iter().map(|a| a * a).sum::<f64>().sqrt();
+                             let norm_b: f64 = vec.iter().map(|b| b * b).sum::<f64>().sqrt();
+                             
+                             if norm_a > 0.0 && norm_b > 0.0 {
+                                 let sim = dot / (norm_a * norm_b);
+                                 let dist = 1.0 - sim;
+                                 uid_dists.push((*uid, dist));
+                             } else {
+                                 uid_dists.push((*uid, f64::MAX));
+                             }
+                         }
+                     }
+                 }
+             }
+             
+             // Sort by Distance ASC
+             uid_dists.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+             
+             // Update uids
+             uids = uid_dists.into_iter().map(|(u, _)| u).collect();
+        }
+
+        // 3. Filter (Standard)
+        if !filter.is_empty() {
+             let mut filter_im = indexmap::IndexMap::new();
+             for (k, v) in &filter {
+                  filter_im.insert(async_graphql::Name::new(k), v.clone());
+             }
+             uids.retain(|uid| self.check_filter_recursive(*uid, &filter_im));
+        }
+        
+        // 4. Sort (Explicit sort overrides Vector sort)
+        if !sort.is_empty() {
+             if let Some((field, direction)) = sort.iter().next() {
+                 let asc = match direction {
+                     Value::String(s) => s == "ASC",
+                     Value::Enum(n) => n.as_str() == "ASC",
+                      _ => true
+                 };
+                 
+                 uids.sort_by(|a, b| {
+                     let val_a = self.resolve(*a, field);
+                     let val_b = self.resolve(*b, field);
+                     
+                     let cmp = match (val_a, val_b) {
+                         (Some(Value::Number(na)), Some(Value::Number(nb))) => {
+                              na.as_f64().partial_cmp(&nb.as_f64()).unwrap_or(std::cmp::Ordering::Equal)
+                         },
+                         (Some(Value::String(sa)), Some(Value::String(sb))) => {
+                             sa.cmp(&sb)
+                         },
+                          (None, Some(_)) => std::cmp::Ordering::Less,
+                          (Some(_), None) => std::cmp::Ordering::Greater,
+                          _ => std::cmp::Ordering::Equal
+                     };
+                     
+                     if asc { cmp } else { cmp.reverse() }
+                 });
+             }
+        }
+        
+        // 5. Pagination
+        if let Some(cursor_uid_str) = after {
+             // We assume cursor is UID based (like scan_nodes fallback) or simple list indexing?
+             // Since we have the whole list, we perform cursor pagination relative to valid UIDs.
+             // If cursor key is UID (primary key):
+             if let Ok(cursor_uid) = cursor_uid_str.parse::<u64>() {
+                 if let Some(pos) = uids.iter().position(|u| *u == cursor_uid) {
+                     uids = uids.into_iter().skip(pos + 1).collect();
+                 }
+             }
+        }
+        
+        if let Some(limit) = first {
+            uids.truncate(limit);
+        }
+
+        Ok(uids)
+    }
+
     fn search_vectors(&self, query: &[f64], k: usize) -> Vec<(u64, f64)> {
         match self.storage.search_vectors(query, k) {
             Ok(res) => res,
@@ -1352,20 +1593,50 @@ impl Resolver for FjallResolver {
         }
     }
 
-    fn create_node(&self, type_name: &str, fields: std::collections::HashMap<String, Value>, uniques: &[String], inverses: &[crate::engine::resolver::InverseInfo], search_fields: &std::collections::HashMap<String, Vec<String>>, vector_field: Option<&str>) -> Result<u64, String> {
+    fn create_node(&self, type_name: &str, mut fields: std::collections::HashMap<String, Value>, uniques: &[String], inverses: &[crate::engine::resolver::InverseInfo], search_fields: &std::collections::HashMap<String, Vec<String>>, vector_config: Option<&crate::engine::resolver::VectorConfig>) -> Result<u64, String> {
+        let op_start = std::time::Instant::now();
         let start = std::time::SystemTime::now();
         let since_the_epoch = start.duration_since(std::time::UNIX_EPOCH).expect("Time went backwards");
         let uid = since_the_epoch.as_nanos() as u64;
 
-        if let Some(vf) = vector_field {
-            if let Some(val) = fields.get(vf) {
+        // Automatic Embedding Generation
+        if let Some(config) = vector_config {
+            if !fields.contains_key(&config.field) {
+                if let Some(Value::String(text)) = fields.get(&config.source) {
+                    // Start Timer
+                    let _embed_start = std::time::Instant::now();
+                    match self.storage.embedding_model.lock().unwrap().embed(vec![text.clone()], None) {
+                        Ok(embeddings) => {
+                             if let Some(first) = embeddings.first() {
+                                 let json_values: Vec<Value> = first.iter().map(|f| Value::Number(async_graphql::Number::from_f64((*f).into()).unwrap_or(async_graphql::Number::from(0))))
+                                     .collect();
+                                 fields.insert(config.field.clone(), Value::List(json_values));
+                                 // println!("Auto-Embedded field {} from {} in {:.2}ms", config.field, config.source, embed_start.elapsed().as_secs_f64() * 1000.0);
+                             }
+                        },
+                        Err(e) => {
+                            eprintln!("Failed to generate embedding: {}", e);
+                            // We continue without embedding? Or fail?
+                            // For now continue, maybe user wants to retry later.
+                        }
+                    }
+                }
+            }
+        
+            // HNSW Indexing (Manual OR Auto)
+            if let Some(val) = fields.get(&config.field) {
                 if let Value::List(list) = val {
                     let vec_data: Vec<f64> = list.iter().filter_map(|v| match v {
                         Value::Number(n) => n.as_f64(),
                         _ => None
                     }).collect();
                     if !vec_data.is_empty() {
-                        self.storage.put_vector(uid, vec_data).map_err(|e| e.to_string())?;
+                        let storage = self.storage.clone();
+                        tokio::task::spawn_blocking(move || {
+                            if let Err(e) = storage.put_vector(uid, vec_data) {
+                                eprintln!("Background Vector Insert Error (UID {}): {}", uid, e);
+                            }
+                        });
                     }
                 }
             }
@@ -1376,6 +1647,11 @@ impl Resolver for FjallResolver {
             .collect();
 
         self.create_node_internal(type_name, uid, payload, uniques, inverses, search_fields, crate::realtime::bus::MutationSource::Local, None)?;
+        
+        let elapsed = op_start.elapsed();
+        if elapsed.as_secs() >= 1 {
+            println!("SLOW: create_node for {} took {:.2}s", type_name, elapsed.as_secs_f64());
+        }
         Ok(uid)
     }
 
@@ -1388,61 +1664,106 @@ impl Resolver for FjallResolver {
 
 
 
-    fn scan_nodes(&self, type_name: &str, filter: std::collections::HashMap<String, Value>, sort: std::collections::HashMap<String, Value>, first: Option<usize>, after: Option<String>) -> Vec<u64> {
-        // println!("Scan: scan_nodes called for {}. Filter: {:?}, Sort: {:?}", type_name, filter, sort);
-        // Optimization: Smallest Set First
-        let candidate_set = self.get_candidates(type_name, &filter);
-        // Removed candidate set logic, always perform full scan or scan from cursor.
+    fn scan_nodes(&self, type_name: &str, filter: std::collections::HashMap<String, Value>, sort: std::collections::HashMap<String, Value>, first: Option<usize>, after: Option<String>, uniques: &[String], near_vector: Option<Vec<f64>>) -> Vec<u64> {
+        // println!("Scan: scan_nodes called for {}. Filter: {:?}, Sort: {:?}, NearVector: {:?}", type_name, filter, sort, near_vector.is_some());
 
-        let mut filter_im = indexmap::IndexMap::new();
-        for (k, v) in &filter {
+         let mut uids = Vec::new();
+         let mut filter_im = indexmap::IndexMap::new();
+         for (k, v) in &filter {
             filter_im.insert(async_graphql::Name::new(k), v.clone());
         }
 
-        let prefix = Codec::encode_type_prefix(type_name);
-        let needs_sorting = !sort.is_empty();
-        
-        // If we have a candidate set, we iterate THAT instead of the DB prefix scan
-        // UNLESS we need to sort, in which case we still might generally fetch all, but we can filter the candidate set.
-        
-        let mut uids = Vec::new();
+        // Strategy:
+        // 1. If `near_vector` is present, it DRIVES the scan (Simulated Vector Index Scan).
+        // 2. If `uniques` provided (Identity Map), use that.
+        // 3. Else Full Scan.
 
-        if let Some(ref candidates) = candidate_set {
-            // We have a narrowed set.
-            // Just iterate the candidates and verify other filters.
+        if let Some(ref vec) = near_vector {
+             // Vector Search Drive
+             // Fetch K results (where K is limit * multiplier?)
+             // Since we have filters, we might need more.
+             // Let's assume K=100 or first * 10
+             let k = first.unwrap_or(50) * 4; 
+             
+             // Verify if this type HAS a vector index? 
+             // Currently `search_vectors` is global or per-index?
+             // `storage.search_vectors` takes `&[f64]` and returns `Vec<(u64, f64)>`.
+             // It likely searches the generic HNSW index.
+             // We need to filter by TYPE implicitly afterwards.
+             
+             match self.storage.search_vectors(vec, k) {
+                 Ok(results) => {
+                     for (uid, _dist) in results {
+                         // 1. Check Type (Legacy: we don't strictly enforce type separation in HNSW yet, 
+                         // so we must check if the UID belongs to `type_name`)
+                         // For Phase 1, we assume Global ID space, but we still check `_type`.
+                         
+                         // Check Type & Filter together
+                         if self.node_exists(type_name, uid) { 
+                              // Current `node_exists` assumes checking `_type` predicate?
+                              // Actually `node_exists` just checks any key?
+                              // Let's use `check_filter_recursive` which checks existence implicitly if not empty?
+                              // Or explicitly check type.
+                              
+                              // Verify Type
+                              if let Some(stored_type) = self.get_node_type(uid) {
+                                  if stored_type == type_name {
+                                      if filter.is_empty() || self.check_filter_recursive(uid, &filter_im) {
+                                          uids.push(uid);
+                                      }
+                                  }
+                              }
+                         }
+                     }
+                 },
+                 Err(e) => {
+                     eprintln!("Vector search failed: {}", e);
+                 }
+             }
+             
+             // Vector search results ARE sorted by distance (ASC).
+             // If `sort` is provided, we re-sort.
+             // If not, we keep vector order.
+             
+        } else if let Some(candidates) = self.get_candidates(type_name, &filter, uniques) {
+             // Candidate Set Optimization
+             // Try parallelize if set is large enough?
+             // For now, always parallelize as user requested it explicitly.
+             use rayon::prelude::*;
             
-            // Try parallelize if set is large enough?
-            // For now, always parallelize as user requested it explicitly.
-            use rayon::prelude::*;
+             // Collect into Vec for Rayon (HashSet is not parallel iterator by default usually, or needs explicit support)
+             // Rayon supports HashSet parallel iter if we import it.
+             // But strict order for vector collection?
             
-            // Collect into Vec for Rayon (HashSet is not parallel iterator by default usually, or needs explicit support)
-            // Rayon supports HashSet parallel iter if we import it.
-            // But strict order for vector collection?
+             let mut matched_uids: Vec<u64> = candidates.par_iter()
+                 .filter(|uid| {
+                      let matches_filter = if filter.is_empty() {
+                          true
+                      } else {
+                          self.check_filter_recursive(**uid, &filter_im)
+                      };
+                      matches_filter
+                 })
+                 .cloned()
+                 .collect();
             
-            let mut matched_uids: Vec<u64> = candidates.par_iter()
-                .filter(|uid| {
-                     let matches_filter = if filter.is_empty() {
-                         true
-                     } else {
-                         self.check_filter_recursive(**uid, &filter_im)
-                     };
-                     matches_filter
-                })
-                .cloned()
-                .collect();
-            
-            uids.append(&mut matched_uids);
+             uids.append(&mut matched_uids);
 
-            // Candidate set has no order guarantees. We MUST sort if pagination/sorting is active.
-            // If no explicit sort, we should probably sort by UID for consistency?
-            // Existing logic for full scan yields sorted by key (UID).
-            if !needs_sorting {
-                 uids.sort(); 
-                 // Handle pagination below
-            }
-
+             // Candidate set has no order guarantees. We MUST sort if pagination/sorting is active.
+             // If no explicit sort, we should probably sort by UID for consistency?
+             // Existing logic for full scan yields sorted by key (UID).
+             if sort.is_empty() {
+                  uids.sort(); 
+                  // Handle pagination below
+             }
         } else {
              // FULL SCAN FALLBACK
+            let prefix = Codec::encode_type_prefix(type_name);
+            let needs_sorting = !sort.is_empty();
+            
+            // If we have a candidate set, we iterate THAT instead of the DB prefix scan
+            // UNLESS we need to sort, in which case we still might generally fetch all, but we can filter the candidate set.
+            
             let start_key = if !needs_sorting {
                  if let Some(cursor) = after.clone() {
                      let uid = cursor.parse::<u64>().unwrap_or(0);
@@ -1456,44 +1777,40 @@ impl Resolver for FjallResolver {
             };
 
             use std::ops::Bound;
-            let (main_ks, _) = self.storage.get_database(&self.db_name).ok_or_else(|| anyhow::anyhow!("Database not found")).expect("Database not found");
-            let iter = main_ks.range((Bound::Included(start_key.clone()), Bound::Unbounded));
-            println!("Scan: Starting Full Scan for type: {}. Prefix/StartKey: {:?}", type_name, start_key);
-            for guard in iter {
-                 if let Ok(key) = guard.key() {
-                     // scanned_count += 1;
-                     // if scanned_count <= 10 {
-                     //    println!("Scan: Seeing Key: {:?}", key);
-                     // }
-                     if !key.starts_with(&prefix) { 
-                         // if scanned_count <= 10 { println!("Scan: Key {:?} does not match prefix {:?}", key, prefix); }
-                         break; 
-                     }
-                     if key.len() >= 8 {
-                         let uid = BigEndian::read_u64(&key[key.len()-8..]);
-                        
-                         let matches_filter = if filter.is_empty() {
-                             true
-                         } else {
-                             self.check_filter_recursive(uid, &filter_im)
-                         };
-
-                         if matches_filter {
-                             uids.push(uid);
-                             // If NO sorting, we can break early
-                             if !needs_sorting {
-                                 if let Some(limit) = first {
-                                     if uids.len() >= limit { break; }
+            if let Some((main_ks, _)) = self.storage.get_database(&self.db_name) {
+                 let iter = main_ks.range((Bound::Included(start_key.clone()), Bound::Unbounded));
+                 println!("Scan: Starting Full Scan for type: {}. Prefix/StartKey: {:?}", type_name, start_key);
+                 for guard in iter {
+                    if let Ok(key) = guard.key() {
+                        // scanned_count += 1;
+                        // if scanned_count <= 10 {
+                        //    println!("Scan: Seeing Key: {:?}", key);
+                        // }
+                        if !key.starts_with(&prefix) { 
+                            // if scanned_count <= 10 { println!("Scan: Key {:?} does not match prefix {:?}", key, prefix); }
+                            break; 
+                        }
+                        if key.len() >= 8 {
+                            let uid = BigEndian::read_u64(&key[key.len()-8..]);
+                            
+                             if filter.is_empty() || self.check_filter_recursive(uid, &filter_im) {
+                                 uids.push(uid);
+                                 // If NO sorting, we can break early
+                                 if !needs_sorting && near_vector.is_none() {
+                                     if let Some(limit) = first {
+                                         if uids.len() >= limit { break; }
+                                     }
                                  }
                              }
-                         }
-                     }
+                        }
+                    }
                  }
-             }
-             println!("Scan: Completed. Found {} uids", uids.len());
+                 println!("Scan: Completed. Found {} uids", uids.len());
+            }
         }
 
-        if needs_sorting {
+        // Apply Sorting (if explicit sort OR if implicit ID sort required)
+        if !sort.is_empty() {
             // In-Memory Sort
             if let Some((field, direction)) = sort.iter().next() {
                 let asc = match direction {
@@ -1520,43 +1837,75 @@ impl Resolver for FjallResolver {
                     if asc { cmp } else { cmp.reverse() }
                 });
             }
+        } else if near_vector.is_none() {
+             // If NOT vector search, and NO explicit sort, we sort by UID usually?
+             // Actually Full Scan builds `uids` in order (if not filtering via candidates).
+             // But Candidate set is unordered. 
+             // To be safe, we sort if came from candidates.
+             if self.get_candidates(type_name, &filter, uniques).is_some() {
+                 uids.sort();
+             }
+        }
+
+        // Pagination
+        // Vector search: `after` cursor is tricky (cursor needs to be offset or UID-based?)
+        // Standard GraphQL: Cursor is usually opaque. 
+        // For Vector Search, we usually don't support `after` efficiently without keeping state.
+        // We will support `after` simply by filtering `uids` if `after` is a UID.
+        // BUT if `after` is used with Vector Search, it implies "Item X was the last one".
+        // If sorting by Distance, checking "UID > X" is meaningless.
+        // We need to find X in the list and skip past it.
+        
+        if let Some(cursor_uid_str) = after {
+             if let Ok(cursor_uid) = cursor_uid_str.parse::<u64>() {
+                 if let Some(pos) = uids.iter().position(|u| *u == cursor_uid) {
+                     uids = uids.into_iter().skip(pos + 1).collect();
+                 }
+             }
         }
         
-        // Apply Pagination (If sorted OR if Candidate Set was used [since we sorted it manually])
-        // If Full Scan + No Sort, we already applied limit inside loop.
-        // But logic is cleaner if we just apply it here if we haven't yet?
-        // Full Scan + No Sort breaks early, so uids.len() <= limit.
-        // But `after` logic?
-        // Candidate Set + No Sort -> We sorted manually by UID. Need to apply `first` / `after`.
-        
-        let apply_pagination = needs_sorting || candidate_set.is_some();
-
-        if apply_pagination {
-            if let Some(cursor_uid_str) = after {
-                 if let Ok(cursor_uid) = cursor_uid_str.parse::<u64>() {
-                     if let Some(pos) = uids.iter().position(|u| *u == cursor_uid) {
-                         uids = uids.into_iter().skip(pos + 1).collect();
-                     }
-                 }
-            }
-            if let Some(limit) = first {
-                uids.truncate(limit);
-            }
+        if let Some(limit) = first {
+            uids.truncate(limit);
         }
 
         uids
     }
 
-    fn update_node(&self, type_name: &str, uid: u64, fields: std::collections::HashMap<String, Value>, uniques: &[String], inverses: &[crate::engine::resolver::InverseInfo], search_fields: &std::collections::HashMap<String, Vec<String>>, vector_field: Option<&str>) -> Result<(), String> {
-        if let Some(vf) = vector_field {
-            if let Some(val) = fields.get(vf) {
+    fn update_node(&self, type_name: &str, uid: u64, mut fields: std::collections::HashMap<String, Value>, uniques: &[String], inverses: &[crate::engine::resolver::InverseInfo], search_fields: &std::collections::HashMap<String, Vec<String>>, vector_config: Option<&crate::engine::resolver::VectorConfig>) -> Result<(), String> {
+        let op_start = std::time::Instant::now();
+        
+        // Automatic Embedding Generation (on Update)
+        if let Some(config) = vector_config {
+             // If source field is being updated, and embedding is NOT manually provided, regenerate it.
+             if fields.contains_key(&config.source) && !fields.contains_key(&config.field) {
+                 if let Some(Value::String(text)) = fields.get(&config.source) {
+                     match self.storage.embedding_model.lock().unwrap().embed(vec![text.clone()], None) {
+                        Ok(embeddings) => {
+                             if let Some(first) = embeddings.first() {
+                                 let json_values: Vec<Value> = first.iter().map(|f| Value::Number(async_graphql::Number::from_f64((*f).into()).unwrap_or(async_graphql::Number::from(0))))
+                                     .collect();
+                                 fields.insert(config.field.clone(), Value::List(json_values));
+                             }
+                        },
+                        Err(e) => eprintln!("Failed to generate embedding (update): {}", e)
+                     }
+                 }
+             }
+
+             // HNSW Update
+             if let Some(val) = fields.get(&config.field) {
                 if let Value::List(list) = val {
                     let vec_data: Vec<f64> = list.iter().filter_map(|v| match v {
                         Value::Number(n) => n.as_f64(),
                         _ => None
                     }).collect();
                      if !vec_data.is_empty() {
-                        self.storage.put_vector(uid, vec_data).map_err(|e| e.to_string())?;
+                        let storage = self.storage.clone();
+                         tokio::task::spawn_blocking(move || {
+                            if let Err(e) = storage.put_vector(uid, vec_data) {
+                                eprintln!("Background Vector Update Error (UID {}): {}", uid, e);
+                            }
+                        });
                     }
                 }
             }
@@ -1566,7 +1915,13 @@ impl Resolver for FjallResolver {
             .map(|(k, v)| (k.clone(), serde_json::to_value(v).unwrap_or(serde_json::Value::Null)))
             .collect();
             
-        self.update_node_internal(type_name, uid, payload, uniques, inverses, search_fields, crate::realtime::bus::MutationSource::Local, None)
+        let result = self.update_node_internal(type_name, uid, payload, uniques, inverses, search_fields, crate::realtime::bus::MutationSource::Local, None);
+        
+        let elapsed = op_start.elapsed();
+        if elapsed.as_secs() >= 1 {
+            println!("SLOW: update_node for {} uid={} took {:.2}s", type_name, uid, elapsed.as_secs_f64());
+        }
+        result
     }
 
     fn delete_node(&self, type_name: &str, uid: u64, uniques: &[String], inverses: &[crate::engine::resolver::InverseInfo], search_fields: &std::collections::HashMap<String, Vec<String>>) -> Result<(), String> {
@@ -1590,5 +1945,20 @@ impl Resolver for FjallResolver {
 
     fn subscribe_events(&self) -> EventBus {
         self.bus.clone()
+    }
+
+    fn flush(&self) -> Result<(), String> {
+        // Call Storage::flush() which rotates memtables, persists fingerprints, and syncs to disk
+        self.storage.flush()
+            .map_err(|e| e.to_string())
+    }
+
+    fn compact(&self) -> Result<u64, String> {
+        self.storage.compact()
+            .map_err(|e| e.to_string())
+    }
+
+    fn needs_compaction(&self) -> bool {
+        self.storage.needs_compaction()
     }
 }
