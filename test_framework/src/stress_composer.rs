@@ -16,7 +16,6 @@ use crate::{TestRunner, TestResult};
 /// Stress test configuration
 pub struct StressConfig {
     pub num_types: usize,
-    pub max_fields_per_type: usize,
     pub num_operations: usize,
 }
 
@@ -24,7 +23,6 @@ impl Default for StressConfig {
     fn default() -> Self {
         Self {
             num_types: 3,
-            max_fields_per_type: 5,
             num_operations: 50,
         }
     }
@@ -35,63 +33,17 @@ impl Default for StressConfig {
 enum FieldType {
     String,
     Int,
-    Float,
     Boolean,
     ID,
 }
 
 impl FieldType {
-    fn random(rng: &mut ChaCha8Rng) -> Self {
-        match rng.gen_range(0..5) {
-            0 => FieldType::String,
-            1 => FieldType::Int,
-            2 => FieldType::Float,
-            3 => FieldType::Boolean,
-            _ => FieldType::ID,
-        }
-    }
-
-    fn to_graphql(&self) -> &'static str {
-        match self {
-            FieldType::String => "String",
-            FieldType::Int => "Int",
-            FieldType::Float => "Float",
-            FieldType::Boolean => "Boolean",
-            FieldType::ID => "ID",
-        }
-    }
-
     fn random_value(&self, rng: &mut ChaCha8Rng) -> String {
         match self {
             FieldType::String => format!("\"{}\"", random_string(rng, 10)),
             FieldType::Int => rng.gen_range(-1000..1000).to_string(),
-            FieldType::Float => format!("{:.2}", rng.gen_range(-1000.0..1000.0f64)),
             FieldType::Boolean => if rng.gen() { "true" } else { "false" }.to_string(),
             FieldType::ID => format!("\"{}\"", random_string(rng, 8)),
-        }
-    }
-}
-
-/// Directives for random schema generation
-#[derive(Debug, Clone)]
-enum Directive {
-    None,
-    // Note: @unique removed because it causes random test failures when values collide
-    Search,
-}
-
-impl Directive {
-    fn random(rng: &mut ChaCha8Rng) -> Self {
-        match rng.gen_range(0..10) {
-            0 => Directive::Search,  // 10% chance of search directive
-            _ => Directive::None,
-        }
-    }
-
-    fn to_graphql(&self) -> &'static str {
-        match self {
-            Directive::None => "",
-            Directive::Search => " @search(by: [term])",
         }
     }
 }
@@ -102,7 +54,6 @@ struct FieldInfo {
     name: String,
     field_type: FieldType,
     required: bool,
-    directive: Directive,
 }
 
 /// Generated type info
@@ -256,25 +207,21 @@ fn generate_random_schema(_rng: &mut ChaCha8Rng, config: &StressConfig) -> Schem
                 name: "id".to_string(),
                 field_type: FieldType::ID,
                 required: true,
-                directive: Directive::None,
             },
             FieldInfo {
                 name: "name".to_string(),
                 field_type: FieldType::String,
                 required: false,
-                directive: Directive::None,
             },
             FieldInfo {
                 name: "value".to_string(),
                 field_type: FieldType::Int,
                 required: false,
-                directive: Directive::None,
             },
             FieldInfo {
                 name: "active".to_string(),
                 field_type: FieldType::Boolean,
                 required: false,
-                directive: Directive::None,
             },
         ];
 

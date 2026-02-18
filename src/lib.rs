@@ -1,3 +1,9 @@
+/// Returns true if VARDADB_DEBUG=1 is set. Checked once, cached forever.
+pub fn debug_logging() -> bool {
+    static DEBUG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *DEBUG.get_or_init(|| std::env::var("VARDADB_DEBUG").map(|v| v == "1").unwrap_or(false))
+}
+
 pub mod engine;
 pub mod storage;
 pub mod codegen;
@@ -152,7 +158,7 @@ pub async fn run(config: crate::config::VardaConfig) {
     schemas.insert("default".to_string(), Arc::new(RwLock::new(Arc::new(initial_schema))));
 
     let state = ServerState {
-        schemas,
+        schemas: schemas.clone(),
         storage: storage.clone(),
         cache: Arc::new(crate::engine::cache::QueryCache::new(100)), // Bounded LRU: 100 entries
         event_bus: shared_event_bus.clone(),
@@ -213,14 +219,34 @@ pub async fn run(config: crate::config::VardaConfig) {
     });
 
     // 3. Setup Routes
-    let mgmt_routes = crate::server::management::routes::<ServerState>()
-        .merge(crate::observability::router::routes::<ServerState>());
+    // Create Management State
+    let mgmt_state = crate::server::management::ManagementState {
+        storage: storage.clone(),
+        schemas: schemas.clone(),
+        event_bus: shared_event_bus.clone(),
+        storage_path: std::path::PathBuf::from(&config.server.storage_path),
+    };
+    
+    
+    let mgmt_manager = Arc::new(mgmt_state);
+    
+    // Convert observability router to Router<()> by providing state immediately
+    let obs_router = crate::observability::router::routes::<ServerState>()
+        .with_state(state.clone());
+
+    let mgmt_router = management::router(mgmt_manager.clone())
+        .merge(management::ui_router())
+        .merge(obs_router);
 
     let app = Router::new()
         .route("/graphql", post(graphql_handler).get(subscription_handler))
+        .route("/rpc", get(subscription_handler)) // Support Surrealist native connection
         .route("/playground", get(playground_handler))
+        .route("/version", get(version_handler))
         .route("/admin/schema", post(admin_schema_handler))
-        .nest("/_mgmt", mgmt_routes)
+
+        .nest_service("/management", mgmt_router)
+        .nest_service("/_mgmt", management::router(mgmt_manager.clone()))
         .layer(CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any))
         .with_state(state.clone());
 
@@ -248,8 +274,28 @@ pub async fn run(config: crate::config::VardaConfig) {
         println!("Server running at http://127.0.0.1:{}", port);
         println!("GraphiQL playground at http://127.0.0.1:{}/playground", port);
         println!("Admin Schema Endpoint at http://127.0.0.1:{}/admin/schema", port);
+        println!("Management at http://127.0.0.1:{}/management", port);
         
         axum::serve(listener, app).await.expect("Server error");
+    }
+}
+
+fn extract_db_name(headers: &axum::http::HeaderMap) -> String {
+    let name = headers
+        .get("x-varda-db")
+        .or_else(|| headers.get("DB"))
+        .or_else(|| headers.get("db"))
+        .or_else(|| headers.get("x-surreal-db"))
+        .or_else(|| headers.get("ns")) // Fallback to NS if DB not set? Or maybe the UI sends NS as DB? Let's check DB first.
+        .or_else(|| headers.get("NS"))
+        .and_then(|val| val.to_str().ok())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "default".to_string());
+        
+    if name == "sandbox" {
+        "archondb".to_string()
+    } else {
+        name
     }
 }
 
@@ -257,23 +303,14 @@ async fn graphql_handler(
     headers: axum::http::HeaderMap,
     axum::extract::State(state): axum::extract::State<ServerState>,
     req: GraphQLRequest,
-
 ) -> GraphQLResponse {
     let start = std::time::Instant::now();
     counter!("graphql_requests_total").increment(1);
     
-    // Extract Trace Context? (If we were using OTel HTTP prop, but we are embedded)
-    
-    // Span is automatically created by `instrument` if we add it, but we can also manually trace.
-    // Let's use the macro on the function or manually enter a span.
-    // Since we are inside the handler, let's wrap the logic in a span.
     let span = tracing::info_span!("graphql_request", method = "POST");
     let _enter = span.enter();
-    let db_name = headers
-        .get("x-varda-db")
-        .and_then(|val| val.to_str().ok())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| "default".to_string());
+    
+    let db_name = extract_db_name(&headers);
 
     let schema = if let Some(s) = state.schemas.get(&db_name) {
         s.read().await.clone()
@@ -284,7 +321,7 @@ async fn graphql_handler(
              println!("Lazy loading schema for database: {}", db_name);
              let resolver = FjallResolver::new(state.storage.clone(), &db_name);
              
-             let db_schema_path = format!("{}/{}_schema.graphql", "varda_db_data", db_name);
+             let db_schema_path = state.storage_path.join(format!("{}_schema.graphql", db_name));
              let sdl = std::fs::read_to_string(&db_schema_path).unwrap_or_else(|_| "type Health { status: String }".to_string());
              
              let new_schema = crate::engine::schema::Schema::load_with_resolver(&sdl, resolver)
@@ -306,7 +343,6 @@ async fn graphql_handler(
     let request = req.into_inner();
     
     // Check if Mutation (Simple check: contains "mutation")
-    // A robust check would parse, but for this Demo/PoC string match is 99% effective.
     let query_string = request.query.clone(); // Clone to keep owned String for Cache Key
     let is_mutation = query_string.contains("mutation");
 
@@ -332,15 +368,11 @@ async fn graphql_handler(
     // Execute & Cache
     let resp = schema.execute(request).await;
     
-    // Only cache if no errors? Readyset caches result regardless usually (snapshot).
-    // But for us, let's cache successful queries.
     if resp.errors.is_empty() {
         if let Ok(json) = serde_json::to_string(&resp) {
             state.cache.put(&query_string, &cache_key_suffix, json);
         }
     }
-
-
 
     // Record Latency
     let duration = start.elapsed().as_secs_f64();
@@ -372,12 +404,11 @@ async fn admin_schema_handler(
              }
             
             // Persist Schema
-            let storage_path = "varda_db_data"; // Consistent with run()
-            let schema_file_path = format!("{}/current_schema.graphql", storage_path);
+            let schema_file_path = state.storage_path.join("current_schema.graphql");
             if let Err(e) = tokio::fs::write(&schema_file_path, &body).await {
-                eprintln!("Failed to persist schema to {}: {}", schema_file_path, e);
+                eprintln!("Failed to persist schema to {:?}: {}", schema_file_path, e);
             } else {
-                println!("Schema persisted to {}", schema_file_path);
+                println!("Schema persisted to {:?}", schema_file_path);
             }
 
             println!("Schema updated successfully!");
@@ -395,34 +426,21 @@ async fn subscription_handler(
     headers: axum::http::HeaderMap,
     upgrade: axum::extract::ws::WebSocketUpgrade,
 ) -> axum::response::Response {
-    let schema_wrapper = state.schemas.get("default").expect("Default schema missing from map").read().await.clone();
-    // Inner Schema (likely async_graphql::Schema) usually implements execution/protocols
-    // But we need to ensure we pass a type that implements Executor + Send + Sync + Clone
-    // crate::engine::schema::Schema is likely our wrapper.
-    // If it is just a wrapper around async_graphql::Schema, we can use it.
-    // But if we need the inner async_graphql::Schema:
-    // let schema = schema_wrapper.inner().clone(); // Assuming inner() exists? 
-    // Wait, in previous code: `state.schema.read().await.clone()` was passed.
-    // `state.schema` was `Arc<RwLock<Arc<Schema>>>`. read() -> `Arc<Schema>`. clone() -> `Arc<Schema>`.
-    // So we are passing `Arc<Schema>`.
+    let db_name = extract_db_name(&headers);
     
-    // The ERROR said: `trait Executor is not implemented for Arc<Schema>`.
-    // This implies `Schema` implements `Executor`, but `Arc<Schema>` does not.
-    // We should deference the Arc if possible, OR clone the inner Schema if it's cheap (async_graphql::Schema is cheap).
-    
-    // Let's try to get the inner schema.
-    let schema = schema_wrapper.inner().clone();
+    let _schema_wrapper = if let Some(s) = state.schemas.get(&db_name) {
+        s.read().await.clone()
+    } else {
+        // Fallback to default if not found
+        state.schemas.get("default").expect("Default schema missing from map").read().await.clone()
+    };
+
+    let _schema = _schema_wrapper.inner().clone();
 
     let protocol_str = headers
         .get(axum::http::header::SEC_WEBSOCKET_PROTOCOL)
         .and_then(|val| val.to_str().ok())
         .unwrap_or("graphql-transport-ws"); 
-    
-    // Fallback: simpler protocol lookup. 
-    // async-graphql's WebSocketProtocols enum might be tricky to parse from string directly if no FromStr.
-    // We will rely on ALL_WEBSOCKET_PROTOCOLS usually containing what we need.
-    // Actually, WebSocket::new needs the negotiated protocol.
-    // If we assume graphql-ws, we pass GraphQLWS.
     
     let protocol = if protocol_str.contains("graphql-transport-ws") {
         async_graphql::http::WebSocketProtocols::GraphQLWS
@@ -434,9 +452,109 @@ async fn subscription_handler(
         .protocols(async_graphql::http::ALL_WEBSOCKET_PROTOCOLS)
         .on_upgrade(move |socket| async move {
             use futures_util::{StreamExt, SinkExt, future, pin_mut};
-            let (mut sink, stream) = socket.split();
+            let (mut sink, mut stream) = socket.split();
 
-            let stream = stream
+            // 1. Peek/Read the first message to determine DB (if not in headers)
+            let mut buffered_msg = None;
+            let mut selected_db = db_name.clone(); // Default from headers
+
+            if let Some(Ok(msg)) = stream.next().await {
+                 match &msg {
+                    axum::extract::ws::Message::Text(s) => {
+                        println!("WS: Received initial message: {}", s);
+                        // Attempt to parse ConnectionInit or JSON-RPC "use"
+                        if let Ok(val) = serde_json::from_str::<serde_json::Value>(s) {
+                            // 1. GraphQL-WS: { type: "connection_init", payload: { ... } }
+                            if val["type"] == "connection_init" {
+                                if let Some(payload) = val.get("payload") {
+                                    let ns = payload.get("NS").or(payload.get("ns")).and_then(|v| v.as_str());
+                                    let db = payload.get("DB").or(payload.get("db")).and_then(|v| v.as_str());
+                                    
+                                    if let Some(d) = db { selected_db = d.to_string(); }
+                                    else if let Some(n) = ns { selected_db = n.to_string(); }
+                                }
+                            }
+                            // 2. JSON-RPC (Surrealist): { method: "use", params: ["ns", "db"] }
+                            else if val["method"] == "use" {
+                                if let Some(params) = val.get("params").and_then(|p| p.as_array()) {
+                                    // Params: [ns, db]
+                                    if params.len() >= 2 {
+                                        if let Some(db) = params[1].as_str() {
+                                            selected_db = db.to_string();
+                                        } else if let Some(ns) = params[0].as_str() {
+                                            selected_db = ns.to_string();
+                                        }
+                                    }
+                                }
+                            }
+                             // 3. JSON-RPC (Surrealist): { method: "signin", params: [{ "NS": "...", "DB": "..." }] }
+                             else if val["method"] == "signin" {
+                                 if let Some(params) = val.get("params").and_then(|p| p.as_array()) {
+                                     if let Some(auth) = params.get(0).and_then(|p| p.as_object()) {
+                                         let ns = auth.get("NS").or(auth.get("ns")).and_then(|v| v.as_str());
+                                         let db = auth.get("DB").or(auth.get("db")).and_then(|v| v.as_str());
+                                         
+                                         if let Some(d) = db { selected_db = d.to_string(); }
+                                         else if let Some(n) = ns { selected_db = n.to_string(); }
+                                     }
+                                 }
+                             }
+                        }
+                    },
+                    axum::extract::ws::Message::Binary(b) => {
+                         println!("WS: Received initial message (Binary): {:?} bytes", b.len());
+                    },
+                     _ => {
+                         println!("WS: Received initial message (Other): {:?}", msg);
+                     }
+                 }
+                 buffered_msg = Some(msg);
+            }
+            
+            if selected_db == "sandbox" {
+                selected_db = "archondb".to_string();
+            }
+            
+            println!("WS: Selected DB: {}", selected_db);
+
+            // 2. Select Schema based on extracted DB
+            let schema_wrapper = if let Some(s) = state.schemas.get(&selected_db) {
+                s.read().await.clone()
+            } else {
+                // Lazy Load Attempt (Copy logic from graphql_handler? Or just try to load?)
+                // For subscriptions, we might want to support lazy loading too.
+                // Re-using lazy load logic properly:
+                 if state.storage.get_database(&selected_db).is_some() {
+                     println!("Lazy loading schema for database (WS): {}", selected_db);
+                     let resolver = FjallResolver::new(state.storage.clone(), &selected_db);
+                     let db_schema_path = state.storage_path.join(format!("{}_schema.graphql", selected_db));
+                     let sdl = std::fs::read_to_string(&db_schema_path).unwrap_or_else(|_| "type Health { status: String }".to_string());
+                     
+                     if let Ok(new_schema) = crate::engine::schema::Schema::load_with_resolver(&sdl, resolver) {
+                         let arc_schema = Arc::new(RwLock::new(Arc::new(new_schema)));
+                         state.schemas.insert(selected_db.clone(), arc_schema.clone());
+                         let x = arc_schema.read().await.clone();
+                         x
+                     } else {
+                         state.schemas.get("default").expect("Default schema missing").read().await.clone()
+                     }
+                } else {
+                     state.schemas.get("default").expect("Default schema missing").read().await.clone()
+                }
+            };
+            
+            let schema = schema_wrapper.inner().clone();
+
+            // 3. Reconstruct Stream (Prepend buffered message)
+            let initial_stream = if let Some(msg) = buffered_msg {
+                futures_util::stream::once(async move { Ok(msg) }).boxed()
+            } else {
+                futures_util::stream::empty().boxed()
+            };
+            
+            let combined_stream = initial_stream.chain(stream);
+
+            let msg_stream = combined_stream
                 .take_while(|res| future::ready(res.is_ok()))
                 .map(|res| res.unwrap())
                 .filter_map(|msg| async move {
@@ -447,7 +565,7 @@ async fn subscription_handler(
                     }
                 });
 
-            let data_stream = async_graphql::http::WebSocket::new(schema, stream, protocol);
+            let data_stream = async_graphql::http::WebSocket::new(schema, msg_stream, protocol);
             pin_mut!(data_stream);
 
             while let Some(msg) = data_stream.next().await {
@@ -478,6 +596,14 @@ async fn playground_handler() -> impl IntoResponse {
         "headers: JSON.stringify({ 'x-varda-db': 'archondb' }), fetcher: GraphiQL.createFetcher({",
     );
     Html(source)
+}
+
+async fn version_handler() -> impl IntoResponse {
+    let json_response = serde_json::json!({
+        "version": "surrealdb-2.0.0", // Mimic SurrealDB version to satisfy UI check
+        "ui_version": "0.0.0" // Mimic UI version, match package.json if possible or just 0.0.0
+    });
+    axum::Json(json_response)
 }
 
 pub fn build_schema(sdl: &str) -> Result<crate::engine::schema::Schema, String> {

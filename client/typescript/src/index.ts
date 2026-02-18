@@ -13,17 +13,32 @@ import {
 
 
 // --- 1. Client Factory ---
-export const createVardaClient = (options: { url: string }) => {
+export const createVardaClient = (options: { url: string; database?: string }) => {
     // Convert HTTP to WS if needed, or assume caller passes base
     // If user passes "http://...", we replace with "ws://" for subscription?
     // Let's assume input is http
     const httpUrl = options.url;
     const wsUrl = httpUrl.replace(/^http/, 'ws');
+    const database = options.database || 'default';
 
-    const wsClient = createWSClient({ url: wsUrl });
+    const wsClient = createWSClient({ 
+        url: wsUrl,
+        connectionParams: {
+            headers: {
+                'x-varda-db': database
+            }
+        }
+    });
 
     return new Client({
         url: httpUrl,
+        fetchOptions: () => {
+            return {
+                headers: {
+                    'x-varda-db': database
+                }
+            };
+        },
         exchanges: [
             graphCacheExchange({
                 keys: { MutationEvent: () => null }, // Custom Cache Keys

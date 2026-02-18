@@ -1,0 +1,51 @@
+.controls {
+	container-type: size;
+	justify-content: right;
+	width: 100%;
+}
+
+.graph-sidebar>div>div {
+	height: 100%;
+	display: block !important;
+}
+
+.graph-table {
+	.graph-table-alias {
+		visibility: hidden;
+	}
+
+	&:hover .graph-table-alias,
+	.graph-table-alias:focus-within {
+		visibility: visible;
+	}
+}
+
+.run-large {
+	display: none;
+}
+
+@container (width < 325px) {
+	.results {
+		display: none;
+	}
+}
+
+@container (width > 525px) {
+	.run-large {
+		display: unset;
+	}
+
+	.run-small {
+		display: none;
+	}
+}
+
+.combined-stack {
+	height: 100%;
+	min-height: 0;
+}
+
+.combined-editor {
+	flex: 1;
+	min-height: 0;
+}

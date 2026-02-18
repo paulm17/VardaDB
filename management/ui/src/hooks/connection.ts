@@ -1,0 +1,365 @@
+import { compareVersions } from "compare-versions";
+import { unique } from "radash";
+import { useMemo } from "react";
+import { useShallow } from "zustand/react/shallow";
+import { isOrganisationTerminated } from "~/cloud/helpers";
+import { useCloudInstanceList } from "~/cloud/hooks/instances";
+import { GLOBAL_PAGES, SANDBOX, VIEW_PAGES } from "~/constants";
+import { openRequiredDatabaseModal } from "~/modals/require-database";
+import { useConfigStore } from "~/stores/config";
+import { useDatabaseStore } from "~/stores/database";
+import {
+	CloudInstance,
+	Connection,
+	GlobalCondition,
+	GlobalPage,
+	GlobalPageInfo,
+	ViewCondition,
+	ViewPage,
+	ViewPageInfo,
+} from "~/types";
+import { useFeatureFlags } from "~/util/feature-flags";
+import { fuzzyMatch } from "~/util/helpers";
+import { useConnectionAndView } from "./routing";
+import { useStable } from "./stable";
+
+/**
+ * Returns whether Surrealist is connected to a database
+ */
+export function useIsConnected() {
+	return useDatabaseStore((s) => s.currentState === "connected");
+}
+
+/**
+ * Returns whether Surrealist is connecting to a database
+ */
+export function useIsConnecting() {
+	return useDatabaseStore(
+		(s) => s.currentState === "connecting" || s.currentState === "retrying",
+	);
+}
+
+/**
+ * Return a list of all connections
+ */
+export function useConnectionList() {
+	return useConfigStore((s) => s.connections);
+}
+
+/**
+ * Select fields from the active connection
+ *
+ * @param selector A function to select fields from the connection
+ */
+export function useConnection<T>(selector: (con?: Connection) => T): T {
+	const [connection] = useConnectionAndView();
+
+	return useConfigStore(
+		useShallow((s) => {
+			if (connection === SANDBOX) {
+				return selector(s.sandbox);
+			}
+
+			return selector(s.connections.find((c) => c.id === connection));
+		}),
+	);
+}
+
+/**
+ * Select fields from all connections
+ *
+ * @param selector A function to select fields from a connection
+ */
+export function useConnections<T>(selector: (con: Connection) => T): T[] {
+	return useConfigStore(
+		useShallow((s) => {
+			return s.connections.map(selector);
+		}),
+	);
+}
+
+/**
+ * Returns a list of all used connection labels
+ */
+export function useConnectionLabels() {
+	const labels = useConfigStore((s) => s.connections.flatMap((c) => c.labels ?? []));
+
+	return unique(labels);
+}
+
+/**
+ * Returns information about the active connection view
+ */
+export function useView() {
+	const [, view] = useConnectionAndView();
+
+	return view ? VIEW_PAGES[view] : null;
+}
+
+/**
+ * Returns a mapping of available global pages
+ */
+export function useAvailablePages(): Partial<Record<GlobalPage, GlobalPageInfo>> {
+	const [flags] = useFeatureFlags();
+
+	return useMemo(() => {
+		const draft = { ...GLOBAL_PAGES } as const;
+		const condition: GlobalCondition = { flags };
+
+		for (const { id, disabled } of Object.values(draft)) {
+			if (disabled?.(condition)) {
+				delete draft[id];
+			}
+		}
+
+		return draft;
+	}, [flags]);
+}
+
+/**
+ * Returns a mapping of available views based on the current connection
+ */
+export function useAvailableViews(): Partial<Record<ViewPage, ViewPageInfo>> {
+	const [flags] = useFeatureFlags();
+	const version = useDatabaseStore((s) => s.version) || null;
+
+	const [connection, isCloud] = useConnection((c) => [
+		c?.id ?? "",
+		c?.authentication.mode === "cloud",
+	]);
+
+	return useMemo(() => {
+		const draft = { ...VIEW_PAGES } as const;
+		const condition: ViewCondition = {
+			connection,
+			flags,
+			isCloud,
+			version,
+		};
+
+		for (const { id, disabled } of Object.values(draft)) {
+			if (disabled?.(condition)) {
+				delete draft[id];
+			}
+		}
+
+		return draft;
+	}, [flags, connection, isCloud, version]);
+}
+
+/**
+ * Returns a list of all saved query tags
+ */
+export function useSavedQueryTags() {
+	const queries = useConfigStore((s) => s.savedQueries);
+
+	return useMemo(() => {
+		return unique(queries.flatMap((q) => q.tags));
+	}, [queries]);
+}
+
+/**
+ * Returns whether the current database version is an alpha or beta version
+ */
+export function useIsAlphaOrBeta() {
+	const version = useDatabaseStore((s) => s.version);
+
+	return version.includes("-alpha") || version.includes("-beta");
+}
+
+/**
+ * Returns whether the current database version is at least the minimum version
+ */
+export function useMinimumVersion(minimum: string) {
+	const version = useDatabaseStore((s) => s.version);
+	const isGreater = !version || compareVersions(version, minimum) >= 0;
+
+	return [isGreater, version] as const;
+}
+
+/**
+ * Return the selected query tab from the active connection
+ *
+ * @returns The selected query tab
+ */
+export function useActiveQuery() {
+	return useConnection((c) => {
+		return c?.queries.find((q) => q.id === c.activeQuery);
+	});
+}
+
+/**
+ * Requires a selected database before executing a callback
+ */
+export function useRequireDatabase(callback: () => void) {
+	const hasDatabase = useConnection((c) => !!c?.lastDatabase);
+
+	return useStable(() => {
+		if (hasDatabase) {
+			callback();
+		} else {
+			openRequiredDatabaseModal(callback);
+		}
+	});
+}
+
+export type FilterMode = "any" | "all";
+
+export interface ConnectionFilter {
+	search?: string;
+	labels?: string[];
+	labelMode?: FilterMode;
+	labelInclude?: boolean;
+	includeEmpty?: boolean;
+}
+
+/**
+ * Retrieve the structured list of instances and connections
+ */
+export function useConnectionOverview({
+	search = "",
+	labels = [],
+	labelMode = "any",
+	labelInclude = true,
+	includeEmpty,
+}: ConnectionFilter) {
+	const { entries, isPending } = useCloudInstanceList();
+
+	const connections = useConnectionList();
+	const sandboxInfo = useConfigStore((s) => s.sandbox);
+
+	const [userConnections, sandbox, organizations, isEmpty] = useMemo(() => {
+		const organizations = [];
+		const normalConnections = connections.filter((c) => !c.authentication.cloudInstance);
+		const userConnections = filterConnections(
+			normalConnections,
+			search,
+			labels,
+			labelMode,
+			labelInclude,
+		);
+
+		const [sandbox] = filterConnections([sandboxInfo], search, labels, labelMode, labelInclude);
+
+		for (const entry of entries) {
+			if (isOrganisationTerminated(entry.organization)) {
+				continue;
+			}
+
+			const instances = filterInstances(
+				entry.instances,
+				search,
+				labels,
+				labelMode,
+				labelInclude,
+			);
+
+			if (instances.length > 0 || includeEmpty) {
+				organizations.push({
+					info: entry.organization,
+					instances,
+				});
+			}
+		}
+
+		const isEmpty = !sandbox && userConnections.length === 0 && organizations.length === 0;
+
+		return [userConnections, sandbox, organizations, isEmpty] as const;
+	}, [connections, sandboxInfo, entries, search, labels, labelMode, labelInclude, includeEmpty]);
+
+	return {
+		isPending,
+		isEmpty,
+		sandbox,
+		userConnections,
+		organizations,
+	};
+}
+
+/**
+ * Filters connections based on search term and selected labels with filtering modes
+ */
+function filterConnections(
+	list: Connection[],
+	search: string,
+	labels: string[],
+	labelMode: FilterMode = "any",
+	labelInclude = true,
+) {
+	if (!search && labels.length === 0) {
+		return list;
+	}
+
+	return list.filter((target) => {
+		// Label filtering
+		if (labels.length > 0) {
+			const matches =
+				labelMode === "any"
+					? labels.some((label) => target.labels?.includes(label))
+					: labels.every((label) => target.labels?.includes(label));
+
+			if (matches !== labelInclude) {
+				return false;
+			}
+		}
+
+		// Search filtering
+		if (search) {
+			const needle = search.toLowerCase();
+			const name = target.name.toLowerCase();
+			const hostname = target.authentication.hostname.toLowerCase();
+
+			if (!fuzzyMatch(needle, name) && !fuzzyMatch(needle, hostname)) {
+				return false;
+			}
+		}
+
+		return true;
+	});
+}
+
+/**
+ * Filters cloud instances based on search term and selected labels with filtering modes
+ */
+function filterInstances(
+	list: CloudInstance[],
+	search: string,
+	labels: string[],
+	labelMode: FilterMode = "any",
+	labelInclude = true,
+) {
+	if (!search && labels.length === 0) {
+		return list;
+	}
+
+	const { connections } = useConfigStore.getState();
+
+	return list.filter((target) => {
+		const connection = connections.find((c) => c.authentication.cloudInstance === target.id);
+
+		// Label filtering
+		if (labels.length > 0) {
+			const matches =
+				labelMode === "any"
+					? labels.some((label) => connection?.labels?.includes(label))
+					: labels.every((label) => connection?.labels?.includes(label));
+
+			if (matches !== labelInclude) {
+				return false;
+			}
+		}
+
+		// Search filtering
+		if (search) {
+			const needle = search.toLowerCase();
+			const name = target.name.toLowerCase();
+			const hostname = target.host.toLowerCase();
+
+			if (!fuzzyMatch(needle, name) && !fuzzyMatch(needle, hostname)) {
+				return false;
+			}
+		}
+
+		return true;
+	});
+}

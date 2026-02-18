@@ -1,1 +1,8 @@
+.fastembed_cache/
 /target
+/test_framework/target
+/vardaclaw/target
+/management/target
+/jobs/target
+/client/rust/target
+/client/typescript/dist

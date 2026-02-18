@@ -1,5 +1,149 @@
+type Book {
+  uid: ID!
+  id: ID!
+  code: String
+  nameEn: String
+  nameHe: String
+  nameGr: String
+  chapters: Int
+  bookTranslations: [BookTranslation]
+  bookCategories: [BookCategory]
+  summaries: [Summaries]
+}
+
+type BookCategory {
+  uid: ID!
+  id: ID!
+  book: Book
+  category: Category
+}
+
+input BookCategoryFilter {
+  and: [BookCategoryFilter]
+  or: [BookCategoryFilter]
+  not: BookCategoryFilter
+}
+
+input BookCategoryInput {
+  uid: ID
+  book: BookInput
+  category: CategoryInput
+}
+
+input BookCategorySort {
+  id: SortDirection
+}
+
+input BookFilter {
+  code: StringFilter
+  nameEn: StringFilter
+  nameHe: StringFilter
+  nameGr: StringFilter
+  chapters: IntFilter
+  and: [BookFilter]
+  or: [BookFilter]
+  not: BookFilter
+}
+
+input BookInput {
+  uid: ID
+  code: String
+  nameEn: String
+  nameHe: String
+  nameGr: String
+  chapters: Int
+  bookTranslations: [BookTranslationInput]
+  bookCategories: [BookCategoryInput]
+  summaries: [SummariesInput]
+}
+
+input BookSort {
+  code: SortDirection
+  nameEn: SortDirection
+  nameHe: SortDirection
+  nameGr: SortDirection
+  chapters: SortDirection
+}
+
+type BookTranslation {
+  uid: ID!
+  id: ID!
+  book: Book
+  translation: Translations
+  chapters(sort: ChapterSort): [Chapter]
+}
+
+input BookTranslationFilter {
+  and: [BookTranslationFilter]
+  or: [BookTranslationFilter]
+  not: BookTranslationFilter
+}
+
+input BookTranslationInput {
+  uid: ID
+  book: BookInput
+  translation: TranslationsInput
+  chapters: [ChapterInput]
+}
+
+input BookTranslationSort {
+  id: SortDirection
+}
+
 input BooleanFilter {
   eq: Boolean
+}
+
+type Category {
+  uid: ID!
+  id: ID!
+  name: String
+  bookCategories: [BookCategory]
+}
+
+input CategoryFilter {
+  name: StringFilter
+  and: [CategoryFilter]
+  or: [CategoryFilter]
+  not: CategoryFilter
+}
+
+input CategoryInput {
+  uid: ID
+  name: String
+  bookCategories: [BookCategoryInput]
+}
+
+input CategorySort {
+  name: SortDirection
+}
+
+type Chapter {
+  uid: ID!
+  id: ID!
+  number: Int
+  bookTranslation: BookTranslation
+  verses(filter: VerseFilter): [Verse]
+  summaries: [Summaries]
+}
+
+input ChapterFilter {
+  number: IntFilter
+  and: [ChapterFilter]
+  or: [ChapterFilter]
+  not: ChapterFilter
+}
+
+input ChapterInput {
+  uid: ID
+  number: Int
+  bookTranslation: BookTranslationInput
+  verses: [VerseInput]
+  summaries: [SummariesInput]
+}
+
+input ChapterSort {
+  number: SortDirection
 }
 
 scalar DateTime
@@ -13,16 +157,375 @@ input DateTimeFilter {
   in: [DateTime]
 }
 
+type Entities {
+  uid: ID!
+  entityId: Int
+  name: String
+  entityType: String
+  description: String
+  mentions: [EntityMentions]
+  edgesA: [EntityEdges]
+  edgesB: [EntityEdges]
+}
+
+input EntitiesFilter {
+  entityId: IntFilter
+  name: StringFilter
+  entityType: StringFilter
+  description: StringFilter
+  and: [EntitiesFilter]
+  or: [EntitiesFilter]
+  not: EntitiesFilter
+}
+
+input EntitiesInput {
+  uid: ID
+  entityId: Int
+  name: String
+  entityType: String
+  description: String
+  mentions: [EntityMentionsInput]
+  edgesA: [EntityEdgesInput]
+  edgesB: [EntityEdgesInput]
+}
+
+input EntitiesSort {
+  entityId: SortDirection
+  name: SortDirection
+  entityType: SortDirection
+  description: SortDirection
+}
+
+type EntityEdges {
+  uid: ID!
+  edgeId: Int
+  relationType: String
+  weight: Float
+  entityA: Entities
+  entityB: Entities
+}
+
+input EntityEdgesFilter {
+  edgeId: IntFilter
+  relationType: StringFilter
+  weight: FloatFilter
+  and: [EntityEdgesFilter]
+  or: [EntityEdgesFilter]
+  not: EntityEdgesFilter
+}
+
+input EntityEdgesInput {
+  uid: ID
+  edgeId: Int
+  relationType: String
+  weight: Float
+  entityA: EntitiesInput
+  entityB: EntitiesInput
+}
+
+input EntityEdgesSort {
+  edgeId: SortDirection
+  relationType: SortDirection
+  weight: SortDirection
+}
+
+type EntityMentions {
+  uid: ID!
+  mentionId: Int
+  tokenStart: Int
+  tokenEnd: Int
+  confidence: Float
+  entity: Entities
+  verse: Verse
+}
+
+input EntityMentionsFilter {
+  mentionId: IntFilter
+  tokenStart: IntFilter
+  tokenEnd: IntFilter
+  confidence: FloatFilter
+  and: [EntityMentionsFilter]
+  or: [EntityMentionsFilter]
+  not: EntityMentionsFilter
+}
+
+input EntityMentionsInput {
+  uid: ID
+  mentionId: Int
+  tokenStart: Int
+  tokenEnd: Int
+  confidence: Float
+  entity: EntitiesInput
+  verse: VerseInput
+}
+
+input EntityMentionsSort {
+  mentionId: SortDirection
+  tokenStart: SortDirection
+  tokenEnd: SortDirection
+  confidence: SortDirection
+}
+
+input FloatFilter {
+  eq: Float
+  gt: Float
+  lt: Float
+  ge: Float
+  le: Float
+  between: [Float]
+  in: [Float]
+}
+
+type InterlinearAlignments {
+  uid: ID!
+  id: ID!
+  lemmaA: Lemmas
+  lemmaB: Lemmas
+}
+
+input InterlinearAlignmentsFilter {
+  and: [InterlinearAlignmentsFilter]
+  or: [InterlinearAlignmentsFilter]
+  not: InterlinearAlignmentsFilter
+}
+
+input InterlinearAlignmentsInput {
+  uid: ID
+  lemmaA: LemmasInput
+  lemmaB: LemmasInput
+}
+
+input InterlinearAlignmentsSort {
+  id: SortDirection
+}
+
+input IntFilter {
+  eq: Int
+  gt: Int
+  lt: Int
+  ge: Int
+  le: Int
+  between: [Int]
+  in: [Int]
+}
+
+scalar JSON
+
+type Keyword {
+  uid: ID!
+  id: ID!
+  text: String
+  videos: [VideoKeyword]
+}
+
+input KeywordFilter {
+  text: StringFilter
+  and: [KeywordFilter]
+  or: [KeywordFilter]
+  not: KeywordFilter
+}
+
+input KeywordInput {
+  uid: ID
+  text: String
+  videos: [VideoKeywordInput]
+}
+
+input KeywordSort {
+  text: SortDirection
+}
+
+type Language {
+  uid: ID!
+  id: ID!
+  code: String
+  name: String
+  translations: [Translations]
+}
+
+input LanguageFilter {
+  code: StringFilter
+  name: StringFilter
+  and: [LanguageFilter]
+  or: [LanguageFilter]
+  not: LanguageFilter
+}
+
+input LanguageInput {
+  uid: ID
+  code: String
+  name: String
+  translations: [TranslationsInput]
+}
+
+input LanguageSort {
+  code: SortDirection
+  name: SortDirection
+}
+
+type Lemmas {
+  uid: ID!
+  lemmaId: Int
+  strongsId: String
+  languageCode: String
+  lemmaText: String
+  gloss: String
+  wordnetLinks: [WordnetLinks]
+  lexiconEmbeddings: [LexiconEmbeddings]
+  syntaxRelationsSub: [SyntaxRelations]
+  syntaxRelationsVerb: [SyntaxRelations]
+  syntaxRelationsObj: [SyntaxRelations]
+  interlinearAlignmentsA: [InterlinearAlignments]
+  interlinearAlignmentsB: [InterlinearAlignments]
+}
+
+input LemmasFilter {
+  lemmaId: IntFilter
+  strongsId: StringFilter
+  languageCode: StringFilter
+  lemmaText: StringFilter
+  gloss: StringFilter
+  and: [LemmasFilter]
+  or: [LemmasFilter]
+  not: LemmasFilter
+}
+
+input LemmasInput {
+  uid: ID
+  lemmaId: Int
+  strongsId: String
+  languageCode: String
+  lemmaText: String
+  gloss: String
+  wordnetLinks: [WordnetLinksInput]
+  lexiconEmbeddings: [LexiconEmbeddingsInput]
+  syntaxRelationsSub: [SyntaxRelationsInput]
+  syntaxRelationsVerb: [SyntaxRelationsInput]
+  syntaxRelationsObj: [SyntaxRelationsInput]
+  interlinearAlignmentsA: [InterlinearAlignmentsInput]
+  interlinearAlignmentsB: [InterlinearAlignmentsInput]
+}
+
+input LemmasSort {
+  lemmaId: SortDirection
+  strongsId: SortDirection
+  languageCode: SortDirection
+  lemmaText: SortDirection
+  gloss: SortDirection
+}
+
+type LexiconEmbeddings {
+  uid: ID!
+  embeddingId: Int
+  modelName: String
+  lemma: Lemmas
+}
+
+input LexiconEmbeddingsFilter {
+  embeddingId: IntFilter
+  modelName: StringFilter
+  and: [LexiconEmbeddingsFilter]
+  or: [LexiconEmbeddingsFilter]
+  not: LexiconEmbeddingsFilter
+}
+
+input LexiconEmbeddingsInput {
+  uid: ID
+  embeddingId: Int
+  modelName: String
+  lemma: LemmasInput
+}
+
+input LexiconEmbeddingsSort {
+  embeddingId: SortDirection
+  modelName: SortDirection
+}
+
 type Mutation {
-  createTodo(input: TodoInput!): Todo
-  updateTodo(id: ID!, input: TodoInput!): Boolean
-  deleteTodo(id: ID!): Boolean
+  createLanguage(input: LanguageInput!): Language
+  updateLanguage(uid: ID!, input: LanguageInput!): Boolean
+  deleteLanguage(uid: ID!): Boolean
+  createCategory(input: CategoryInput!): Category
+  updateCategory(uid: ID!, input: CategoryInput!): Boolean
+  deleteCategory(uid: ID!): Boolean
+  createTranslations(input: TranslationsInput!): Translations
+  updateTranslations(uid: ID!, input: TranslationsInput!): Boolean
+  deleteTranslations(uid: ID!): Boolean
+  createBook(input: BookInput!): Book
+  updateBook(uid: ID!, input: BookInput!): Boolean
+  deleteBook(uid: ID!): Boolean
+  createBookTranslation(input: BookTranslationInput!): BookTranslation
+  updateBookTranslation(uid: ID!, input: BookTranslationInput!): Boolean
+  deleteBookTranslation(uid: ID!): Boolean
+  createBookCategory(input: BookCategoryInput!): BookCategory
+  updateBookCategory(uid: ID!, input: BookCategoryInput!): Boolean
+  deleteBookCategory(uid: ID!): Boolean
+  createChapter(input: ChapterInput!): Chapter
+  updateChapter(uid: ID!, input: ChapterInput!): Boolean
+  deleteChapter(uid: ID!): Boolean
+  createVerse(input: VerseInput!): Verse
+  updateVerse(uid: ID!, input: VerseInput!): Boolean
+  deleteVerse(uid: ID!): Boolean
+  createVerseContent(input: VerseContentInput!): VerseContent
+  updateVerseContent(uid: ID!, input: VerseContentInput!): Boolean
+  deleteVerseContent(uid: ID!): Boolean
+  createLemmas(input: LemmasInput!): Lemmas
+  updateLemmas(uid: ID!, input: LemmasInput!): Boolean
+  deleteLemmas(uid: ID!): Boolean
+  createTokenMorphology(input: TokenMorphologyInput!): TokenMorphology
+  updateTokenMorphology(uid: ID!, input: TokenMorphologyInput!): Boolean
+  deleteTokenMorphology(uid: ID!): Boolean
+  createWordnetLinks(input: WordnetLinksInput!): WordnetLinks
+  updateWordnetLinks(uid: ID!, input: WordnetLinksInput!): Boolean
+  deleteWordnetLinks(uid: ID!): Boolean
+  createVerseEmbeddings(input: VerseEmbeddingsInput!): VerseEmbeddings
+  updateVerseEmbeddings(uid: ID!, input: VerseEmbeddingsInput!): Boolean
+  deleteVerseEmbeddings(uid: ID!): Boolean
+  createLexiconEmbeddings(input: LexiconEmbeddingsInput!): LexiconEmbeddings
+  updateLexiconEmbeddings(uid: ID!, input: LexiconEmbeddingsInput!): Boolean
+  deleteLexiconEmbeddings(uid: ID!): Boolean
+  createSummaries(input: SummariesInput!): Summaries
+  updateSummaries(uid: ID!, input: SummariesInput!): Boolean
+  deleteSummaries(uid: ID!): Boolean
+  createSyntaxRelations(input: SyntaxRelationsInput!): SyntaxRelations
+  updateSyntaxRelations(uid: ID!, input: SyntaxRelationsInput!): Boolean
+  deleteSyntaxRelations(uid: ID!): Boolean
+  createInterlinearAlignments(input: InterlinearAlignmentsInput!): InterlinearAlignments
+  updateInterlinearAlignments(uid: ID!, input: InterlinearAlignmentsInput!): Boolean
+  deleteInterlinearAlignments(uid: ID!): Boolean
+  createEntities(input: EntitiesInput!): Entities
+  updateEntities(uid: ID!, input: EntitiesInput!): Boolean
+  deleteEntities(uid: ID!): Boolean
+  createEntityMentions(input: EntityMentionsInput!): EntityMentions
+  updateEntityMentions(uid: ID!, input: EntityMentionsInput!): Boolean
+  deleteEntityMentions(uid: ID!): Boolean
+  createEntityEdges(input: EntityEdgesInput!): EntityEdges
+  updateEntityEdges(uid: ID!, input: EntityEdgesInput!): Boolean
+  deleteEntityEdges(uid: ID!): Boolean
+  createUnifiedBible(input: UnifiedBibleInput!): UnifiedBible
+  updateUnifiedBible(uid: ID!, input: UnifiedBibleInput!): Boolean
+  deleteUnifiedBible(uid: ID!): Boolean
+  createVideo(input: VideoInput!): Video
+  updateVideo(uid: ID!, input: VideoInput!): Boolean
+  deleteVideo(uid: ID!): Boolean
+  createVideoView(input: VideoViewInput!): VideoView
+  updateVideoView(uid: ID!, input: VideoViewInput!): Boolean
+  deleteVideoView(uid: ID!): Boolean
+  createKeyword(input: KeywordInput!): Keyword
+  updateKeyword(uid: ID!, input: KeywordInput!): Boolean
+  deleteKeyword(uid: ID!): Boolean
+  createVideoKeyword(input: VideoKeywordInput!): VideoKeyword
+  updateVideoKeyword(uid: ID!, input: VideoKeywordInput!): Boolean
+  deleteVideoKeyword(uid: ID!): Boolean
+  flushDatabase: Boolean
+  compactDatabase: Int
 }
 
 type MutationEvent {
   type: String!
   uid: ID!
   mutation: MutationType!
+  payload: JSON
 }
 
 enum MutationType {
@@ -32,8 +535,63 @@ enum MutationType {
 }
 
 type Query {
-  queryTodo(filter: TodoFilter, sort: TodoSort, first: Int, after: String): [Todo]
-  getTodo(id: ID): Todo
+  queryLanguage(filter: LanguageFilter, sort: LanguageSort, first: Int, after: String): [Language]
+  getLanguage(uid: ID, code: String): Language
+  queryCategory(filter: CategoryFilter, sort: CategorySort, first: Int, after: String): [Category]
+  getCategory(uid: ID, name: String): Category
+  queryTranslations(filter: TranslationsFilter, sort: TranslationsSort, first: Int, after: String): [Translations]
+  getTranslations(uid: ID, code: String): Translations
+  queryBook(filter: BookFilter, sort: BookSort, first: Int, after: String): [Book]
+  getBook(uid: ID, code: String): Book
+  queryBookTranslation(filter: BookTranslationFilter, sort: BookTranslationSort, first: Int, after: String): [BookTranslation]
+  getBookTranslation(uid: ID): BookTranslation
+  queryBookCategory(filter: BookCategoryFilter, sort: BookCategorySort, first: Int, after: String): [BookCategory]
+  getBookCategory(uid: ID): BookCategory
+  queryChapter(filter: ChapterFilter, sort: ChapterSort, first: Int, after: String): [Chapter]
+  getChapter(uid: ID): Chapter
+  queryVerse(filter: VerseFilter, sort: VerseSort, first: Int, after: String): [Verse]
+  getVerse(uid: ID): Verse
+  queryVerseContent(filter: VerseContentFilter, sort: VerseContentSort, first: Int, after: String): [VerseContent]
+  getVerseContent(uid: ID): VerseContent
+  queryLemmas(filter: LemmasFilter, sort: LemmasSort, first: Int, after: String): [Lemmas]
+  getLemmas(uid: ID, lemmaId: String): Lemmas
+  queryTokenMorphology(filter: TokenMorphologyFilter, sort: TokenMorphologySort, first: Int, after: String): [TokenMorphology]
+  getTokenMorphology(uid: ID, morphId: String): TokenMorphology
+  queryWordnetLinks(filter: WordnetLinksFilter, sort: WordnetLinksSort, first: Int, after: String): [WordnetLinks]
+  getWordnetLinks(uid: ID): WordnetLinks
+  queryVerseEmbeddings(filter: VerseEmbeddingsFilter, sort: VerseEmbeddingsSort, first: Int, after: String): [VerseEmbeddings]
+  getVerseEmbeddings(uid: ID): VerseEmbeddings
+  queryLexiconEmbeddings(filter: LexiconEmbeddingsFilter, sort: LexiconEmbeddingsSort, first: Int, after: String): [LexiconEmbeddings]
+  getLexiconEmbeddings(uid: ID, embeddingId: String): LexiconEmbeddings
+  querySummaries(filter: SummariesFilter, sort: SummariesSort, first: Int, after: String): [Summaries]
+  getSummaries(uid: ID, summaryId: String): Summaries
+  querySyntaxRelations(filter: SyntaxRelationsFilter, sort: SyntaxRelationsSort, first: Int, after: String): [SyntaxRelations]
+  getSyntaxRelations(uid: ID, relationId: String): SyntaxRelations
+  queryInterlinearAlignments(filter: InterlinearAlignmentsFilter, sort: InterlinearAlignmentsSort, first: Int, after: String): [InterlinearAlignments]
+  getInterlinearAlignments(uid: ID): InterlinearAlignments
+  queryEntities(filter: EntitiesFilter, sort: EntitiesSort, first: Int, after: String): [Entities]
+  getEntities(uid: ID, entityId: String): Entities
+  queryEntityMentions(filter: EntityMentionsFilter, sort: EntityMentionsSort, first: Int, after: String): [EntityMentions]
+  getEntityMentions(uid: ID, mentionId: String): EntityMentions
+  queryEntityEdges(filter: EntityEdgesFilter, sort: EntityEdgesSort, first: Int, after: String): [EntityEdges]
+  getEntityEdges(uid: ID, edgeId: String): EntityEdges
+  queryUnifiedBible(filter: UnifiedBibleFilter, sort: UnifiedBibleSort, first: Int, after: String): [UnifiedBible]
+  getUnifiedBible(uid: ID): UnifiedBible
+  queryVideo(filter: VideoFilter, sort: VideoSort, first: Int, after: String): [Video]
+  getVideo(uid: ID): Video
+  queryVideoView(filter: VideoViewFilter, sort: VideoViewSort, first: Int, after: String): [VideoView]
+  getVideoView(uid: ID): VideoView
+  queryKeyword(filter: KeywordFilter, sort: KeywordSort, first: Int, after: String): [Keyword]
+  getKeyword(uid: ID, text: String): Keyword
+  queryVideoKeyword(filter: VideoKeywordFilter, sort: VideoKeywordSort, first: Int, after: String): [VideoKeyword]
+  getVideoKeyword(uid: ID): VideoKeyword
+  search(vector: [Float!], k: Int): [SearchResult!]
+  hybridSearch(vector: [Float!], text: String!, field: String!, k: Int): [SearchResult!]
+}
+
+type SearchResult {
+  uid: ID!
+  distance: Float!
 }
 
 enum SortDirection {
@@ -59,32 +617,509 @@ type Subscription {
   event(types: [String]): MutationEvent!
 }
 
-type Todo {
+type Summaries {
+  uid: ID!
+  summaryId: Int
+  summaryText: String
+  level: Int
+  book: Book
+  chapter: Chapter
+}
+
+input SummariesFilter {
+  summaryId: IntFilter
+  summaryText: StringFilter
+  level: IntFilter
+  and: [SummariesFilter]
+  or: [SummariesFilter]
+  not: SummariesFilter
+}
+
+input SummariesInput {
+  uid: ID
+  summaryId: Int
+  summaryText: String
+  level: Int
+  book: BookInput
+  chapter: ChapterInput
+}
+
+input SummariesSort {
+  summaryId: SortDirection
+  summaryText: SortDirection
+  level: SortDirection
+}
+
+type SyntaxRelations {
+  uid: ID!
+  relationId: Int
+  subjectText: String
+  verbText: String
+  objectText: String
+  relationType: String
+  verse: Verse
+  subjectLemma: Lemmas
+  verbLemma: Lemmas
+  objectLemma: Lemmas
+}
+
+input SyntaxRelationsFilter {
+  relationId: IntFilter
+  subjectText: StringFilter
+  verbText: StringFilter
+  objectText: StringFilter
+  relationType: StringFilter
+  and: [SyntaxRelationsFilter]
+  or: [SyntaxRelationsFilter]
+  not: SyntaxRelationsFilter
+}
+
+input SyntaxRelationsInput {
+  uid: ID
+  relationId: Int
+  subjectText: String
+  verbText: String
+  objectText: String
+  relationType: String
+  verse: VerseInput
+  subjectLemma: LemmasInput
+  verbLemma: LemmasInput
+  objectLemma: LemmasInput
+}
+
+input SyntaxRelationsSort {
+  relationId: SortDirection
+  subjectText: SortDirection
+  verbText: SortDirection
+  objectText: SortDirection
+  relationType: SortDirection
+}
+
+type TokenMorphology {
+  uid: ID!
+  morphId: Int
+  partOfSpeech: String
+  person: String
+  number: String
+  gender: String
+  tense: String
+  mood: String
+  voice: String
+  caseVal: String
+  verseContent: VerseContent
+}
+
+input TokenMorphologyFilter {
+  morphId: IntFilter
+  partOfSpeech: StringFilter
+  person: StringFilter
+  number: StringFilter
+  gender: StringFilter
+  tense: StringFilter
+  mood: StringFilter
+  voice: StringFilter
+  caseVal: StringFilter
+  and: [TokenMorphologyFilter]
+  or: [TokenMorphologyFilter]
+  not: TokenMorphologyFilter
+}
+
+input TokenMorphologyInput {
+  uid: ID
+  morphId: Int
+  partOfSpeech: String
+  person: String
+  number: String
+  gender: String
+  tense: String
+  mood: String
+  voice: String
+  caseVal: String
+  verseContent: VerseContentInput
+}
+
+input TokenMorphologySort {
+  morphId: SortDirection
+  partOfSpeech: SortDirection
+  person: SortDirection
+  number: SortDirection
+  gender: SortDirection
+  tense: SortDirection
+  mood: SortDirection
+  voice: SortDirection
+  caseVal: SortDirection
+}
+
+type Translations {
   uid: ID!
   id: ID!
-  title: String
-  completed: Boolean
-  createdAt: DateTime
+  code: String
+  name: String
+  isInterlinear: Boolean
+  language: Language
+  bookTranslations: [BookTranslation]
+  verseContents: [VerseContent]
 }
 
-input TodoFilter {
-  title: StringFilter
-  completed: BooleanFilter
-  createdAt: DateTimeFilter
-  and: [TodoFilter]
-  or: [TodoFilter]
-  not: TodoFilter
+input TranslationsFilter {
+  code: StringFilter
+  name: StringFilter
+  isInterlinear: BooleanFilter
+  and: [TranslationsFilter]
+  or: [TranslationsFilter]
+  not: TranslationsFilter
 }
 
-input TodoInput {
+input TranslationsInput {
   uid: ID
-  title: String
-  completed: Boolean
-  createdAt: DateTime
+  code: String
+  name: String
+  isInterlinear: Boolean
+  language: LanguageInput
+  bookTranslations: [BookTranslationInput]
+  verseContents: [VerseContentInput]
 }
 
-input TodoSort {
-  title: SortDirection
-  completed: SortDirection
+input TranslationsSort {
+  code: SortDirection
+  name: SortDirection
+  isInterlinear: SortDirection
+}
+
+type UnifiedBible {
+  uid: ID!
+  id: ID!
+  verseNumber: Int
+  chapter: Int
+  text: String
+  gospel: String
+  sourceVerse: String
+  notes: String
+  chapterHeading: String
+  sectionHeading: String
+  metadata: String
+}
+
+input UnifiedBibleFilter {
+  verseNumber: IntFilter
+  chapter: IntFilter
+  text: StringFilter
+  gospel: StringFilter
+  sourceVerse: StringFilter
+  notes: StringFilter
+  chapterHeading: StringFilter
+  sectionHeading: StringFilter
+  metadata: StringFilter
+  and: [UnifiedBibleFilter]
+  or: [UnifiedBibleFilter]
+  not: UnifiedBibleFilter
+}
+
+input UnifiedBibleInput {
+  uid: ID
+  verseNumber: Int
+  chapter: Int
+  text: String
+  gospel: String
+  sourceVerse: String
+  notes: String
+  chapterHeading: String
+  sectionHeading: String
+  metadata: String
+}
+
+input UnifiedBibleSort {
+  verseNumber: SortDirection
+  chapter: SortDirection
+  text: SortDirection
+  gospel: SortDirection
+  sourceVerse: SortDirection
+  notes: SortDirection
+  chapterHeading: SortDirection
+  sectionHeading: SortDirection
+  metadata: SortDirection
+}
+
+type Verse {
+  uid: ID!
+  id: ID!
+  number: Int
+  chunkType: String
+  chapterHeading: String
+  sectionHeading: String
+  paragraphStart: Boolean
+  poetryIndent: Int
+  metadata: String
+  chapter: Chapter
+  verseContents(filter: VerseContentFilter): [VerseContent]
+  verseEmbeddings: [VerseEmbeddings]
+  syntaxRelations: [SyntaxRelations]
+  entityMentions: [EntityMentions]
+}
+
+type VerseContent {
+  uid: ID!
+  id: ID!
+  type: String
+  text: String
+  lemma: String
+  strong: String
+  morph: String
+  gloss: String
+  verse: Verse
+  translation: Translations
+  tokenMorphologies: [TokenMorphology]
+}
+
+input VerseContentFilter {
+  type: StringFilter
+  text: StringFilter
+  lemma: StringFilter
+  strong: StringFilter
+  morph: StringFilter
+  gloss: StringFilter
+  and: [VerseContentFilter]
+  or: [VerseContentFilter]
+  not: VerseContentFilter
+}
+
+input VerseContentInput {
+  uid: ID
+  type: String
+  text: String
+  lemma: String
+  strong: String
+  morph: String
+  gloss: String
+  verse: VerseInput
+  translation: TranslationsInput
+  tokenMorphologies: [TokenMorphologyInput]
+}
+
+input VerseContentSort {
+  type: SortDirection
+  text: SortDirection
+  lemma: SortDirection
+  strong: SortDirection
+  morph: SortDirection
+  gloss: SortDirection
+}
+
+type VerseEmbeddings {
+  uid: ID!
+  embeddingId: ID!
+  modelName: String
+  verse: Verse
+}
+
+input VerseEmbeddingsFilter {
+  modelName: StringFilter
+  and: [VerseEmbeddingsFilter]
+  or: [VerseEmbeddingsFilter]
+  not: VerseEmbeddingsFilter
+}
+
+input VerseEmbeddingsInput {
+  uid: ID
+  modelName: String
+  verse: VerseInput
+}
+
+input VerseEmbeddingsSort {
+  modelName: SortDirection
+}
+
+input VerseFilter {
+  number: IntFilter
+  chunkType: StringFilter
+  chapterHeading: StringFilter
+  sectionHeading: StringFilter
+  paragraphStart: BooleanFilter
+  poetryIndent: IntFilter
+  metadata: StringFilter
+  and: [VerseFilter]
+  or: [VerseFilter]
+  not: VerseFilter
+}
+
+input VerseInput {
+  uid: ID
+  number: Int
+  chunkType: String
+  chapterHeading: String
+  sectionHeading: String
+  paragraphStart: Boolean
+  poetryIndent: Int
+  metadata: String
+  chapter: ChapterInput
+  verseContents: [VerseContentInput]
+  verseEmbeddings: [VerseEmbeddingsInput]
+  syntaxRelations: [SyntaxRelationsInput]
+  entityMentions: [EntityMentionsInput]
+}
+
+input VerseSort {
+  number: SortDirection
+  chunkType: SortDirection
+  chapterHeading: SortDirection
+  sectionHeading: SortDirection
+  paragraphStart: SortDirection
+  poetryIndent: SortDirection
+  metadata: SortDirection
+}
+
+type Video {
+  uid: ID!
+  id: ID!
+  name: String
+  status: VideoStatus
+  createdAt: DateTime
+  updatedAt: DateTime
+  script: String
+  generatedFilename: String
+  generatedTitle: String
+  generatedDescription: String
+  generatedTags: String
+  thumbnailPromptA: String
+  thumbnailPromptB: String
+  checklist: String
+  views: [VideoView]
+  keywords: [VideoKeyword]
+}
+
+input VideoFilter {
+  name: StringFilter
+  status: StringFilter
+  createdAt: DateTimeFilter
+  updatedAt: DateTimeFilter
+  script: StringFilter
+  generatedFilename: StringFilter
+  generatedTitle: StringFilter
+  generatedDescription: StringFilter
+  generatedTags: StringFilter
+  thumbnailPromptA: StringFilter
+  thumbnailPromptB: StringFilter
+  checklist: StringFilter
+  and: [VideoFilter]
+  or: [VideoFilter]
+  not: VideoFilter
+}
+
+input VideoInput {
+  uid: ID
+  name: String
+  status: VideoStatus
+  createdAt: DateTime
+  updatedAt: DateTime
+  script: String
+  generatedFilename: String
+  generatedTitle: String
+  generatedDescription: String
+  generatedTags: String
+  thumbnailPromptA: String
+  thumbnailPromptB: String
+  checklist: String
+  views: [VideoViewInput]
+  keywords: [VideoKeywordInput]
+}
+
+type VideoKeyword {
+  uid: ID!
+  video: Video
+  keyword: Keyword
+}
+
+input VideoKeywordFilter {
+  and: [VideoKeywordFilter]
+  or: [VideoKeywordFilter]
+  not: VideoKeywordFilter
+}
+
+input VideoKeywordInput {
+  uid: ID
+  video: VideoInput
+  keyword: KeywordInput
+}
+
+input VideoKeywordSort {
+  id: SortDirection
+}
+
+input VideoSort {
+  name: SortDirection
+  status: SortDirection
   createdAt: SortDirection
+  updatedAt: SortDirection
+  script: SortDirection
+  generatedFilename: SortDirection
+  generatedTitle: SortDirection
+  generatedDescription: SortDirection
+  generatedTags: SortDirection
+  thumbnailPromptA: SortDirection
+  thumbnailPromptB: SortDirection
+  checklist: SortDirection
+}
+
+enum VideoStatus {
+  NEW
+  IN_PROGRESS
+  COMPLETED
+  SCHEDULED
+  PUBLISHED
+  DELETED
+}
+
+type VideoView {
+  uid: ID!
+  id: ID!
+  date: DateTime
+  count: Int
+  video: Video
+}
+
+input VideoViewFilter {
+  date: DateTimeFilter
+  count: IntFilter
+  and: [VideoViewFilter]
+  or: [VideoViewFilter]
+  not: VideoViewFilter
+}
+
+input VideoViewInput {
+  uid: ID
+  date: DateTime
+  count: Int
+  video: VideoInput
+}
+
+input VideoViewSort {
+  date: SortDirection
+  count: SortDirection
+}
+
+type WordnetLinks {
+  uid: ID!
+  synsetId: String
+  similarityScore: Float
+  lemma: Lemmas
+}
+
+input WordnetLinksFilter {
+  synsetId: StringFilter
+  similarityScore: FloatFilter
+  and: [WordnetLinksFilter]
+  or: [WordnetLinksFilter]
+  not: WordnetLinksFilter
+}
+
+input WordnetLinksInput {
+  uid: ID
+  synsetId: String
+  similarityScore: Float
+  lemma: LemmasInput
+}
+
+input WordnetLinksSort {
+  synsetId: SortDirection
+  similarityScore: SortDirection
 }

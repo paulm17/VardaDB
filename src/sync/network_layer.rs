@@ -42,10 +42,17 @@ impl NetworkLayer {
         tokio::spawn(async move {
             println!("Element: Zenoh Bridge Started (Prefix: {})", prefix);
             use crate::realtime::bus::MutationSource;
-            while let Ok(event) = receiver.recv().await {
+            while let Ok(mut event) = receiver.recv().await {
                 if event.source != MutationSource::Local {
                     continue; 
                 }
+                
+                // Rewrite source to Remote before publishing
+                // This ensures that:
+                // 1. Peers see it as Remote (and process it)
+                // 2. We see it as Remote (and ignore it due to dedicated logic in listener)
+                event.source = MutationSource::Remote;
+                
                 let key = format!("{}/{}/{}", prefix, event.type_name, event.uid);
                 
                 match serde_json::to_vec(&event) {

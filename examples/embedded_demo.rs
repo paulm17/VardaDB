@@ -15,7 +15,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = std::fs::remove_dir_all(storage_path);
     
     println!("Initializing storage at ./{}", storage_path);
-    let storage = Arc::new(Storage::new(storage_path).expect("Failed to initialize storage"));
+    let storage = Arc::new(Storage::new(storage_path, None).expect("Failed to initialize storage"));
 
     // 2. Define Schema (SDL)
     // We can define this programmatically or load from a file.
@@ -30,7 +30,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 3. Initialize Engine (Resolver + Schema)
     // We connect the storage backend to the engine via the FjallResolver.
-    let resolver = FjallResolver::new(storage.clone());
+    let resolver = FjallResolver::new(storage.clone(), "default");
     let schema = Schema::load_with_resolver(sdl, resolver)?;
     let schema_arc = Arc::new(schema);
 

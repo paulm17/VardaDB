@@ -1,0 +1,142 @@
+.scroll-area {
+	position: absolute !important;
+	inset: 12px;
+	top: 0;
+
+	>div>div {
+		height: 100%;
+	}
+}
+
+.fields-scroll>div>div {
+	display: block !important;
+}
+
+.list {
+	padding-left: 24px;
+
+	li::marker {
+		color: var(--mantine-color-surreal-5);
+	}
+}
+
+.diagram {
+
+	// :global(.react-flow__handle) {
+	// 	// backdrop-filter: blur(2px);
+	// 	// -webkit-backdrop-filter: blur(2px);
+	// 	background-color: rgba(0, 0, 0, 0.4) !important;
+	// 	border: 1px solid var(--mantine-color-slate-5) !important;
+	// 	box-shadow: 0 2px 5px rgba(0, 0, 0, 0.35);
+	// 	display: flex;
+	// 	align-items: center;
+	// 	justify-content: center;
+	// 	cursor: unset;
+
+	// 	&::before {
+	// 		content: "";
+	// 		width: 9px;
+	// 		height: 9px;
+	// 		border-radius: 100%;
+	// 		background-color: white;
+	// 	}
+	// }
+
+	// :global(.react-flow__handle-left) {
+	// 	width: 18px;
+	// 	height: 18px;
+	// 	left: -9px;
+	// }
+
+	// :global(.react-flow__handle-right) {
+	// 	width: 18px;
+	// 	height: 18px;
+	// 	right: -9px;
+	// }
+
+	:global(.react-flow__edge > path) {
+		stroke-width: 2px;
+		stroke: white !important;
+	}
+
+	:global(.react-flow__edge-textbg) {
+		fill: var(--mantine-color-slate-7) !important;
+	}
+
+	:global(.react-flow__edge).record-link path {
+		stroke: var(--mantine-color-slate-5) !important;
+		stroke-dasharray: 5;
+	}
+
+	:global(.react-flow__node) {
+		// Contain the DOM of each node to reduce repaints
+		contain: content;
+	}
+
+	:global(.react-flow__viewport) {
+		transform-style: preserve-3d;
+	}
+
+	:global(.react-flow__pane.dragging .react-flow__viewport) {
+		// Render the viewport in its own layer (GPU) to improve transform performance
+		// Only done while dragging to reduce blurring of text due to rasterization
+		will-change: transform;
+	}
+
+	:global(.react-flow .react-flow__edges svg) {
+		contain: strict;
+	}
+
+	:global(.react-flow__edges) {
+		left: 0;
+		top: 0;
+		width: 10000vw;
+		height: 10000vh;
+		contain: layout;
+	}
+
+	:global(.react-flow__nodes) {
+		contain: layout;
+		text-rendering: optimizeLegibility;
+	}
+
+	:global(.react-flow__node),
+	:global(.react-flow__edge) :global(.react-flow__edge-text),
+	:global(.react-flow__edge)>path,
+	:global(.react-flow__edge) :global(.react-flow__edge-textbg) {
+		transition: opacity 0.15s ease-in-out;
+	}
+
+	:global(.react-flow__node.dimmed),
+	:global(.react-flow__edge.dimmed) :global(.react-flow__edge-text),
+	:global(.react-flow__edge.dimmed)>path {
+		opacity: 0.2;
+	}
+
+	:global(.react-flow__edge.dimmed) :global(.react-flow__edge-textbg) {
+		opacity: 0;
+	}
+
+
+	@include light {
+
+		:global(.react-flow__edge-textbg) {
+			fill: var(--mantine-color-slate-1) !important;
+		}
+
+		:global(.react-flow__handle) {
+			background-color: rgba(255, 255, 255, 0.01) !important;
+			border: 1px solid var(--mantine-color-slate-2) !important;
+			box-shadow: 0 2px 5px rgba(0, 0, 0, 0.15);
+
+			&::before {
+				background-color: var(--mantine-color-slate-4);
+			}
+		}
+
+		:global(.react-flow__edge > path) {
+			stroke: var(--mantine-color-slate-3) !important;
+		}
+
+	}
+}

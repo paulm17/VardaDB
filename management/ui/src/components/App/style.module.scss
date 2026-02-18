@@ -1,0 +1,145 @@
+.listing-modal {
+	background-color: hsla(253, 21%, 13%, 0.5);
+	backdrop-filter: blur(12px);
+	-webkit-backdrop-filter: blur(12px);
+	border: 1px solid var(--surrealist-divider-color);
+
+	@include light {
+		background-color: white;
+	}
+}
+
+.listing-body {
+	padding: 0;
+}
+
+.listing-search input {
+	font-size: 1.15rem;
+	background-color: unset !important;
+
+	&::placeholder {
+		color: var(--mantine-color-slate-4);
+	}
+}
+
+.changelog-content {
+
+	ul,
+	li {
+		margin-bottom: 0;
+	}
+
+	li {
+		margin-bottom: 1px;
+	}
+}
+
+.listing-active {
+	background-color: var(--mantine-color-slate-7);
+
+	@include light {
+		background-color: var(--mantine-color-slate-1);
+	}
+}
+
+.update-dialog {
+	background-color: var(--mantine-color-slate-9);
+	border: 1px solid var(--mantine-color-slate-6);
+	transition-property: transform, opacity, background-color !important;
+	cursor: pointer;
+
+	@include light {
+		background-color: white;
+		border-color: var(--mantine-color-slate-2);
+	}
+}
+
+.update-dialog-icon {
+	width: 38px;
+	height: 38px;
+	background: var(--surrealist-gradient);
+	border-radius: 8px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	border: 1px solid rgba(255, 255, 255, 0.3);
+	background-origin: border-box;
+}
+
+.connection-group {
+	&-remove {
+		display: none;
+		position: absolute;
+		right: var(--mantine-spacing-xl);
+	}
+
+	&:hover &-remove {
+		display: block;
+	}
+}
+
+.news-drawer-content {
+	transition-property: all !important;
+	overflow: hidden;
+	overflow: clip;
+}
+
+.news-drawer-body {
+	height: 100%;
+	display: flex;
+	flex-direction: column;
+	padding: 0;
+}
+
+
+.news-item-arrow {
+	transition: transform 0.2s;
+	transform: scaleX(-1);
+}
+
+.news-item:hover .news-item-arrow {
+	transform: scaleX(-1) translateX(-0.25rem);
+}
+
+.news-post-header {
+	background-position: center;
+	background-size: cover;
+	background-image: linear-gradient(to bottom, transparent, var(--mantine-color-body)), var(--image-url);
+}
+
+.provision-loader::after {
+	border: solid 3px transparent;
+	background-image: linear-gradient(var(--mantine-color-body), var(--mantine-color-body)), var(--surrealist-gradient);
+	background-origin: border-box;
+	background-clip: content-box, border-box;
+	animation-duration: 0.75s;
+}
+
+.provision-icon {
+	z-index: 0;
+	width: 32px;
+	height: 32px;
+	transform: translateY(1px);
+}
+
+.messages-scroller :global(.mantine-ScrollArea-viewport)>div,
+.docs-scroller :global(.mantine-ScrollArea-viewport)>div,
+.help-scroller :global(.mantine-ScrollArea-viewport)>div,
+.article-drawer__scroll :global(.mantine-ScrollArea-viewport)>div {
+	display: unset !important;
+}
+
+.label {
+	transition: all .1s;
+}
+
+.label-active {
+	border: 1px solid rgba(255, 255, 255, 0.15);
+	box-shadow: 0 7px 11px -6px rgba(0, 0, 0, 0.5);
+
+	@include light {
+		box-shadow: unset;
+		background-color: var(--mantine-color-slate-2);
+		color: var(--mantine-color-bright);
+	}
+}

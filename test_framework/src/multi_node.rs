@@ -117,6 +117,15 @@ impl MultiNodeHarness {
             // Create a minimal config file
             // All nodes in this harness share the same Zenoh prefix so they can sync
             let config_path = data_dir.path().join("config.toml");
+            let zenoh_port = base_port + 1000 + i as u16;
+            let listen = format!("[\"tcp/0.0.0.0:{}\"]", zenoh_port);
+            let connect = if i == 0 {
+                "[]".to_string()
+            } else {
+                let root_port = base_port + 1000;
+                format!("[\"tcp/127.0.0.1:{}\"]", root_port)
+            };
+
             let config_content = format!(r#"
 [server]
 port = {}
@@ -126,11 +135,15 @@ node_id = {}
 [zenoh]
 mode = "peer"
 prefix = "varda/test/{}"
+listen = {}
+connect = {}
 "#, 
                 port,
                 data_dir.path().join("data").display(),
                 node_id,
-                base_port  // All nodes in this test share the same prefix for sync!
+                base_port,
+                listen,
+                connect
             );
             
             fs::write(&config_path, config_content)
@@ -181,11 +194,14 @@ prefix = "varda/test/{}"
     fn find_vardadb_binary() -> Result<PathBuf, String> {
         // Try common locations
         let candidates = [
-            // Debug build
+            // Current directory (when running from workspace root)
+            PathBuf::from("target/debug/vardadb"),
+            PathBuf::from("target/release/vardadb"),
+            // Parent directory (when running from package dir)
             PathBuf::from("../target/debug/vardadb"),
-            PathBuf::from("../../target/debug/vardadb"),
-            // Release build
             PathBuf::from("../target/release/vardadb"),
+            // Grandparent directory
+            PathBuf::from("../../target/debug/vardadb"),
             PathBuf::from("../../target/release/vardadb"),
             // In PATH
             PathBuf::from("vardadb"),

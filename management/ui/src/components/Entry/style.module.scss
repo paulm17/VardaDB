@@ -1,0 +1,79 @@
+.root {
+	transition: all .1s;
+	background-origin: border-box;
+
+	:global(.mantine-Button-label) {
+		color: var(--mantine-color-slate-0);
+		flex: 1;
+	}
+
+	:global(.mantine-Button-section) {
+		color: var(--mantine-color-slate-3);
+
+		&:where([data-position='left']) {
+			margin-inline-end: var(--mantine-spacing-sm);
+		}
+
+		&:where([data-position='right']) {
+			margin-inline-start: var(--mantine-spacing-sm);
+		}
+	}
+
+	&:hover:not([data-disabled]) {
+		background-color: var(--mantine-color-slate-6);
+
+		:global(.mantine-Button-section),
+		:global(.mantine-Button-label) {
+			color: var(--mantine-color-white);
+		}
+	}
+
+	&.active {
+		box-shadow: 0 10px 15px -10px rgba(0, 0, 0, 0.3);
+
+		:global(.mantine-Button-section),
+		:global(.mantine-Button-label) {
+			color: var(--mantine-color-white);
+		}
+
+		:root[data-mantine-color-scheme="light"] & {
+			box-shadow: unset;
+		}
+	}
+
+	&[data-disabled] {
+		opacity: 0.5;
+	}
+
+	@include light {
+
+		:global(.mantine-Button-label) {
+			flex: 1;
+			color: black;
+		}
+
+		:global(.mantine-Button-section) {
+			color: var(--mantine-color-slate-5);
+		}
+
+		&:hover {
+			background-color: var(--mantine-color-slate-1);
+		}
+
+		&.active {
+			box-shadow: 0 12px 15px -10px rgba(40, 48, 182, 0.15);
+			border: none;
+
+			:global(.mantine-Button-label),
+			:global(.mantine-Button-label) * {
+				color: var(--mantine-color-white);
+			}
+
+			:global(.mantine-Button-section) {
+				color: var(--mantine-color-white);
+			}
+		}
+
+	}
+
+}

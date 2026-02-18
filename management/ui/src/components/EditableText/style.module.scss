@@ -1,0 +1,15 @@
+.input {
+	background: unset !important;
+	font-weight: inherit;
+	font-size: inherit;
+	color: inherit;
+	border: none;
+	line-height: unset;
+	height: unset;
+	min-height: unset;
+	border-radius: unset;
+}
+
+.decoration:focus {
+	font-style: italic !important;
+}

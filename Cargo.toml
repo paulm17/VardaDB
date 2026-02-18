@@ -5,8 +5,9 @@ edition = "2021"
 
 [workspace]
 members = [
-    "jobs",
+    "jobs", "management",
     "vardaclaw",
+    "test_framework",
 ]
 
 [dependencies]
@@ -29,6 +30,7 @@ fjall = { version = "3.0.1", features = ["bytes_1", "lz4"] }
 # Durable Execution Engine
 jobs = { path = "jobs" }
 vardaclaw = { path = "vardaclaw" }
+management = { path = "management" }
 
 # Distribution (Zenoh)
 zenoh = { version = "1.7.2", features = ["unstable"] }

@@ -371,11 +371,18 @@ impl FjallResolver {
     }
     
     // Ranked Search (BM25)
-    pub fn search_text_bm25(&self, query: &str, field: &str, strategy: &str, k: usize) -> Vec<(u64, f64)> {
+    pub fn search_text_bm25(&self, query: &str, field: &str, strategy: &str, k: usize, require_all: bool) -> Vec<(u64, f64)> {
         let index_field = if strategy == "term" { field.to_string() } else { format!("{}.{}", field, strategy) };
         let tokens = crate::engine::tokenizer::Tokenizer::tokenize(query, strategy);
         if tokens.is_empty() { return vec![]; }
         
+        // Deduplicate tokens for counting unique matches if requiring all
+        let unique_tokens: std::collections::HashSet<String> = if require_all {
+            tokens.iter().cloned().collect()
+        } else {
+            std::collections::HashSet::new()
+        };
+
         // 1. Get Global Stats
         let n_key = Codec::encode_stat_key(&index_field, 0, None);
         let n: f64 = self.get_stat(&n_key).unwrap_or(0) as f64;
@@ -438,15 +445,53 @@ impl FjallResolver {
             }
         }
         
+        let mut final_scores = scores;
+
+        if require_all {
+             let mut intersection: Option<std::collections::HashSet<u64>> = None;
+             for term in &unique_tokens {
+                 let prefix = Codec::encode_term_index_prefix(&index_field, term);
+                 let (main_ks, _) = match self.storage.get_database(&self.db_name) {
+                     Some(d) => d,
+                     None => return vec![],
+                 };
+                 let iter = main_ks.range((std::ops::Bound::Included(prefix.clone()), std::ops::Bound::Unbounded));
+                 
+                 let mut term_uids = std::collections::HashSet::new();
+                 for guard in iter {
+                     if let Ok((key, _)) = guard.into_inner() {
+                         if !key.starts_with(&prefix) { break; }
+                         if key.len() < 8 { continue; }
+                         let uid = byteorder::BigEndian::read_u64(&key[key.len()-8..]);
+                         term_uids.insert(uid);
+                     }
+                 }
+                 
+                 if let Some(existing) = intersection {
+                     intersection = Some(existing.intersection(&term_uids).cloned().collect());
+                 } else {
+                     intersection = Some(term_uids);
+                 }
+                 
+                 if intersection.as_ref().map(|s| s.is_empty()).unwrap_or(false) {
+                     return vec![];
+                 }
+             }
+             
+             if let Some(valid_uids) = intersection {
+                 final_scores.retain(|uid, _| valid_uids.contains(uid));
+             }
+        }
+        
         // Sort and Take K
-        let mut result: Vec<(u64, f64)> = scores.into_iter().collect();
+        let mut result: Vec<(u64, f64)> = final_scores.into_iter().collect();
         result.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         result.truncate(k);
         result
     }
 
     // Hybrid Search (RRF)
-    pub fn search_hybrid(&self, text_query: &str, field: &str, vector: &[f64], k: usize) -> Vec<(u64, f64)> {
+    pub fn search_hybrid(&self, text_query: &str, field: &str, vector: &[f64], k: usize, require_all: bool) -> Vec<(u64, f64)> {
         let k_limit = k * 2; // Fetch more candidates
         
         // 1. Vector Search
@@ -456,7 +501,7 @@ impl FjallResolver {
         };
         
         // 2. Text Search (Assuming fulltext strategy)
-        let text_res = self.search_text_bm25(text_query, field, "fulltext", k_limit); // [(uid, score)]
+        let text_res = self.search_text_bm25(text_query, field, "fulltext", k_limit, require_all); // [(uid, score)]
         
         // 3. RRF Fusion
         // Score = 1 / (C + rank)
@@ -1018,47 +1063,69 @@ impl FjallResolver {
         true
     }
 
-    pub fn create_node_internal(&self, type_name: &str, uid: u64, fields: std::collections::HashMap<String, serde_json::Value>, uniques: &[String], inverses: &[crate::engine::resolver::InverseInfo], _search_fields: &std::collections::HashMap<String, Vec<String>>, _source: crate::realtime::bus::MutationSource, timestamp_override: Option<crate::storage::timestamp::Timestamp>) -> Result<(), String> {
+    pub fn create_node_internal(&self, type_name: &str, uid: u64, fields: std::collections::HashMap<String, serde_json::Value>, uniques: &[String], inverses: &[crate::engine::resolver::InverseInfo], search_fields: &std::collections::HashMap<String, Vec<String>>, source: crate::realtime::bus::MutationSource, timestamp_override: Option<crate::storage::timestamp::Timestamp>) -> Result<(), String> {
         let fn_start = std::time::Instant::now();
         
         // Generate Timestamp for this Atomic Mutation or use override
         let timestamp = timestamp_override.unwrap_or_else(|| self.storage.next_timestamp());
 
-        let mut batch_items = Vec::new();
+        // === Single WriteBatch approach ===
+        // Acquire keyspace lock ONCE (was 4-5 times before)
+        let keyspaces = self.storage.keyspaces.read().unwrap();
+        let (main, _history) = keyspaces.get(&self.db_name)
+            .ok_or_else(|| format!("Database not found: {}", self.db_name))?;
         
-        // Type Index Insert
-        let idx_start = std::time::Instant::now();
+        let mut batch = self.storage.db.batch();
+        let ts_bytes = timestamp.to_bytes();
+
+        // 1. Type Index — add to batch instead of separate storage.insert()
         let type_key_idx = Codec::encode_type_index_key(type_name, uid);
-        self.storage.insert(&self.db_name, &type_key_idx, &[]).map_err(|e| e.to_string())?;
-        let idx_time = idx_start.elapsed();
+        batch.insert(main, &type_key_idx, &[]);
 
+        // 2. _type data field
         let type_val_bytes = serde_json::to_vec(&serde_json::Value::String(type_name.to_string())).expect("Serialization failed");
-        batch_items.push((uid, "_type".to_string(), type_val_bytes));
+        let type_data_key = Codec::encode_data_key(uid, "_type");
+        let mut type_val_buf = Vec::with_capacity(16 + type_val_bytes.len());
+        type_val_buf.extend_from_slice(&ts_bytes);
+        type_val_buf.extend_from_slice(&type_val_bytes);
+        batch.insert(main, &type_data_key, &type_val_buf);
 
+        // 3. User fields + unique checks
+        let mut items_to_index = Vec::new();
         let uniq_start = std::time::Instant::now();
         for (field, value) in &fields {
             let val_bytes = serde_json::to_vec(&value).map_err(|e| e.to_string())?;
+
+            if let Some(tokenizers) = search_fields.get(field) {
+                 if let serde_json::Value::String(s) = value {
+                     items_to_index.push((field.clone(), s.clone(), tokenizers.clone()));
+                 }
+            }
+            
             if uniques.contains(&field) {
                  let index_pred = format!("{}.{}", type_name, field);
                  let val_str = serde_json::to_string(&value).map_err(|e| e.to_string())?;
                  let idx_key = Codec::encode_unique_index_key(&index_pred, &val_str);
-                 if let Ok(Some(_)) = self.storage.get(&self.db_name, &idx_key) {
+                 // Unique check read — reads don't trigger backpressure
+                 if main.get(&idx_key).map_err(|e| e.to_string())?.is_some() {
                      return Err(format!("Duplicate value for unique field: {}", field));
                  }
                  let mut uid_bytes = vec![0u8; 8];
                  BigEndian::write_u64(&mut uid_bytes, uid);
-                 self.storage.insert(&self.db_name, &idx_key, &uid_bytes).map_err(|e| e.to_string())?;
+                 batch.insert(main, &idx_key, &uid_bytes);
             }
-            batch_items.push((uid, field.clone(), val_bytes));
+            
+            // Data field with timestamp prefix
+            let key = Codec::encode_data_key(uid, &field);
+            let mut val_buf = Vec::with_capacity(16 + val_bytes.len());
+            val_buf.extend_from_slice(&ts_bytes);
+            val_buf.extend_from_slice(&val_bytes);
+            batch.insert(main, &key, &val_buf);
         }
         let uniq_time = uniq_start.elapsed();
-        
-        let batch_start = std::time::Instant::now();
-        self.storage.put_batch_lww(&self.db_name, batch_items, &timestamp).map_err(|e| e.to_string())?;
-        let batch_time = batch_start.elapsed();
 
-        // Inverse linking
-        let inv_start = std::time::Instant::now();
+        // 4. Inverse edges — list-type added to batch, non-list deferred
+        let mut deferred_inverses: Vec<(u64, String, bool)> = Vec::new();
         let mut inv_count = 0u32;
         for info in inverses {
              if let Some(val) = fields.get(&info.field) {
@@ -1078,18 +1145,80 @@ impl FjallResolver {
                       _ => {}
                   }
                   for target in new_targets {
-                      self.link_inverse(target, &info.inverse_field, info.inverse_is_list, uid, &timestamp)?;
+                      if info.inverse_is_list {
+                          // O(1) edge insert — add directly to batch
+                          let edge_key = Codec::encode_edge_key(target, &info.inverse_field, uid);
+                          batch.insert(main, &edge_key, &[]);
+                      } else {
+                          // Non-list needs read-before-write, defer after commit
+                          deferred_inverses.push((target, info.inverse_field.clone(), false));
+                      }
                       inv_count += 1;
                   }
               }
         }
-        let inv_time = inv_start.elapsed();
+
+        // 5. Single atomic commit for ALL writes
+        let commit_start = std::time::Instant::now();
+        batch.commit().map_err(|e| e.to_string())?;
+        let commit_time = commit_start.elapsed();
+
+        // Check L0 pressure after commit
+        let l0_count = main.l0_table_count();
+        
+        // Release keyspace lock before any deferred work
+        drop(keyspaces);
+
+        if l0_count >= 8 {
+            // Re-acquire for compaction (rare path)
+            let keyspaces = self.storage.keyspaces.read().unwrap();
+            if let Some((main, _)) = keyspaces.get(&self.db_name) {
+                let compact_start = std::time::Instant::now();
+                if crate::debug_logging() {
+                    println!("⚠️ L0 pressure high (l0_tables={}), triggering compaction...", l0_count);
+                }
+                let _ = main.major_compact();
+                if crate::debug_logging() {
+                    println!("✅ Auto-compaction complete ({:?}, l0_tables={})",
+                             compact_start.elapsed(), main.l0_table_count());
+                }
+            }
+        }
+
+        // 6. Handle deferred non-list inverse links (rare for this workload)
+        for (target, inverse_field, _is_list) in deferred_inverses {
+            self.link_inverse(target, &inverse_field, false, uid, &timestamp)?;
+        }
+        
+        // 7. Handle Search Indexing (After commit/lock release)
+        for (field, val, tokenizers) in items_to_index {
+             for strategy in tokenizers {
+                 if let Err(e) = self.write_term_index(uid, &field, &val, &strategy) {
+                     eprintln!("Search Indexing Failed (create_node) for uid={}: {}", uid, e);
+                 }
+             }
+        }
 
         let total = fn_start.elapsed();
-        if total.as_millis() > 2 {
-            eprintln!("[RESOLVER] create_node {} | idx={:?} uniq={:?} batch={:?} inv={:?}({}) total={:?}",
-                     type_name, idx_time, uniq_time, batch_time, inv_time, inv_count, total);
+        if crate::debug_logging() && total.as_millis() > 2 {
+            eprintln!("[RESOLVER] create_node {} | uniq={:?} commit={:?} inv_count={} total={:?}",
+                     type_name, uniq_time, commit_time, inv_count, total);
         }
+
+        // 8. Publish Event (Realtime)
+        self.bus.publish(MutationEvent {
+             type_name: type_name.to_string(),
+             uid,
+             mutation_type: MutationType::Create,
+             source,
+             payload: Some(fields),
+             metadata: Some(crate::realtime::bus::SchemaMetadata {
+                uniques: uniques.to_vec(),
+                inverses: inverses.to_vec(),
+                search_fields: search_fields.clone(),
+            }),
+            timestamp: Some(timestamp),
+        });
 
         Ok(())
     }
@@ -1557,7 +1686,7 @@ impl Resolver for FjallResolver {
     }
 
     fn search_hybrid(&self, text: &str, field: &str, vector: &[f64], k: usize) -> Vec<(u64, f64)> {
-        self.search_hybrid(text, field, vector, k)
+        self.search_hybrid(text, field, vector, k, false)
     }
 
     fn resolve(&self, uid: u64, field_name: &str) -> Option<Value> {
@@ -1569,15 +1698,32 @@ impl Resolver for FjallResolver {
         match self.storage.get(&self.db_name, &key) {
             Ok(Some(bytes)) => {
                 let res = serde_json::from_slice(&bytes).ok();
-                if field_name == "title" {
-                     println!("Resolve: UID: {}, Field: {}, Result: {:?}", uid, field_name, res);
-                }
                 res
             }
             _ => {
-                if field_name == "title" {
-                     println!("Resolve: UID: {}, Field: {}, Result: None (Key not found)", uid, field_name);
+                // FALLBACK: Check Edge Index (for Inverse Relationships)
+                // If this field is a relationship (e.g., `posts` on `User`), it might only exist as edge keys.
+                // We scan for edges starting with prefix derived from (uid, field_name).
+                let edge_prefix = Codec::encode_edge_prefix(uid, field_name);
+                if let Some((main_ks, _)) = self.storage.get_database(&self.db_name) {
+                    let mut edge_uids = Vec::new();
+                    use std::ops::Bound;
+                    let iter = main_ks.range((Bound::Included(edge_prefix.clone()), Bound::Unbounded));
+                    for guard in iter {
+                        if let Ok(key) = guard.key() {
+                             if !key.starts_with(&edge_prefix) { break; }
+                             if let Some(target_uid) = Codec::decode_edge_source_uid(&key) {
+                                 edge_uids.push(target_uid);
+                             }
+                        }
+                    }
+                    if !edge_uids.is_empty() {
+                         // Return as List of strings (IDs)
+                         let list: Vec<Value> = edge_uids.into_iter().map(|u| Value::String(u.to_string())).collect();
+                         return Some(Value::List(list));
+                    }
                 }
+
                 None
             },
         }
@@ -1649,7 +1795,7 @@ impl Resolver for FjallResolver {
         self.create_node_internal(type_name, uid, payload, uniques, inverses, search_fields, crate::realtime::bus::MutationSource::Local, None)?;
         
         let elapsed = op_start.elapsed();
-        if elapsed.as_secs() >= 1 {
+        if crate::debug_logging() && elapsed.as_secs() >= 1 {
             println!("SLOW: create_node for {} took {:.2}s", type_name, elapsed.as_secs_f64());
         }
         Ok(uid)
@@ -1678,52 +1824,82 @@ impl Resolver for FjallResolver {
         // 2. If `uniques` provided (Identity Map), use that.
         // 3. Else Full Scan.
 
+        // Detect Text Search Predicates
+        let mut text_search: Option<(String, String, String, bool)> = None; // (field, strategy, query, require_all)
+        for (field, val) in &filter {
+             if let Value::Object(obj) = val {
+                 if let Some(q) = obj.get("allofterms") {
+                     if let Value::String(s) = q {
+                         // Use "term" strategy for allofterms, require_all=true
+                         text_search = Some((field.clone(), "term".to_string(), s.clone(), true));
+                         break; 
+                     }
+                 }
+                 if let Some(q) = obj.get("anyofterms") {
+                      if let Value::String(s) = q {
+                         // Use "term" strategy for anyofterms, require_all=false
+                         text_search = Some((field.clone(), "term".to_string(), s.clone(), false));
+                         break;
+                     }
+                 }
+                 if let Some(q) = obj.get("alloftext") {
+                    if let Value::String(s) = q {
+                        text_search = Some((field.clone(), "fulltext".to_string(), s.clone(), true));
+                        break; 
+                    }
+                }
+                if let Some(q) = obj.get("anyoftext") {
+                     if let Value::String(s) = q {
+                        text_search = Some((field.clone(), "fulltext".to_string(), s.clone(), false));
+                        break;
+                    }
+                }
+             }
+        }
+
         if let Some(ref vec) = near_vector {
-             // Vector Search Drive
-             // Fetch K results (where K is limit * multiplier?)
-             // Since we have filters, we might need more.
-             // Let's assume K=100 or first * 10
+             // Case 1: Hybrid Search (Vector + Text) or Vector Search
              let k = first.unwrap_or(50) * 4; 
              
-             // Verify if this type HAS a vector index? 
-             // Currently `search_vectors` is global or per-index?
-             // `storage.search_vectors` takes `&[f64]` and returns `Vec<(u64, f64)>`.
-             // It likely searches the generic HNSW index.
-             // We need to filter by TYPE implicitly afterwards.
-             
-             match self.storage.search_vectors(vec, k) {
-                 Ok(results) => {
-                     for (uid, _dist) in results {
-                         // 1. Check Type (Legacy: we don't strictly enforce type separation in HNSW yet, 
-                         // so we must check if the UID belongs to `type_name`)
-                         // For Phase 1, we assume Global ID space, but we still check `_type`.
-                         
-                         // Check Type & Filter together
-                         if self.node_exists(type_name, uid) { 
-                              // Current `node_exists` assumes checking `_type` predicate?
-                              // Actually `node_exists` just checks any key?
-                              // Let's use `check_filter_recursive` which checks existence implicitly if not empty?
-                              // Or explicitly check type.
-                              
-                              // Verify Type
-                              if let Some(stored_type) = self.get_node_type(uid) {
-                                  if stored_type == type_name {
-                                      if filter.is_empty() || self.check_filter_recursive(uid, &filter_im) {
-                                          uids.push(uid);
-                                      }
-                                  }
+             let search_results = if let Some((field, _strat, query, require_all)) = text_search {
+                 // Hybrid
+                 self.search_hybrid(&query, &field, vec, k, require_all)
+             } else {
+                 // Pure Vector
+                 self.search_vectors(vec, k)
+             };
+
+             for (uid, _dist) in search_results {
+                 // Verify Type & Apply Filters
+                 if self.node_exists(type_name, uid) { 
+                      if let Some(stored_type) = self.get_node_type(uid) {
+                          if stored_type == type_name {
+                              if filter.is_empty() || self.check_filter_recursive(uid, &filter_im) {
+                                  uids.push(uid);
                               }
-                         }
-                     }
-                 },
-                 Err(e) => {
-                     eprintln!("Vector search failed: {}", e);
+                          }
+                      }
                  }
              }
+             // Results are already sorted by Score/Distance (ASC/DESC depending on impl)
              
-             // Vector search results ARE sorted by distance (ASC).
-             // If `sort` is provided, we re-sort.
-             // If not, we keep vector order.
+        } else if let Some((field, strat, query, require_all)) = text_search {
+             // Case 2: Pure Text Search (BM25)
+             let k = first.unwrap_or(50) * 4;
+             let results = self.search_text_bm25(&query, &field, &strat, k, require_all);
+             
+             for (uid, _score) in results {
+                 if self.node_exists(type_name, uid) {
+                      if let Some(stored_type) = self.get_node_type(uid) {
+                          if stored_type == type_name {
+                              if self.check_filter_recursive(uid, &filter_im) {
+                                  uids.push(uid);
+                              }
+                          }
+                      }
+                 }
+             }
+             // BM25 results are sorted by score (DESC) usually.
              
         } else if let Some(candidates) = self.get_candidates(type_name, &filter, uniques) {
              // Candidate Set Optimization
@@ -1918,7 +2094,7 @@ impl Resolver for FjallResolver {
         let result = self.update_node_internal(type_name, uid, payload, uniques, inverses, search_fields, crate::realtime::bus::MutationSource::Local, None);
         
         let elapsed = op_start.elapsed();
-        if elapsed.as_secs() >= 1 {
+        if crate::debug_logging() && elapsed.as_secs() >= 1 {
             println!("SLOW: update_node for {} uid={} took {:.2}s", type_name, uid, elapsed.as_secs_f64());
         }
         result

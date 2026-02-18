@@ -1,0 +1,10 @@
+.sidekick-input textarea {
+	background-color: unset;
+	font-size: var(--mantine-font-size-lg);
+}
+
+.history-panel {
+	background-color: var(--mantine-color-body);
+	background-color: rgba(from var(--mantine-color-body) r g b / 0.85);
+	backdrop-filter: blur(10px);
+}

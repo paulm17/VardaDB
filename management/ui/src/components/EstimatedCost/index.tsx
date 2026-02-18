@@ -1,0 +1,66 @@
+import { Box, BoxProps, Group, Text } from "@mantine/core";
+import { useDebouncedValue } from "@mantine/hooks";
+import { useMemo } from "react";
+import { useCloudEstimationQuery } from "~/cloud/queries/estimation";
+import type { CloudDeployConfig, CloudOrganization } from "~/types";
+
+export interface EstimatedCostProps extends BoxProps {
+	organisation: CloudOrganization;
+	config: CloudDeployConfig;
+}
+
+export function EstimatedCost({ organisation, config, ...other }: EstimatedCostProps) {
+	const [cachedConfig] = useDebouncedValue(config, 150);
+	const { data } = useCloudEstimationQuery(organisation, cachedConfig);
+
+	const format = useMemo(() => {
+		return new Intl.NumberFormat("en-US", {
+			style: "currency",
+			currency: data?.currency ?? "USD",
+			currencyDisplay: "narrowSymbol",
+			maximumFractionDigits: 3,
+		});
+	}, [data?.currency]);
+
+	return (
+		<Box {...other}>
+			<Text
+				c="var(--mantine-color-indigo-light-color)"
+				fz="md"
+				fw={800}
+				tt="uppercase"
+				lts={1}
+			>
+				Billed monthly
+			</Text>
+			<Group
+				gap="xs"
+				align="start"
+			>
+				{data ? (
+					<Text
+						fz={28}
+						fw={600}
+						c="bright"
+					>
+						{format.format(data.cost)}
+					</Text>
+				) : (
+					<Text
+						fz={28}
+						fw={600}
+					>
+						&mdash;
+					</Text>
+				)}
+				<Text
+					mt={12}
+					fz="xl"
+					fw={500}
+				>
+					/ mo
+				</Text>
+			</Group>
+		</Box>
+	);
+}

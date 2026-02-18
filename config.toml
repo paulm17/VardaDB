@@ -1,0 +1,15 @@
+[server]
+port = 8000
+storage_path = "./varda_db_data"
+
+[zenoh]
+# Mode: "peer" (default, forms mesh) or "client" (requires connect)
+mode = "peer"
+# Connect: Empty for the root/seed node
+connect = [] 
+# Listen: Explicitly bind 7447 (Default Zenoh port)
+listen = ["tcp/0.0.0.0:7447"]
+prefix = "varda/ops"
+
+# [remote_append]
+# path = "replication_log.jsonl"

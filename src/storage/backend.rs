@@ -271,9 +271,13 @@ impl Storage {
         // Fjall stalls writes at l0 >= 20 (soft) and >= 30 (hard halt)
         let l0_count = main.l0_table_count();
         if l0_count >= 16 {
-            println!("⚠️ L0 pressure high (l0_tables={}), triggering compaction...", l0_count);
+            if crate::debug_logging() {
+                println!("⚠️ L0 pressure high (l0_tables={}), triggering compaction...", l0_count);
+            }
             let _ = main.major_compact();
-            println!("✅ Auto-compaction complete (l0_tables={})", main.l0_table_count());
+            if crate::debug_logging() {
+                println!("✅ Auto-compaction complete (l0_tables={})", main.l0_table_count());
+            }
         }
         
         Ok(())
@@ -315,7 +319,7 @@ impl Storage {
         let total_time = op_start.elapsed();
         
         // Log if any phase took > 50ms
-        if total_time.as_millis() > 50 {
+        if crate::debug_logging() && total_time.as_millis() > 50 {
             println!("⏱️ put_batch_lww SLOW: {} items | lock={:?}, prep={:?}, commit={:?}, total={:?}",
                      item_count, lock_time, prep_time, commit_time, total_time);
         }
@@ -324,12 +328,16 @@ impl Storage {
         // Fjall stalls writes at l0 >= 20 (soft) and >= 30 (hard halt)
         // Proactively compact at 12 to prevent reaching stall threshold
         let l0_count = main.l0_table_count();
-        if l0_count >= 12 {
-            let compact_start = Instant::now();
-            println!("⚠️ L0 pressure high (l0_tables={}), triggering compaction...", l0_count);
-            let _ = main.major_compact();
-            println!("✅ Auto-compaction complete ({:?}, l0_tables={})", 
-                     compact_start.elapsed(), main.l0_table_count());
+        if l0_count >= 8 {
+            if crate::debug_logging() {
+                let compact_start = Instant::now();
+                println!("⚠️ L0 pressure high (l0_tables={}), triggering compaction...", l0_count);
+                let _ = main.major_compact();
+                println!("✅ Auto-compaction complete ({:?}, l0_tables={})", 
+                         compact_start.elapsed(), main.l0_table_count());
+            } else {
+                let _ = main.major_compact();
+            }
         }
         
         Ok(())
@@ -395,6 +403,12 @@ impl Storage {
     pub fn flush(&self) -> anyhow::Result<()> {
         println!("Storage: Flush starting - Journal count: {}", self.db.journal_count());
         
+        // Persist clock state (not persisted on every write for performance)
+        {
+            let clock = self.clock.lock().unwrap();
+            let _ = self.sys_keyspace.insert("clock", &clock.to_bytes());
+        }
+
         // Persist Internal State
         if let Err(e) = self.persist_fingerprints() {
             eprintln!("Storage: Failed to persist fingerprints: {}", e);
@@ -565,7 +579,6 @@ impl Storage {
         let now = crate::storage::timestamp::Timestamp::physical_now();
         let next = clock.send(now);
         *clock = next;
-        let _ = self.sys_keyspace.insert("clock", &next.to_bytes());
         next
     }
 
@@ -574,7 +587,6 @@ impl Storage {
         let now = crate::storage::timestamp::Timestamp::physical_now();
         let next = clock.receive(remote_ts, now);
         *clock = next;
-        let _ = self.sys_keyspace.insert("clock", &next.to_bytes());
     }
 
     // --- Vector Operations ---

@@ -1,0 +1,57 @@
+# E-Commerce Knowledge Graph Schema
+# VardaDB Vector Search Tutorial
+#
+# This schema demonstrates:
+# - @vector for HNSW vector search
+# - @search for BM25 text search  
+# - @hasInverse for bidirectional edges
+# - @unique for unique constraints
+
+type Category {
+    id: ID!
+    name: String! @unique @search(by: [term])
+    products: [Product] @hasInverse(field: "category")
+}
+
+type Store {
+    id: ID!
+    name: String! @search(by: [fulltext])
+    location: Location @hasInverse(field: "stores")
+    products: [Product] @hasInverse(field: "store")
+    rating: Float
+}
+
+type Location {
+    id: ID!
+    city: String! @search(by: [term])
+    country: String! @search(by: [term])
+    stores: [Store] @hasInverse(field: "location")
+}
+
+type User {
+    id: ID!
+    username: String! @unique
+    email: String @unique
+    reviews: [Review] @hasInverse(field: "author")
+}
+
+type Product {
+    id: ID!
+    name: String! @search(by: [fulltext])
+    description: String @search(by: [fulltext])
+    price: Float!
+    embedding: [Float!]! @vector
+    category: Category @hasInverse(field: "products")
+    store: Store @hasInverse(field: "products")
+    reviews: [Review] @hasInverse(field: "product")
+}
+
+type Review {
+    id: ID!
+    title: String @search(by: [fulltext])
+    content: String! @search(by: [fulltext])
+    rating: Int!
+    embedding: [Float!]! @vector
+    author: User @hasInverse(field: "reviews")
+    product: Product @hasInverse(field: "reviews")
+}

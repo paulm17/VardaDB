@@ -1,6 +1,0 @@
-type Todo {
-    id: ID!
-    title: String! @search(by: [fulltext])
-    completed: Boolean! @search
-    createdAt: DateTime
-}

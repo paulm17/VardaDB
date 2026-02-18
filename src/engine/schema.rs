@@ -200,12 +200,12 @@ impl Schema {
                                 // For now, we assume user provides it, or if missing we can default to "text"?
                                 // But better to be explicit. If empty, maybe just field name? No, that's recursion.
                                 
-                                if !source.is_empty() {
-                                    vector_config = Some(crate::engine::resolver::VectorConfig {
-                                        field: field_name.clone(),
-                                        source,
-                                    });
-                                }
+                                // If source is empty, it implies manual vector input (no auto-generation from text).
+                                // We still need VectorConfig to trigger indexing.
+                                vector_config = Some(crate::engine::resolver::VectorConfig {
+                                    field: field_name.clone(),
+                                    source,
+                                });
                             }
 
                             // Inverse
@@ -799,7 +799,7 @@ impl Schema {
                                 let create_time = create_start.elapsed();
                                 
                                 let total = mut_start.elapsed();
-                                if total.as_millis() > 5 {
+                                if crate::debug_logging() && total.as_millis() > 5 {
                                     eprintln!("[SERVER] create{} | deser={:?} sem_wait={:?} create={:?} total={:?}",
                                              t_name, deser_time, sem_time, create_time, total);
                                 }
@@ -865,7 +865,10 @@ impl Schema {
 
                                 use crate::engine::resolver::Resolver;
                                 let resolver = ctx.data::<Box<dyn Resolver + Send + Sync>>().unwrap();
-                                match resolver.update_node(&t_name, uid, fields, &u_fields, &inv_fields, &s_fields, meta.vector_config.as_ref()) {
+                                let result = tokio::task::block_in_place(|| {
+                                    resolver.update_node(&t_name, uid, fields, &u_fields, &inv_fields, &s_fields, meta.vector_config.as_ref())
+                                });
+                                match result {
                                     Ok(_) => Ok(Some(dynamic::FieldValue::value(async_graphql::Value::Boolean(true)))),
                                     Err(e) => Err(e.into()),
                                 }
@@ -897,9 +900,11 @@ impl Schema {
                                 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>> {
                                     Box::pin(async move {
                                         if let Some(meta) = meta_map.get(type_name) {
+                                            // println!("Recursive Delete: Type={}, UID={}, CascadeFields={:?}", type_name, uid, meta.cascade_fields);
                                             // 1. Process Cascades
                                             for (field, target_type) in &meta.cascade_fields {
                                                 if let Some(val) = resolver.resolve(uid, field) {
+                                                    // println!("  Field: {}, Resolved: {:?}", field, val);
                                                     let mut target_uids = Vec::new();
                                                     match val {
                                                         async_graphql::Value::List(items) => {
@@ -917,13 +922,18 @@ impl Schema {
                                                         }
                                                         _ => {}
                                                     }
+                                                    // println!("  Target UIDs to cascade: {:?}", target_uids);
                                                     for target_uid in target_uids {
                                                         recursive_delete(resolver, target_type, target_uid, meta_map).await?;
                                                     }
+                                                } else {
+                                                    // println!("  Field: {} resolved to None", field);
                                                 }
                                             }
                                             // 2. Delete Self
-                                            resolver.delete_node(type_name, uid, &meta.uniques, &meta.inverses, &meta.search_fields)?;
+                                            tokio::task::block_in_place(|| {
+                                                resolver.delete_node(type_name, uid, &meta.uniques, &meta.inverses, &meta.search_fields)
+                                            })?;
                                         }
                                         Ok(())
                                     })
@@ -1631,8 +1641,10 @@ fn deep_create_node<'a>(
             // 2. Validate
             validate_input(&fields, &meta.validate_fields)?;
 
-            // 3. Create Self
-            resolver.create_node(type_name, fields, &meta.uniques, &meta.inverses, &meta.search_fields, meta.vector_config.as_ref())
+            // 3. Create Self — run on blocking thread to avoid Fjall I/O stalling the async runtime
+            tokio::task::block_in_place(|| {
+                resolver.create_node(type_name, fields, &meta.uniques, &meta.inverses, &meta.search_fields, meta.vector_config.as_ref())
+            })
         } else {
             Err(format!("Type {} not found", type_name))
         }

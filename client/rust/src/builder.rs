@@ -71,9 +71,7 @@ impl GraphqlBuilder {
                 if i > 0 {
                     write!(query, ", ").unwrap();
                 }
-                // Serialize the value to JSON string which is valid GraphQL value format
-                let val_str = serde_json::to_string(val).unwrap();
-                write!(query, "{}: {}", key, val_str).unwrap();
+                write!(query, "{}: {}", key, to_graphql_value(val)).unwrap();
             }
             write!(query, ")").unwrap();
         }
@@ -89,5 +87,41 @@ impl GraphqlBuilder {
         write!(query, " }}").unwrap();
 
         (query, Value::Null)
+    }
+}
+
+fn to_graphql_value(value: &Value) -> String {
+    match value {
+        Value::Null => "null".to_string(),
+        Value::Bool(b) => b.to_string(),
+        Value::Number(n) => n.to_string(),
+        Value::String(s) => serde_json::to_string(s).unwrap(),
+        Value::Array(arr) => {
+            let mut s = String::new();
+            s.push('[');
+            for (i, v) in arr.iter().enumerate() {
+                if i > 0 {
+                    s.push_str(", ");
+                }
+                s.push_str(&to_graphql_value(v));
+            }
+            s.push(']');
+            s
+        }
+        Value::Object(obj) => {
+            let mut s = String::new();
+            s.push('{');
+            for (i, (k, v)) in obj.iter().enumerate() {
+                if i > 0 {
+                    s.push_str(", ");
+                }
+                // GraphQL keys are not quoted
+                s.push_str(k);
+                s.push_str(": ");
+                s.push_str(&to_graphql_value(v));
+            }
+            s.push('}');
+            s
+        }
     }
 }
