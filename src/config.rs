@@ -16,6 +16,7 @@ pub struct VardaConfig {
     pub vardaclaw: VardaClawConfig,
     #[serde(default)]
     pub r2: R2Config,
+    pub auth: Option<auth::config::AuthConfig>,
 }
 
 #[derive(Deserialize, Debug, Clone, Default)]
@@ -137,6 +138,7 @@ impl Default for VardaConfig {
             llm: LLMConfig::default(),
             vardaclaw: VardaClawConfig::default(),
             r2: R2Config::default(),
+            auth: None, // Auth is disabled by default
         }
     }
 }

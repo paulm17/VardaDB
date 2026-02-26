@@ -22,8 +22,6 @@ pub mod llm;
 pub mod repl;
 pub mod observability;
 pub use jobs; 
-// pub mod vardajobs; // Refactored to external crate
-
 
 pub struct DummyResolver;
 
@@ -84,6 +82,7 @@ pub struct ServerState {
     pub llm_config: crate::config::LLMConfig,
     // pub mlx_server: Option<Arc<crate::llm::MlxServer>>, // Removed
     pub llama_server: Option<Arc<crate::llm::LlamaServer>>,
+    pub auth: Option<Arc<auth::state::AuthState>>,
 }
 
 impl axum::extract::FromRef<ServerState> for crate::server::management::ManagementState {
@@ -171,6 +170,38 @@ pub async fn init_system(config: crate::config::VardaConfig) -> (Arc<ServerState
         None
     };
 
+    // Initialize Auth Subsystem
+    let auth_state = if let Some(auth_config) = config.auth.clone() {
+        println!("Auth subsystem enabled");
+        let email_queue = Some(Arc::new(jobs::Queue::new("auth_email".to_string(), storage.jobs_store.clone())));
+        
+        match auth::state::AuthState::new(auth_config, &storage.db, email_queue.clone()) {
+            Ok(state) => {
+                let arc_state = Arc::new(state);
+                
+                let arc_state_for_pruning = arc_state.clone();
+                tokio::spawn(async move {
+                    auth::state::start_pruning_task(arc_state_for_pruning).await;
+                });
+                
+                #[cfg(feature = "auth-email")]
+                if let Some(queue) = email_queue {
+                    let arc_state_clone = arc_state.clone();
+                    tokio::spawn(async move {
+                        auth::email::job::start_email_worker(arc_state_clone, queue).await;
+                    });
+                }
+                Some(arc_state)
+            },
+            Err(e) => {
+                eprintln!("Failed to initialize Auth subsystem: {}", e);
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let schemas = Arc::new(dashmap::DashMap::new());
     schemas.insert("default".to_string(), Arc::new(RwLock::new(Arc::new(initial_schema))));
 
@@ -183,6 +214,7 @@ pub async fn init_system(config: crate::config::VardaConfig) -> (Arc<ServerState
         llm_config: config.llm.clone(),
         // mlx_server: mlx_server, // Removed
         llama_server: llama_server,
+        auth: auth_state,
     }); // Wrapped in Arc
 
     // Start Anti-Gravity (Zenoh) Sync
@@ -280,7 +312,32 @@ pub async fn init_system(config: crate::config::VardaConfig) -> (Arc<ServerState
         .nest_service("/management", mgmt_router)
         .nest_service("/_mgmt", management::router(mgmt_manager.clone()))
         // Integrate Blob Storage / TUS Router
-        .nest_service("/files", crate::storage::blob::routes::router(blob_state))
+        .nest_service("/files", crate::storage::blob::routes::router(blob_state));
+
+    let app = if state.auth.is_some() {
+        use axum::middleware;
+        let auth_state = state.auth.clone().unwrap();
+        let auth_router = Router::new()
+            .route("/auth/register", post(auth::handlers::register::register_user_handler))
+            .route("/auth/login", post(auth::handlers::login::login_user_handler))
+            .route("/auth/forgot_password", post(auth::handlers::forgot_password::forgot_password_handler))
+            .route("/auth/reset_password", post(auth::handlers::reset_password::reset_password_handler))
+            .route("/auth/generate_magiclink", post(auth::handlers::generate_magiclink::generate_magiclink_handler))
+            .route("/auth/verify_magiclink_code", get(auth::handlers::verify_magiclink::verify_magiclink_code_handler))
+            .route("/auth/check_code", post(auth::handlers::check_code::check_code_handler))
+            .route("/auth/verify_code", get(auth::handlers::verify_code::verify_code_handler))
+            .route("/auth/logout", get(auth::handlers::logout::logout_handler)
+                .route_layer(middleware::from_fn_with_state(auth_state.clone(), auth::middleware::auth_middleware)))
+            .route("/auth/me", get(auth::handlers::get_me::get_me_handler)
+                .route_layer(middleware::from_fn_with_state(auth_state.clone(), auth::middleware::auth_middleware)))
+            .with_state(auth_state);
+            // We will add remaining logic later
+        app.merge(auth_router)
+    } else {
+        app
+    };
+    
+    let app = app
         .layer(CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any))
         .with_state((*state).clone()); 
 

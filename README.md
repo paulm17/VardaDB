@@ -16,6 +16,7 @@ Designed for local-first applications, edge computing, and high-throughput local
 *   **Full-Text Search**: Built-in term indexing and search capabilities.
 *   **LSM-Tree Storage**: Built on **Fjall** (RocksDB-like) for high write throughput and reliability.
 *   **Query Caching**: Integrated LRU cache for high-speed read comparisons.
+*   **Secure Authentication**: Standalone crate for ReBAC, PASETO tokens, and durable email delivery.
 
 ---
 
@@ -199,6 +200,29 @@ vardadb(sales)> { queryUser { name } }
 
 ---
 
+## 🔐 Authentication & Identity
+
+VardaDB includes a robust, standalone authentication subsystem (`auth/`) that provides identity management, secure token issuance, and resilient communication.
+
+### 1. Standalone Auth Crate
+The authentication logic is encapsulated in a dedicated Rust crate, allowing for modularity and independent configuration. It integrates seamlessly with the main VardaDB router via the `/auth` prefix.
+
+### 2. PASETO Token System
+VardaDB uses **PASETO (Platform-Agnostic Security Tokens)** instead of JWT for both Access and Refresh tokens. PASETOs provide stronger security defaults and a more resilient design against common token vulnerabilities.
+
+### 3. Durable Email Job Queue
+To ensure reliable delivery of critical communications (Magic Links, Password Resets), VardaDB uses a durable job queue.
+*   **Asynchronous**: Email dispatch does not block the API response.
+*   **Resilient**: Failed deliveries are retried automatically by the background worker.
+*   **Configurable**: SMTP settings are fully manageable via `config.toml`.
+
+### 4. Persistent Storage (Fjall)
+All identity data, including user records, session tokens, and confirmation flows, is stored in native Fjall keyspaces.
+*   **User Management**: Secure password hashing with Argon2.
+*   **Automatic Pruning**: A recurring background task automatically prunes expired tokens and confirmations to maintain optimal database performance.
+
+---
+
 ## 📁 File Storage (Blob Vault)
 
 VardaDB includes a built-in content-addressable storage (CAS) layer with support for the [TUS Resumable Upload](https://tus.io/) protocol.
@@ -330,5 +354,6 @@ cargo run -- start
 *   `src/storage`: Backend storage interfaces (Fjall, LWW Logic).
 *   `src/bridge`: Connectors (FjallResolver) and LWW application.
 *   `src/sync`: Zenoh-based replication and schema synchronization.
+*   `auth/`: Standalone authentication crate (Middleware, Handlers, Email Jobs).
 *   `examples`: Demo code (`embedded_demo.rs`).
 *   `tests`: Integration tests (`scalar_test.rs`).

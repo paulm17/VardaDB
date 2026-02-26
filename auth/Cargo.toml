@@ -1,0 +1,43 @@
+[package]
+name = "auth"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Web framework
+axum = { version = "0.8", features = ["ws"] }
+axum-extra = { version = "0.12.5", features = ["typed-header", "cookie"] }
+reqwest = { version = "0.13.1", features = ["json", "stream"] }
+
+# Serialization and config
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+bincode = "1.3"
+toml = "0.9.11"
+
+# Database
+fjall = { version = "3.0.1", features = ["bytes_1", "lz4"] }
+
+# Utils
+anyhow = "1.0"
+tracing = "0.1"
+uuid = { version = "1.20.0", features = ["v4", "fast-rng", "macro-diagnostics", "serde"] }
+ulid = "1.1.2"
+time = "0.3.36"
+chrono = "0.4.43"
+rand = "0.8.5"
+tokio = { version = "1.0", features = ["time", "rt"] }
+urlencoding = "2.1.3"
+
+# Auth Specific
+argon2 = "0.5"
+rusty_paseto = { version = "0.7", features = ["v4_public"] }
+ed25519-dalek = { version = "2.1", features = ["rand_core"] }
+oauth2 = { version = "5.0", features = ["reqwest"] }
+lettre = { version = "0.11", optional = true, features = ["tokio1", "tokio1-native-tls", "builder"] }
+
+# Workspace dependencies
+jobs = { path = "../jobs" }
+
+[features]
+auth-email = ["lettre"]

@@ -15,8 +15,30 @@ prefix = "varda/ops"
 # path = "replication_log.jsonl"
 
 [llm]
-provider = "llama"
-model = "/Volumes/Data/Users/paul/.llama/models/qwen3-4b-instruct.Q4_K_M.gguf"
-draft_model = "/Volumes/Data/Users/paul/.llama/models/qwen3-0.6b-instruct.Q4_K_M.gguf"
-port = 8080
-num_draft_tokens = 5
+#provider = "llama"
+#model = "/Volumes/Data/Users/paul/.llama/models/qwen3-4b-instruct.Q4_K_M.gguf"
+#draft_model = "/Volumes/Data/Users/paul/.llama/models/qwen3-0.6b-instruct.Q4_K_M.gguf"
+#port = 8080
+#num_draft_tokens = 5
+
+# [auth]
+# Base URL for the auth server
+# server_url = "http://localhost:8000" 
+# access_token_ttl_minutes = 15
+# refresh_token_ttl_days = 30
+# allowed_redirect_origins = [
+#    "http://localhost:3000",
+#    "http://localhost:5173"
+# ]
+# [auth.smtp]
+# server = "smtp.freesmtpservers.com"
+# port = 25
+# tls_mode = "StartTls" # Options: "StartTls" or "ImplicitTls"
+# from = "person@acme.com"
+# from_name = "Mr Person"
+# username = "your_username" # (Optional)
+# password = "your_password" # (Optional)
+# Delivery retry and backoff settings
+# max_attempts = 3
+initial_delay_secs = 5
+max_delay_secs = 60
