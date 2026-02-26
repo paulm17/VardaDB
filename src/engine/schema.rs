@@ -4,31 +4,31 @@ use tokio::sync::Semaphore;
 static MUTATION_SEMAPHORE: Semaphore = Semaphore::const_new(64);
 
 // This is our "Engine" Schema, which currently wraps async-graphql
-#[derive(Clone)]
-struct TypeMetadata {
+#[derive(Clone, Debug)]
+pub struct TypeMetadata {
     #[allow(dead_code)]
-    type_name: String,
-    uniques: Vec<String>,
-    inverses: Vec<crate::engine::resolver::InverseInfo>,
-    search_fields: std::collections::HashMap<String, Vec<String>>,
-    cascade_fields: Vec<(String, String)>,
-    interface_implementations: Vec<String>, // Interfaces this type implements
-    validate_fields: std::collections::HashMap<String, Vec<ValidationRule>>,
-    relations: std::collections::HashMap<String, String>,
+    pub type_name: String,
+    pub uniques: Vec<String>,
+    pub inverses: Vec<crate::engine::resolver::InverseInfo>,
+    pub search_fields: std::collections::HashMap<String, Vec<String>>,
+    pub cascade_fields: Vec<(String, String)>,
+    pub interface_implementations: Vec<String>, // Interfaces this type implements
+    pub validate_fields: std::collections::HashMap<String, Vec<ValidationRule>>,
+    pub relations: std::collections::HashMap<String, String>,
 
-    vector_config: Option<crate::engine::resolver::VectorConfig>,
-    kind: TypeKind,
+    pub vector_config: Option<crate::engine::resolver::VectorConfig>,
+    pub kind: TypeKind,
 }
 
 #[derive(Clone, PartialEq, Debug)]
-enum TypeKind {
+pub enum TypeKind {
     Object,
     Interface,
     Union(Vec<String>), // Possible types
 }
 
 #[derive(Clone, Debug)]
-enum ValidationRule {
+pub enum ValidationRule {
     Regex(String),
     Length { min: Option<i64>, max: Option<i64> },
     Range { min: Option<f64>, max: Option<f64> },
@@ -56,6 +56,7 @@ pub struct Schema {
     inner: async_graphql::dynamic::Schema,
     #[allow(dead_code)]
     sdl: String,
+    pub type_metadata: std::collections::HashMap<String, TypeMetadata>,
 }
 
 impl Schema {
@@ -69,7 +70,7 @@ impl Schema {
     }
 
 
-    pub fn create_builder(sdl: &str) -> Result<dynamic::SchemaBuilder, String> {
+    pub fn create_builder(sdl: &str) -> Result<(dynamic::SchemaBuilder, std::collections::HashMap<String, TypeMetadata>), String> {
         let system_sdl = "
             scalar DateTime
             scalar Int64
@@ -392,7 +393,7 @@ impl Schema {
             }
         }
         
-        let metadata_arc = std::sync::Arc::new(metadata_map);
+        let metadata_arc = std::sync::Arc::new(metadata_map.clone());
 
         // Pass 2: Generate Schema Artifacts
         for def in &doc.definitions {
@@ -1481,7 +1482,7 @@ impl Schema {
 
         schema_builder = schema_builder.register(sort_direction);
 
-        Ok(schema_builder)
+        Ok((schema_builder, metadata_map))
     }
 
     pub async fn execute_with_resolver(&self, query: &str, resolver: Box<dyn crate::engine::resolver::Resolver + Send + Sync>) -> String {
@@ -1498,18 +1499,18 @@ impl Schema {
     }
 
     pub fn load_from_sdl(sdl: &str) -> Result<Schema, String> {
-        let builder = Self::create_builder(sdl)?;
+        let (builder, type_metadata) = Self::create_builder(sdl)?;
         let schema = builder.finish().map_err(|e| e.to_string())?;
-        Ok(Self { inner: schema, sdl: sdl.to_string() })
+        Ok(Self { inner: schema, sdl: sdl.to_string(), type_metadata })
     }
 
     pub fn load_with_resolver<R: crate::engine::resolver::Resolver + Send + Sync + 'static>(sdl: &str, resolver: R) -> Result<Schema, String> {
-        let builder = Self::create_builder(sdl)?;
+        let (builder, type_metadata) = Self::create_builder(sdl)?;
         let schema = builder
             .data(Box::new(resolver) as Box<dyn crate::engine::resolver::Resolver + Send + Sync>)
             .finish()
             .map_err(|e| e.to_string())?;
-        Ok(Self { inner: schema, sdl: sdl.to_string() })
+        Ok(Self { inner: schema, sdl: sdl.to_string(), type_metadata })
     }
 
     /// Returns the generated SDL from async-graphql (includes all generated types)
@@ -1668,7 +1669,7 @@ mod tests {
         ";
         let builder_res = Schema::create_builder(sdl);
         assert!(builder_res.is_ok(), "Builder creation failed: {:?}", builder_res.err());
-        let builder = builder_res.unwrap();
+        let (builder, _) = builder_res.unwrap();
         let schema_res = builder.finish();
         
         // This is expected to fail before the fix because VideoStatus is treated as object/relation

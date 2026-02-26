@@ -24,10 +24,38 @@ pub struct VardaClawConfig {
     pub workers: usize,
 }
 
-#[derive(Deserialize, Debug, Clone, Default)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct LLMConfig {
+    #[serde(default = "default_llm_provider")]
+    pub provider: String,
+    #[serde(default = "default_llm_model")]
+    pub model: String,
+    pub draft_model: Option<String>,
+    #[serde(default = "default_llm_port")]
+    pub port: u16,
+    #[serde(default = "default_draft_tokens")]
+    pub num_draft_tokens: usize,
     pub openai_api_key: Option<String>,
-    pub model_default: Option<String>,
+    pub llama_server_path: Option<String>,
+}
+
+fn default_llm_provider() -> String { "ollama".to_string() }
+fn default_llm_model() -> String { "llama3".to_string() }
+fn default_llm_port() -> u16 { 11434 }
+fn default_draft_tokens() -> usize { 5 }
+
+impl Default for LLMConfig {
+    fn default() -> Self {
+        Self {
+            provider: default_llm_provider(),
+            model: default_llm_model(),
+            draft_model: None,
+            port: default_llm_port(),
+            num_draft_tokens: default_draft_tokens(),
+            openai_api_key: None,
+            llama_server_path: None,
+        }
+    }
 }
 
 fn default_jobs_config() -> JobsConfig {

@@ -100,11 +100,15 @@ impl SyncManager {
                     // Default schema = has Health, but no real user types
                     let is_default_schema = has_health && !has_todo && !has_user;
                     
-                    println!("DEBUG Schema Check: len={}, has_health={}, has_todo={}, has_user={}, is_default={}", 
-                        current_sdl.len(), has_health, has_todo, has_user, is_default_schema);
+                    if crate::debug_logging() {
+                        println!("DEBUG Schema Check: len={}, has_health={}, has_todo={}, has_user={}, is_default={}", 
+                            current_sdl.len(), has_health, has_todo, has_user, is_default_schema);
+                    }
                     
                     if is_default_schema {
-                        println!("DEBUG: Requesting schema from peers...");
+                        if crate::debug_logging() {
+                            println!("DEBUG: Requesting schema from peers...");
+                        }
                         let req = SyncMessage::RequestSchema;
                         if let Ok(payload) = serde_json::to_vec(&req) {
                              let key = format!("{}/sync/req_schema", prefix_gossip);
@@ -116,7 +120,9 @@ impl SyncManager {
                 // B. Data Sync
                 match resolver_gossip.compute_fingerprint() {
                     Ok(fp) => {
-                        println!("DEBUG: Sending Gossip. Local Count: {}", fp.count);
+                        if crate::debug_logging() {
+                            println!("DEBUG: Sending Gossip. Local Count: {}", fp.count);
+                        }
                         let key = format!("{}/sync/gossip", prefix_gossip);
                         let msg = SyncMessage::Gossip(fp);
                         if let Ok(payload) = serde_json::to_vec(&msg) {
@@ -265,7 +271,9 @@ impl SyncManager {
                          }
                      },
                      SyncMessage::DataResponse(items) => {
-                         println!("DEBUG: Received DataResponse. Applying batch of {} items", items.len());
+                         if crate::debug_logging() {
+                            println!("DEBUG: Received DataResponse. Applying batch of {} items", items.len());
+                        }
                          if let Err(e) = resolver_worker.apply_batch(items) {
                              eprintln!("Sync: Failed to apply batch: {}", e);
                          } else {

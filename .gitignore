@@ -6,3 +6,4 @@
 /jobs/target
 /client/rust/target
 /client/typescript/dist
+/client/typescript/node_modules

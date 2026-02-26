@@ -1,0 +1,79 @@
+
+type Language {
+  id: ID!
+  code: String! @unique @search(by: [term])
+  name: String! @search(by: [term])
+  translations: [Translations] @hasInverse(field: "language")
+}
+
+type Category {
+  id: ID!
+  name: String! @unique @search(by: [term])
+  bookCategories: [BookCategory] @hasInverse(field: "category")
+}
+
+type Translations {
+  id: ID!
+  code: String! @unique @search(by: [term])
+  name: String! @search(by: [term])
+  isInterlinear: Boolean
+  language: Language
+  bookTranslations: [BookTranslation] @hasInverse(field: "translation")
+  verseContents: [VerseContent] @hasInverse(field: "translation")
+}
+
+type Book {
+  id: ID!
+  code: String! @unique @search(by: [term])
+  nameEn: String! @search(by: [term, fulltext])
+  nameHe: String
+  nameGr: String
+  chapters: Int
+  bookTranslations: [BookTranslation] @hasInverse(field: "book")
+  bookCategories: [BookCategory] @hasInverse(field: "book")
+}
+
+type BookTranslation {
+  id: ID!
+  book: Book
+  translation: Translations
+  chapters: [Chapter] @hasInverse(field: "bookTranslation")
+}
+
+type BookCategory {
+  id: ID!
+  book: Book
+  category: Category
+}
+
+type Chapter {
+  id: ID!
+  number: Int! @search(by: [int])
+  bookTranslation: BookTranslation
+  verses: [Verse] @hasInverse(field: "chapter")
+}
+
+type Verse {
+  id: ID!
+  number: Int! @search(by: [int])
+  chunkType: String
+  chapterHeading: String
+  sectionHeading: String
+  paragraphStart: Boolean
+  poetryIndent: Int
+  metadata: String
+  chapter: Chapter
+  verseContents: [VerseContent] @hasInverse(field: "verse")
+}
+
+type VerseContent {
+  id: ID!
+  type: String! @search(by: [term])
+  text: String @search(by: [fulltext])
+  lemma: String
+  strong: String
+  morph: String
+  gloss: String
+  verse: Verse
+  translation: Translations
+}

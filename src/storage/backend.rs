@@ -3,8 +3,31 @@ use std::path::Path;
 use uuid::Uuid;
 use byteorder::{BigEndian, ByteOrder};
 use jobs::{JobStore, Queue};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, Weak};
 use fastembed::{TextEmbedding, InitOptions, EmbeddingModel};
+use tracing::{info, error};
+
+// Global registry for flushing
+static ACTIVE_STORAGES: std::sync::OnceLock<Mutex<Vec<Weak<Storage>>>> = std::sync::OnceLock::new();
+
+extern "C" fn crash_handler(_signum: libc::c_int) {
+    println!("\n[VardaDB] Process exiting. Global shutdown hook triggered...");
+    if let Some(mutex) = ACTIVE_STORAGES.get() {
+        if let Ok(mut list) = mutex.lock() {
+            let count = list.len();
+            if count > 0 {
+                println!("[VardaDB] Flushing {} active storage instances...", count);
+                for weak in list.drain(..) {
+                    if let Some(storage) = weak.upgrade() {
+                        let _ = storage.flush();
+                    }
+                }
+                println!("[VardaDB] Flush complete. Exiting.");
+            }
+        }
+    }
+    std::process::exit(0);
+}
 
 pub struct Storage {
     pub db: Database,
@@ -93,7 +116,10 @@ impl Storage {
 
         // Auto-discover other databases
         // Patterns: `{name}_main` and `{name}_history`
-        for ks_name in db.list_keyspace_names() {
+        let all_ks = db.list_keyspace_names();
+        println!("Storage: All keyspaces in manifest: {:?}", all_ks);
+        
+        for ks_name in all_ks {
             if ks_name.ends_with("_main") && &*ks_name != "default_main" {
                 let db_name = ks_name.trim_end_matches("_main");
                 let history_ks_name = format!("{}_history", db_name);
@@ -127,7 +153,7 @@ impl Storage {
             new_id
         };
         
-        println!("Storage: Initialized with Node ID: {}", node_id);
+        info!("Storage: Initialized with Node ID: {}", node_id);
 
         let clock = std::sync::Mutex::new(if let Some(val) = sys_keyspace.get("clock")? {
             if val.len() >= 16 {
@@ -143,11 +169,16 @@ impl Storage {
         });
 
         // Initialize Embedding Model (BGESmallEN - lightweight, good performance)
-        println!("Storage: Initializing Embedding Model (BGESmallEN)...");
-        let embedding_model = TextEmbedding::try_new(InitOptions::new(EmbeddingModel::BGESmallENV15))
-            .map_err(|e| anyhow::anyhow!("Failed to load embedding model: {}", e))?;
+        info!("Storage: Initializing Embedding Model (BGESmallEN) - This may take a while to download...");
+        let embedding_model = match TextEmbedding::try_new(InitOptions::new(EmbeddingModel::BGESmallENV15)) {
+            Ok(model) => model,
+            Err(e) => {
+                error!("Storage: Failed to load embedding model: {}", e);
+                return Err(anyhow::anyhow!("Failed to load embedding model: {}", e));
+            }
+        };
         let embedding_model = Arc::new(std::sync::Mutex::new(embedding_model));
-        println!("Storage: Embedding Model Ready");
+        info!("Storage: Embedding Model Ready");
 
         let storage = Self {
             db,
@@ -169,12 +200,32 @@ impl Storage {
         
         // Restore Fingerprints (Fast load / Fallback to scan)
         if let Err(e) = storage.restore_fingerprints() {
-             eprintln!("Storage: Failed to restore/rebuild fingerprints: {}", e);
+             error!("Storage: Failed to restore/rebuild fingerprints: {}", e);
         }
         
         Ok(storage)
     }
     
+    pub fn register_exit_hook(self: &Arc<Self>) {
+        let mutex = ACTIVE_STORAGES.get_or_init(|| {
+            // Spawn a delayed thread to overwrite any signal handlers
+            // that heavy GUI frameworks (like Chromium/CEF) might install
+            // during their own initialization phase after VardaDB starts.
+            std::thread::spawn(|| {
+                std::thread::sleep(std::time::Duration::from_secs(5));
+                unsafe {
+                    libc::signal(libc::SIGINT, crash_handler as libc::sighandler_t);
+                    libc::signal(libc::SIGTERM, crash_handler as libc::sighandler_t);
+                }
+            });
+            Mutex::new(Vec::new())
+        });
+        
+        if let Ok(mut list) = mutex.lock() {
+            list.push(Arc::downgrade(self));
+        }
+    }
+
     // --- Database Management ---
     
     pub fn create_database(&self, name: &str) -> anyhow::Result<()> {
@@ -853,6 +904,17 @@ impl Storage {
                  AtomicU64::new(item_hash),
                  AtomicU64::new(1)
              ));
+        }
+    }
+}
+
+impl Drop for Storage {
+    fn drop(&mut self) {
+        println!("Storage Drop triggered. Ensuring WAL and memtables are flushed...");
+        if let Err(e) = self.flush() {
+            eprintln!("Failed to flush storage during drop: {}", e);
+        } else {
+            println!("Storage flushed successfully on drop.");
         }
     }
 }

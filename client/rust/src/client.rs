@@ -165,6 +165,64 @@ impl BulkWriter {
     }
 }
 
+#[derive(serde::Serialize, serde::Deserialize, Debug)]
+pub struct BulkRecord {
+    pub type_name: String,
+    pub uid: Option<u64>,
+    pub fields: std::collections::HashMap<String, serde_json::Value>,
+}
+
+pub struct TcpBulkWriter {
+    stream: tokio::net::TcpStream,
+}
+
+impl TcpBulkWriter {
+    pub async fn connect(host: &str, port: u16) -> anyhow::Result<Self> {
+        let addr = format!("{}:{}", host, port);
+        let stream = tokio::net::TcpStream::connect(&addr).await
+            .map_err(|e| anyhow::anyhow!("Failed to connect to VardaDB Bulk Ingest port {}: {}", port, e))?;
+            
+        Ok(Self { stream })
+    }
+    
+    /// Connect and send a database name handshake so the server routes
+    /// all records into the correct keyspace.
+    pub async fn connect_with_db(host: &str, port: u16, database: &str) -> anyhow::Result<Self> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        
+        let addr = format!("{}:{}", host, port);
+        let mut stream = tokio::net::TcpStream::connect(&addr).await
+            .map_err(|e| anyhow::anyhow!("Failed to connect to VardaDB Bulk Ingest port {}: {}", port, e))?;
+        
+        // Send database name as first frame (length-prefixed UTF-8 string)
+        let db_bytes = database.as_bytes();
+        stream.write_u32_le(db_bytes.len() as u32).await?;
+        stream.write_all(db_bytes).await?;
+        
+        // Wait for server ACK
+        let mut ack = [0u8; 1];
+        stream.read_exact(&mut ack).await
+            .map_err(|e| anyhow::anyhow!("Failed reading db selection ACK: {}", e))?;
+            
+        Ok(Self { stream })
+    }
+    
+    pub async fn ingest_batch(&mut self, batch: &[BulkRecord]) -> anyhow::Result<()> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        
+        let bytes = serde_json::to_vec(batch)?;
+        self.stream.write_u32_le(bytes.len() as u32).await?;
+        self.stream.write_all(&bytes).await?;
+        
+        // Wait for VardaDB ACK backpressure (1 byte)
+        let mut ack = [0u8; 1];
+        self.stream.read_exact(&mut ack).await
+            .map_err(|e| anyhow::anyhow!("Failed reading backpressure ACK from VardaDB: {}", e))?;
+            
+        Ok(())
+    }
+}
+
 impl Drop for BulkWriter {
     fn drop(&mut self) {
         if !self.committed {

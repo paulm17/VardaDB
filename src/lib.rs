@@ -17,6 +17,7 @@ pub mod vardaclaw_runner;
 pub mod cli;
 pub mod defaults;
 pub mod server;
+pub mod llm;
 
 pub mod repl;
 pub mod observability;
@@ -73,13 +74,16 @@ use tokio::sync::RwLock;
 
 
 #[derive(Clone)]
-struct ServerState {
+pub struct ServerState {
     // Map<db_name, Arc<RwLock<Arc<crate::engine::schema::Schema>>>>
-    schemas: Arc<dashmap::DashMap<String, Arc<RwLock<Arc<crate::engine::schema::Schema>>>>>, 
-    storage: Arc<Storage>,
-    cache: Arc<crate::engine::cache::QueryCache>,
-    event_bus: EventBus,
-    storage_path: std::path::PathBuf,
+    pub schemas: Arc<dashmap::DashMap<String, Arc<RwLock<Arc<crate::engine::schema::Schema>>>>>, 
+    pub storage: Arc<Storage>,
+    pub cache: Arc<crate::engine::cache::QueryCache>,
+    pub event_bus: EventBus,
+    pub storage_path: std::path::PathBuf,
+    pub llm_config: crate::config::LLMConfig,
+    // pub mlx_server: Option<Arc<crate::llm::MlxServer>>, // Removed
+    pub llama_server: Option<Arc<crate::llm::LlamaServer>>,
 }
 
 impl axum::extract::FromRef<ServerState> for crate::server::management::ManagementState {
@@ -101,29 +105,27 @@ impl axum::extract::FromRef<ServerState> for crate::observability::router::ObsSt
     }
 }
 
-pub async fn run(config: crate::config::VardaConfig) {
-    let port = config.server.port;
-    println!("VardaDB Engine v0.1.0 starting on port {}...", port);
+
+/// Initializes the VardaDB system and returns the State and Axum Router.
+/// This allows the caller to inspect state or attach additional services (like the AI Brain)
+/// before starting the HTTP server.
+pub async fn init_system(config: crate::config::VardaConfig) -> (Arc<ServerState>, Router) {
+    let _port = config.server.port;
+    println!("VardaDB Engine v0.1.0 initializing...");
 
     // 1. Initialize Storage
     let storage_path = config.server.storage_path.clone(); 
     let storage = Arc::new(Storage::new(&storage_path, config.server.node_id).expect("Failed to open storage"));
+    storage.register_exit_hook();
 
     println!("Storage initialized at ./{}", storage_path);
 
     // 1.5 Initialize Observability (Metrics + Tracing)
     crate::observability::init(storage.clone());
     
-    // Setup Tracing Subscriber with Storage Backend
-    // let trace_layer = crate::observability::backend::VardaTraceLayer::new(storage.clone());
-    // use tracing_subscriber::prelude::*;
-    // let registry = tracing_subscriber::registry().with(trace_layer);
-    // registry.init(); // This sets the global default. Might panic if called twice (e.g. tests)
-    
     info!("Observability initialized (Metrics + Traces in sorted keyspaces)");
 
     // 2. Load Schema (from config path or default)
-    // If config has schema_path, use it. Else default to storage/current_schema.graphql
     let schema_file_path = config.server.schema_path.clone()
         .unwrap_or_else(|| format!("{}/current_schema.graphql", storage_path));
     
@@ -154,16 +156,34 @@ pub async fn run(config: crate::config::VardaConfig) {
         })
         .expect("Failed to build schema");
 
+    // MlxServer init removed
+    
+    // Initialize Llama Server if Llama Provider
+    let llama_server = if config.llm.provider == "llama" {
+        match crate::llm::LlamaServer::start(config.llm.clone()) {
+            Ok(server) => Some(server),
+            Err(e) => {
+                eprintln!("Failed to start Llama Server: {}", e);
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let schemas = Arc::new(dashmap::DashMap::new());
     schemas.insert("default".to_string(), Arc::new(RwLock::new(Arc::new(initial_schema))));
 
-    let state = ServerState {
+    let state = Arc::new(ServerState {
         schemas: schemas.clone(),
         storage: storage.clone(),
         cache: Arc::new(crate::engine::cache::QueryCache::new(100)), // Bounded LRU: 100 entries
         event_bus: shared_event_bus.clone(),
         storage_path: std::path::PathBuf::from(&config.server.storage_path),
-    };
+        llm_config: config.llm.clone(),
+        // mlx_server: mlx_server, // Removed
+        llama_server: llama_server,
+    }); // Wrapped in Arc
 
     // Start Anti-Gravity (Zenoh) Sync
     let sync_resolver = std::sync::Arc::new(resolver.clone());
@@ -184,15 +204,14 @@ pub async fn run(config: crate::config::VardaConfig) {
          }
     });
 
+    // Graceful Shutdown is now handled natively via `ctrlc::set_handler` 
+    // mapped globally inside `storage.register_exit_hook()` in `src/storage/backend.rs`.
+
     // Start Job Workers
     let worker_count = config.jobs.workers.min(10); // Enforce max 10
     println!("Starting {} Job Workers...", worker_count);
     
-    // Set concurrency limit on queue to match workers (or higher? default 100 is fine)
-    // storage.system_queue.set_concurrency_limit(worker_count * 5); 
-    
     // Register System Heartbeat (Run every 10 seconds)
-    // Expression: sec min hour day_of_month month day_of_week year(opt)
     if let Err(e) = storage.system_queue.register_cron(
         "heartbeat".to_string(), 
         "0/10 * * * * * *".to_string(), 
@@ -202,9 +221,6 @@ pub async fn run(config: crate::config::VardaConfig) {
         eprintln!("Failed to register heartbeat cron: {}", e);
     }
 
-    // Initialize LLM Gateway - MOVED TO VARDACLAW
-    // The native worker is now "dumb" and doesn't need LLM/Skills.
-    
     for i in 0..worker_count {
         let worker = crate::worker::Worker::new(storage.clone(), i);
         tokio::spawn(async move {
@@ -218,6 +234,12 @@ pub async fn run(config: crate::config::VardaConfig) {
         claw_runner.run().await;
     });
 
+    // Start TCP Bulk Ingestion Listener on Port 9003
+    let bulk_ingest_state = state.clone();
+    tokio::spawn(async move {
+        crate::server::bulk_ingest::start_tcp_listener(bulk_ingest_state, 9003).await;
+    });
+
     // 3. Setup Routes
     // Create Management State
     let mgmt_state = crate::server::management::ManagementState {
@@ -227,18 +249,23 @@ pub async fn run(config: crate::config::VardaConfig) {
         storage_path: std::path::PathBuf::from(&config.server.storage_path),
     };
     
-    
     let mgmt_manager = Arc::new(mgmt_state);
     
     // Convert observability router to Router<()> by providing state immediately
+    // crate::observability::router::routes expects ServerState (not Arc<ServerState>), 
+    // but with_state can take the struct. 
+    // We need to dereference the Arc or adjust `routes`?
+    // `with_state` takes `S`. if `routes` is `Router<ServerState>`, we need to pass `ServerState`.
+    // Since `ServerState` derives Clone, `(*state).clone()` works.
     let obs_router = crate::observability::router::routes::<ServerState>()
-        .with_state(state.clone());
+        .with_state((*state).clone()); 
 
     let mgmt_router = management::router(mgmt_manager.clone())
         .merge(management::ui_router())
         .merge(obs_router);
 
     let app = Router::new()
+        .route("/chat", post(crate::llm::chat_handler))
         .route("/graphql", post(graphql_handler).get(subscription_handler))
         .route("/rpc", get(subscription_handler)) // Support Surrealist native connection
         .route("/playground", get(playground_handler))
@@ -248,19 +275,28 @@ pub async fn run(config: crate::config::VardaConfig) {
         .nest_service("/management", mgmt_router)
         .nest_service("/_mgmt", management::router(mgmt_manager.clone()))
         .layer(CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any))
-        .with_state(state.clone());
+        .with_state((*state).clone()); // Pass concrete struct, not Arc, because `with_state` will wrap it.
+
+    (state, app)
+}
+
+/// Runs the VardaDB Server. 
+/// If `is_mcp` is true in config, it runs the MCP stdio server (blocking).
+/// Otherwise it runs the Axum HTTP server.
+pub async fn run(config: crate::config::VardaConfig) {
+    let port = config.server.port;
+    let is_mcp = config.server.is_mcp;
+    
+    let (state, app) = init_system(config).await;
 
     // 4. Run Server
-    if config.server.is_mcp {
+    if is_mcp {
         // Run MCP Server
         // Use default schema for MCP for now
         let mcp_schema = state.schemas.get("default").expect("Default schema missing").value().clone();
         
-        let mcp_resolver = Box::new(FjallResolver::with_bus(storage.clone(), shared_event_bus.clone()));
-        
-        // We can use the concrete resolver we created earlier:
-        // let mcp_resolver = Box::new(resolver.clone()); // FjallResolver implements Clone? Let's assume so or check.
-        // Looking at `src/bridge/fjall_resolver.rs`, it derives Clone.
+        // We need a resolver. We can create a new one since it's cheap (just Arc clones internally)
+        let mcp_resolver = Box::new(FjallResolver::with_bus(state.storage.clone(), state.event_bus.clone()));
         
         let mcp_server = crate::bridge::mcp::MCPServer::new(mcp_schema, mcp_resolver);
         
@@ -279,6 +315,7 @@ pub async fn run(config: crate::config::VardaConfig) {
         axum::serve(listener, app).await.expect("Server error");
     }
 }
+
 
 fn extract_db_name(headers: &axum::http::HeaderMap) -> String {
     let name = headers

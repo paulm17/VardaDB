@@ -318,7 +318,7 @@ impl VectorStore {
 
     // --- Helpers ---
 
-    fn get_vector(&self, id: u128) -> anyhow::Result<Vector> {
+    pub fn get_vector(&self, id: u128) -> anyhow::Result<Vector> {
         let key = Self::vector_key(id, 0); 
         // Logic to handle missing vectors gracefully?
         // For core algo, if it's in the graph, we expect data to be there.

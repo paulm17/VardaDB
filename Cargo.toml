@@ -81,11 +81,12 @@ prism-mcp-rs = { version = "0.1", features = ["stdio"] }
 
 # System
 comfy-table = "7.1"
-reqwest = { version = "0.13.1", features = ["json"] }
+reqwest = { version = "0.13.1", features = ["json", "stream"] }
 dashmap = "6.1.0"
 rustyline = "17.0.2"
 fastembed = "5.9.0"
 tempfile = "3.24.0"
+libc = "0.2.182"
 
 [dev-dependencies]
 

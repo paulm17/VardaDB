@@ -13,3 +13,10 @@ prefix = "varda/ops"
 
 # [remote_append]
 # path = "replication_log.jsonl"
+
+[llm]
+provider = "llama"
+model = "/Volumes/Data/Users/paul/.llama/models/qwen3-4b-instruct.Q4_K_M.gguf"
+draft_model = "/Volumes/Data/Users/paul/.llama/models/qwen3-0.6b-instruct.Q4_K_M.gguf"
+port = 8080
+num_draft_tokens = 5

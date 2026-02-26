@@ -36,7 +36,7 @@ impl VardaClawRunner {
         // 1. Setup VardaClaw Config
         let mut claw_config = ClawConfig::default();
         claw_config.memory.workspace = claw_workspace.to_string_lossy().to_string();
-        claw_config.agent.default_model = self.config.llm.model_default.clone().unwrap_or_else(|| "gpt-3.5-turbo".to_string());
+        claw_config.agent.default_model = self.config.llm.model.clone();
         
         // Inject API Key from VardaDB config if present
         if let Some(key) = &self.config.llm.openai_api_key {

@@ -77,16 +77,22 @@ impl NetworkLayer {
             println!("Element: Zenoh Listener Started (Key: {})", key);
             while let Ok(sample) = subscriber.recv_async().await {
                  let key_str = sample.key_expr().as_str();
-                 println!("Zenoh Listener Raw Key: {}", key_str);
+                 if crate::debug_logging() {
+                     println!("Zenoh Listener Raw Key: {}", key_str);
+                 }
                  if key_str.contains("/sync/") {
                      continue;
                  }
                  let payload = sample.payload().to_bytes();
                  match serde_json::from_slice::<MutationEvent>(&payload) {
                      Ok(event) => {
-                         println!("Zenoh: Received Event (Src: {:?}, Type: {}, UID: {})", event.source, event.type_name, event.uid);
+                         if crate::debug_logging() {
+                             println!("Zenoh: Received Event (Src: {:?}, Type: {}, UID: {})", event.source, event.type_name, event.uid);
+                         }
                          if event.source == crate::realtime::bus::MutationSource::Local {
-                             println!("Zenoh: Ignoring Local Event execution loop.");
+                             if crate::debug_logging() {
+                                 println!("Zenoh: Ignoring Local Event execution loop.");
+                             }
                              return;
                          }
                          callback(event);

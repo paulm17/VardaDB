@@ -70,7 +70,9 @@ impl FjallResolver {
             }
         }
 
-        println!("Sync: apply_batch called with {} items", items.len());
+        if crate::debug_logging() {
+            println!("Sync: apply_batch called with {} items", items.len());
+        }
         
         // Partition items: _type first
         let (type_items, other_items): (Vec<_>, Vec<_>) = items.into_iter().partition(|(k, _)| {
@@ -81,7 +83,9 @@ impl FjallResolver {
              }
         });
 
-        println!("Sync: Partitioned batch: {} type items, {} other items", type_items.len(), other_items.len());
+        if crate::debug_logging() {
+            println!("Sync: Partitioned batch: {} type items, {} other items", type_items.len(), other_items.len());
+        }
 
         // Initialize Event Buffer
         // Map: UID -> (Type, MutationType, Payload, MinTimestamp)
@@ -154,7 +158,9 @@ impl FjallResolver {
                              if let serde_json::Value::String(ref type_name) = json_val {
                                  let type_idx_key = Codec::encode_type_index_key(type_name, uid);
                                  let _res = self.storage.insert(&self.db_name, &type_idx_key, &[]);
-                                 println!("Sync: Insert Type Index Key: {:?}, Result: {:?}", type_idx_key, _res);
+                                 if crate::debug_logging() {
+                                     println!("Sync: Insert Type Index Key: {:?}, Result: {:?}", type_idx_key, _res);
+                                 }
                                  resolved_type_name = type_name.clone();
                              } else {
                                   println!("Sync: ERROR: _type predicate found but value is not a String! Value: {:?}", json_val);
@@ -1063,9 +1069,37 @@ impl FjallResolver {
         true
     }
 
-    pub fn create_node_internal(&self, type_name: &str, uid: u64, fields: std::collections::HashMap<String, serde_json::Value>, uniques: &[String], inverses: &[crate::engine::resolver::InverseInfo], search_fields: &std::collections::HashMap<String, Vec<String>>, source: crate::realtime::bus::MutationSource, timestamp_override: Option<crate::storage::timestamp::Timestamp>) -> Result<(), String> {
+    pub fn create_node_internal(&self, type_name: &str, uid: u64, mut fields: std::collections::HashMap<String, serde_json::Value>, uniques: &[String], inverses: &[crate::engine::resolver::InverseInfo], search_fields: &std::collections::HashMap<String, Vec<String>>, source: crate::realtime::bus::MutationSource, timestamp_override: Option<crate::storage::timestamp::Timestamp>) -> Result<(), String> {
         let fn_start = std::time::Instant::now();
         
+        // Normalize fields: If value is Object with uid/id, flatten to String(uid)
+        for (_, value) in fields.iter_mut() {
+            if let serde_json::Value::Object(map) = value {
+                let uid_val = map.get("uid").or(map.get("id"));
+                if let Some(u) = uid_val {
+                    match u {
+                        serde_json::Value::String(s) => *value = serde_json::Value::String(s.clone()),
+                        serde_json::Value::Number(n) => *value = serde_json::Value::String(n.to_string()),
+                        _ => {}
+                    }
+                }
+            } else if let serde_json::Value::Array(list) = value {
+                // Handle List of Objects
+                for item in list.iter_mut() {
+                    if let serde_json::Value::Object(map) = item {
+                        let uid_val = map.get("uid").or(map.get("id"));
+                        if let Some(u) = uid_val {
+                             match u {
+                                serde_json::Value::String(s) => *item = serde_json::Value::String(s.clone()),
+                                serde_json::Value::Number(n) => *item = serde_json::Value::String(n.to_string()),
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // Generate Timestamp for this Atomic Mutation or use override
         let timestamp = timestamp_override.unwrap_or_else(|| self.storage.next_timestamp());
 
@@ -1133,11 +1167,29 @@ impl FjallResolver {
                   match val {
                       serde_json::Value::String(s) => { if let Ok(id) = s.parse::<u64>() { new_targets.push(id); } }
                       serde_json::Value::Number(n) => { if let Some(id) = n.as_u64() { new_targets.push(id); } }
+                      serde_json::Value::Object(map) => {
+                          if let Some(id_val) = map.get("id") {
+                              match id_val {
+                                  serde_json::Value::String(s) => { if let Ok(id) = s.parse::<u64>() { new_targets.push(id); } }
+                                  serde_json::Value::Number(n) => { if let Some(id) = n.as_u64() { new_targets.push(id); } }
+                                  _ => {}
+                              }
+                          }
+                      }
                       serde_json::Value::Array(items) => {
                           for item in items {
                               match item {
                                     serde_json::Value::String(s) => { if let Ok(id) = s.parse::<u64>() { new_targets.push(id); } }
                                     serde_json::Value::Number(n) => { if let Some(id) = n.as_u64() { new_targets.push(id); } }
+                                    serde_json::Value::Object(map) => {
+                                        if let Some(id_val) = map.get("id") {
+                                            match id_val {
+                                                serde_json::Value::String(s) => { if let Ok(id) = s.parse::<u64>() { new_targets.push(id); } }
+                                                serde_json::Value::Number(n) => { if let Some(id) = n.as_u64() { new_targets.push(id); } }
+                                                _ => {}
+                                            }
+                                        }
+                                    }
                                     _ => {}
                               }
                           }
@@ -1223,7 +1275,35 @@ impl FjallResolver {
         Ok(())
     }
 
-    pub fn update_node_internal(&self, type_name: &str, uid: u64, fields: std::collections::HashMap<String, serde_json::Value>, uniques: &[String], inverses: &[crate::engine::resolver::InverseInfo], search_fields: &std::collections::HashMap<String, Vec<String>>, source: crate::realtime::bus::MutationSource, timestamp_override: Option<crate::storage::timestamp::Timestamp>) -> Result<(), String> {
+    pub fn update_node_internal(&self, type_name: &str, uid: u64, mut fields: std::collections::HashMap<String, serde_json::Value>, uniques: &[String], inverses: &[crate::engine::resolver::InverseInfo], search_fields: &std::collections::HashMap<String, Vec<String>>, source: crate::realtime::bus::MutationSource, timestamp_override: Option<crate::storage::timestamp::Timestamp>) -> Result<(), String> {
+        // Normalize fields: If value is Object with uid/id, flatten to String(uid)
+        for (_, value) in fields.iter_mut() {
+            if let serde_json::Value::Object(map) = value {
+                let uid_val = map.get("uid").or(map.get("id"));
+                if let Some(u) = uid_val {
+                    match u {
+                        serde_json::Value::String(s) => *value = serde_json::Value::String(s.clone()),
+                        serde_json::Value::Number(n) => *value = serde_json::Value::String(n.to_string()),
+                        _ => {}
+                    }
+                }
+            } else if let serde_json::Value::Array(list) = value {
+                // Handle List of Objects
+                for item in list.iter_mut() {
+                    if let serde_json::Value::Object(map) = item {
+                        let uid_val = map.get("uid").or(map.get("id"));
+                        if let Some(u) = uid_val {
+                             match u {
+                                serde_json::Value::String(s) => *item = serde_json::Value::String(s.clone()),
+                                serde_json::Value::Number(n) => *item = serde_json::Value::String(n.to_string()),
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         let timestamp = timestamp_override.unwrap_or_else(|| self.storage.next_timestamp());
          // 0. Remove Old Search Indexes for updated fields
         for (field, _) in &fields {
@@ -1494,7 +1574,6 @@ impl FjallResolver {
     }
 
     pub fn apply_remote_mutation(&self, event: crate::realtime::bus::MutationEvent) -> Result<(), String> {
-         println!("Sync: Applying Remote Mutation: Type={}, UID={}, MutationType={:?}, Source={:?}, Timestamp={:?}", event.type_name, event.uid, event.mutation_type, event.source, event.timestamp);
          let metadata = event.metadata.ok_or("Missing metadata for remote mutation")?;
          let source = crate::realtime::bus::MutationSource::Remote;
          
@@ -1543,6 +1622,15 @@ impl Resolver for FjallResolver {
                              match item {
                                   Value::String(s) => { if let Ok(u) = s.parse::<u64>() { result.push(u); } },
                                   Value::Number(n) => { if let Some(u) = n.as_u64() { result.push(u); } },
+                                  Value::Object(map) => {
+                                      if let Some(uid_val) = map.get("uid").or(map.get("id")) {
+                                          match uid_val {
+                                              Value::String(s) => { if let Ok(u) = s.parse::<u64>() { result.push(u); } },
+                                              Value::Number(n) => { if let Some(u) = n.as_u64() { result.push(u); } },
+                                              _ => {}
+                                          }
+                                      }
+                                  },
                                   _ => {}
                              }
                          }
@@ -1550,6 +1638,15 @@ impl Resolver for FjallResolver {
                      },
                      Value::String(s) => { if let Ok(u) = s.parse::<u64>() { vec![u] } else { vec![] } },
                      Value::Number(n) => { if let Some(u) = n.as_u64() { vec![u] } else { vec![] } },
+                     Value::Object(map) => {
+                         if let Some(uid_val) = map.get("uid").or(map.get("id")) {
+                             match uid_val {
+                                 Value::String(s) => { if let Ok(u) = s.parse::<u64>() { vec![u] } else { vec![] } },
+                                 Value::Number(n) => { if let Some(u) = n.as_u64() { vec![u] } else { vec![] } },
+                                 _ => vec![]
+                             }
+                         } else { vec![] }
+                     },
                      _ => vec![]
                  }
              } else { vec![] }
@@ -1955,7 +2052,9 @@ impl Resolver for FjallResolver {
             use std::ops::Bound;
             if let Some((main_ks, _)) = self.storage.get_database(&self.db_name) {
                  let iter = main_ks.range((Bound::Included(start_key.clone()), Bound::Unbounded));
-                 println!("Scan: Starting Full Scan for type: {}. Prefix/StartKey: {:?}", type_name, start_key);
+                 if crate::debug_logging() {
+                     println!("Scan: Starting Full Scan for type: {}. Prefix/StartKey: {:?}", type_name, start_key);
+                 }
                  for guard in iter {
                     if let Ok(key) = guard.key() {
                         // scanned_count += 1;
@@ -1981,7 +2080,9 @@ impl Resolver for FjallResolver {
                         }
                     }
                  }
-                 println!("Scan: Completed. Found {} uids", uids.len());
+                 if crate::debug_logging() {
+                     println!("Scan: Completed. Found {} uids", uids.len());
+                 }
             }
         }
 

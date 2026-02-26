@@ -5,8 +5,8 @@ async fn test_full_schema_inverses() {
     use std::fs;
     use std::path::PathBuf;
 
-    let schema_path = PathBuf::from("/Volumes/Data/Users/paul/development/src/github/archon/packages/graphql/schema.graphql");
-    let sdl = fs::read_to_string(schema_path).expect("Failed to read schema file");
+    let schema_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/test_schema.graphql");
+    let sdl = fs::read_to_string(&schema_path).unwrap_or_else(|e| panic!("Failed to read schema file at {:?}: {}", schema_path, e));
 
     let _schema = Schema::load_from_sdl(&sdl).expect("Failed to parse schema");
 
