@@ -60,15 +60,17 @@ impl SyncManager {
         self.resolver.storage.wait_for_fingerprints();
         println!("SyncManager: Fingerprints ready, starting sync!");
         
+        let node_id = self.resolver.storage.node_id;
+        
         // 1. Outbound Bridge
         let bus = self.resolver.subscribe_events(); 
         let receiver = bus.subscribe(); 
-        self.network.start_bridge(receiver, self.prefix.clone()).await;
+        self.network.start_bridge(node_id, receiver, self.prefix.clone()).await;
         
         // 2. Inbound Listener
         let resolver = self.resolver.clone();
         let cache_listener = self.cache.clone();
-        self.network.start_listener(self.prefix.clone(), move |event| {
+        self.network.start_listener(node_id, self.prefix.clone(), move |event| {
              if let Err(e) = resolver.apply_remote_mutation(event) {
                  eprintln!("Failed to apply remote mutation: {}", e);
              } else {

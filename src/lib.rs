@@ -240,6 +240,12 @@ pub async fn init_system(config: crate::config::VardaConfig) -> (Arc<ServerState
         crate::server::bulk_ingest::start_tcp_listener(bulk_ingest_state, 9003).await;
     });
 
+    // Start R2 Sync Worker for Cloudflare Backup
+    let r2_worker = crate::storage::blob::r2_sync::R2SyncWorker::new(&config, state.clone()).await;
+    tokio::spawn(async move {
+        r2_worker.start().await;
+    });
+
     // 3. Setup Routes
     // Create Management State
     let mgmt_state = crate::server::management::ManagementState {
@@ -252,13 +258,13 @@ pub async fn init_system(config: crate::config::VardaConfig) -> (Arc<ServerState
     let mgmt_manager = Arc::new(mgmt_state);
     
     // Convert observability router to Router<()> by providing state immediately
-    // crate::observability::router::routes expects ServerState (not Arc<ServerState>), 
-    // but with_state can take the struct. 
-    // We need to dereference the Arc or adjust `routes`?
-    // `with_state` takes `S`. if `routes` is `Router<ServerState>`, we need to pass `ServerState`.
-    // Since `ServerState` derives Clone, `(*state).clone()` works.
     let obs_router = crate::observability::router::routes::<ServerState>()
         .with_state((*state).clone()); 
+        
+    // Initialize Blob Storage State
+    let blob_state = Arc::new(crate::storage::blob::routes::BlobState::new(&config, state.clone())
+        .await
+        .expect("Failed to initialize Blob Storage"));
 
     let mgmt_router = management::router(mgmt_manager.clone())
         .merge(management::ui_router())
@@ -271,11 +277,12 @@ pub async fn init_system(config: crate::config::VardaConfig) -> (Arc<ServerState
         .route("/playground", get(playground_handler))
         .route("/version", get(version_handler))
         .route("/admin/schema", post(admin_schema_handler))
-
         .nest_service("/management", mgmt_router)
         .nest_service("/_mgmt", management::router(mgmt_manager.clone()))
+        // Integrate Blob Storage / TUS Router
+        .nest_service("/files", crate::storage::blob::routes::router(blob_state))
         .layer(CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any))
-        .with_state((*state).clone()); // Pass concrete struct, not Arc, because `with_state` will wrap it.
+        .with_state((*state).clone()); 
 
     (state, app)
 }

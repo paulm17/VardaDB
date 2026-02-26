@@ -32,6 +32,8 @@ pub struct MutationEvent {
     pub payload: Option<std::collections::HashMap<String, serde_json::Value>>,
     pub metadata: Option<SchemaMetadata>,
     pub timestamp: Option<crate::storage::timestamp::Timestamp>,
+    #[serde(default)]
+    pub node_id: u64,
 }
 
 #[derive(Clone)]

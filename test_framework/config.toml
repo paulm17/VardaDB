@@ -1,0 +1,6 @@
+# VardaDB Test Framework Configuration
+
+[blob_tests]
+# Path to the directory containing images for upload testing
+# This avoids relying on Cargo's env!("CARGO_MANIFEST_DIR") which breaks outside of standard cargo runs
+images_dir = "./images"

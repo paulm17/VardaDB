@@ -142,6 +142,7 @@ impl FjallResolver {
                              payload,
                              metadata: None,
                              timestamp: Some(ts),
+                             node_id: self.storage.node_id,
                          };
                          let _ = self.bus.publish(event);
                      }
@@ -217,6 +218,7 @@ impl FjallResolver {
             payload: Some(payload),
             metadata: None,
             timestamp: Some(timestamp),
+            node_id: self.storage.node_id,
         };
         let _ = self.bus.publish(event);
     }
@@ -1270,6 +1272,7 @@ impl FjallResolver {
                 search_fields: search_fields.clone(),
             }),
             timestamp: Some(timestamp),
+            node_id: self.storage.node_id,
         });
 
         Ok(())
@@ -1464,6 +1467,7 @@ impl FjallResolver {
                 search_fields: search_fields.clone(),
             }),
             timestamp: Some(timestamp),
+            node_id: self.storage.node_id,
         });
         Ok(())
     }
@@ -1569,6 +1573,7 @@ impl FjallResolver {
                 search_fields: search_fields.clone(),
             }),
             timestamp: Some(timestamp),
+            node_id: self.storage.node_id,
         });
         Ok(())
     }

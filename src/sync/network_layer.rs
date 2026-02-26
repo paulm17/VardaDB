@@ -37,7 +37,7 @@ impl NetworkLayer {
         Ok(())
     }
 
-    pub async fn start_bridge(&self, mut receiver: tokio::sync::broadcast::Receiver<MutationEvent>, prefix: String) {
+    pub async fn start_bridge(&self, node_id: u64, mut receiver: tokio::sync::broadcast::Receiver<MutationEvent>, prefix: String) {
         let session = self.session.clone();
         tokio::spawn(async move {
             println!("Element: Zenoh Bridge Started (Prefix: {})", prefix);
@@ -52,6 +52,7 @@ impl NetworkLayer {
                 // 1. Peers see it as Remote (and process it)
                 // 2. We see it as Remote (and ignore it due to dedicated logic in listener)
                 event.source = MutationSource::Remote;
+                event.node_id = node_id;
                 
                 let key = format!("{}/{}/{}", prefix, event.type_name, event.uid);
                 
@@ -67,7 +68,7 @@ impl NetworkLayer {
         });
     }
     
-    pub async fn start_listener<F>(&self, prefix: String, callback: F) -> Result<()> 
+    pub async fn start_listener<F>(&self, node_id: u64, prefix: String, callback: F) -> Result<()> 
     where F: Fn(MutationEvent) + Send + Sync + 'static 
     {
         let key = format!("{}/**", prefix);
@@ -87,13 +88,19 @@ impl NetworkLayer {
                  match serde_json::from_slice::<MutationEvent>(&payload) {
                      Ok(event) => {
                          if crate::debug_logging() {
-                             println!("Zenoh: Received Event (Src: {:?}, Type: {}, UID: {})", event.source, event.type_name, event.uid);
+                             println!("Zenoh: Received Event (Src: {:?}, Type: {}, UID: {}, NodeId: {})", event.source, event.type_name, event.uid, event.node_id);
+                         }
+                         if event.node_id == node_id {
+                             if crate::debug_logging() {
+                                 println!("Zenoh: Ignoring self-published event.");
+                             }
+                             continue;
                          }
                          if event.source == crate::realtime::bus::MutationSource::Local {
                              if crate::debug_logging() {
                                  println!("Zenoh: Ignoring Local Event execution loop.");
                              }
-                             return;
+                             continue;
                          }
                          callback(event);
                      },

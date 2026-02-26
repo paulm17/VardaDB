@@ -78,6 +78,35 @@ impl Schema {
                 distance: Float!
                 coordinate: PointInput!
             }
+
+            type FileRef {
+                id: ID! @unique
+                storageKey: String! @search(by: [exact])
+                fileName: String!
+                mimeType: String!
+                size: Int64!
+                contentHash: String @search(by: [exact])
+                status: String! @search(by: [exact]) # 'STAGED', 'COMMITTED', 'ARCHIVED'
+                createdAt: DateTime!
+                metadata: String # JSON string
+            }
+
+            type IncompleteUpload {
+                id: ID! @unique
+                tusId: String! @unique
+                offset: Int64!
+                length: Int64
+                createdAt: DateTime!
+                updatedAt: DateTime!
+            }
+
+            type UploadQueueEntry {
+                id: ID! @unique
+                fileRefId: String! @search(by: [exact])
+                status: String! @search(by: [exact]) # 'PENDING', 'UPLOADING', 'COMPLETED', 'FAILED'
+                retryCount: Int
+                nextRetryAt: DateTime
+            }
         ";
         let full_sdl = format!("{}\n{}", system_sdl, sdl);
         let doc = async_graphql_parser::parse_schema(&full_sdl).map_err(|e| e.to_string())?;

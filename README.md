@@ -199,6 +199,45 @@ vardadb(sales)> { queryUser { name } }
 
 ---
 
+## 📁 File Storage (Blob Vault)
+
+VardaDB includes a built-in content-addressable storage (CAS) layer with support for the [TUS Resumable Upload](https://tus.io/) protocol.
+
+### 1. Uploading Files
+
+The file storage endpoint is available at `http://localhost:9000/files`.
+
+#### Small Files (Single Request)
+Front-end developers can use a single TUS creation-with-upload request or a standard sequence:
+1.  **Initiate**: `POST /files` with `Upload-Length` and optional `Upload-Metadata` (e.g., `filename <base64>`).
+2.  **Upload**: `PATCH /files/<id>` (using the ID from the `Location` header) with the file bytes.
+3.  **Response**: On completion, the server returns a `204 No Content` with a `Varda-File-Url` header pointing to the permanent hash-based URL (e.g., `/files/hash/<blake3_hash>`).
+
+#### Large Files (Resumable)
+VardaDB supports chunked, resumable uploads via TUS:
+1.  **Create**: `POST /files` returns a unique `Location` header (e.g., `/files/upload-123`).
+2.  **Upload Chunks**: Send multiple `PATCH /files/<id>` requests with the appropriate `Upload-Offset` header.
+3.  **Resume**: If interrupted, `HEAD /files/<id>` returns the current `Upload-Offset` for resumption.
+4.  **Finalization**: Once the upload is complete, VardaDB moves the file to CAS storage and automatically creates a `FileRef` node in the Knowledge Graph for metadata tracking.
+
+### 2. Retrieval
+
+Files are served via their content hash (BLAKE3):
+*   **URL**: `GET /files/hash/<content_hash>`
+*   **Metadata**: Query the graph for `FileRef` objects to retrieve file details:
+    ```graphql
+    query {
+      queryFileRef {
+        fileName
+        contentHash
+        size
+        status
+      }
+    }
+    ```
+
+---
+
 ## 🔄 Replication Testing & Sync
 VardaDB supports peer-to-peer replication via **Zenoh**. To test this, you run two instances of VardaDB (e.g., in separate directories or on different machines).
 

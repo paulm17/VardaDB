@@ -33,11 +33,31 @@ mod stress_composer;
 mod benchmarks;
 mod multi_node;
 mod sync_tests;
+mod blob_tests;
 
 use clap::Parser;
 use colored::*;
 use std::time::Duration;
 use chrono::Local;
+
+#[derive(serde::Deserialize, Debug, Default, Clone)]
+pub struct TestConfig {
+    #[serde(default)]
+    pub blob_tests: BlobTestConfig,
+}
+
+#[derive(serde::Deserialize, Debug, Clone)]
+pub struct BlobTestConfig {
+    pub images_dir: String,
+}
+
+impl Default for BlobTestConfig {
+    fn default() -> Self {
+        Self {
+            images_dir: "./images".to_string(),
+        }
+    }
+}
 
 /// VardaDB Test Framework CLI
 #[derive(Parser, Debug)]
@@ -282,6 +302,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if category == "all" || category == "sync" || category == "zenoh" {
         println!("{}", "▶ Running Multi-Node Sync Tests (Zenoh)...".cyan());
         sync_tests::run_sync_tests(&mut runner).await;
+    }
+
+    if category == "all" || category == "blob" {
+        println!("{}", "▶ Running Blob Storage Integration Tests...".cyan());
+        
+        let config_str = std::fs::read_to_string("config.toml").unwrap_or_else(|_| "".to_string());
+        let test_config: TestConfig = toml::from_str(&config_str).unwrap_or_default();
+        
+        blob_tests::run_blob_tests(&mut runner, test_config, seed).await;
     }
 
     runner.print_summary();

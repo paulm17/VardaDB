@@ -14,6 +14,17 @@ pub struct VardaConfig {
     pub llm: LLMConfig,
     #[serde(default)]
     pub vardaclaw: VardaClawConfig,
+    #[serde(default)]
+    pub r2: R2Config,
+}
+
+#[derive(Deserialize, Debug, Clone, Default)]
+pub struct R2Config {
+    pub access_key: Option<String>,
+    pub secret_key: Option<String>,
+    pub endpoint_url: Option<String>,
+    pub region: Option<String>,
+    pub bucket: Option<String>,
 }
 
 #[derive(Deserialize, Debug, Clone, Default)]
@@ -70,6 +81,7 @@ pub struct ServerConfig {
     pub node_id: Option<u64>,
     #[serde(default)]
     pub is_mcp: bool,
+    pub blobs_path: Option<String>,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -124,6 +136,7 @@ impl Default for VardaConfig {
             jobs: JobsConfig::default(),
             llm: LLMConfig::default(),
             vardaclaw: VardaClawConfig::default(),
+            r2: R2Config::default(),
         }
     }
 }
@@ -136,6 +149,7 @@ impl Default for ServerConfig {
             schema_path: None,
             node_id: None,
             is_mcp: false,
+            blobs_path: None,
         }
     }
 }

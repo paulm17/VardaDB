@@ -3,3 +3,4 @@ pub mod codec;
 pub mod txn;
 pub mod timestamp;
 pub mod vector;
+pub mod blob;
