@@ -8,7 +8,7 @@ members = [
     "jobs", "management",
     "vardaclaw",
     "test_framework",
-    "auth",
+    "auth", "permissions",
 ]
 
 [features]
@@ -103,6 +103,7 @@ base64 = "0.22.1"
 blake3 = "1.8.3"
 tokio-util = "0.7.18"
 bytes = "1.11.1"
+permissions = { version = "0.1.0", path = "permissions" }
 
 [dev-dependencies]
 

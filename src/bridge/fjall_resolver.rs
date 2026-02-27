@@ -1613,6 +1613,44 @@ impl FjallResolver {
 }
 
 impl Resolver for FjallResolver {
+    fn bulk_check_permission(&self, ctx: &async_graphql::dynamic::ResolverContext<'_>, checks: Vec<(String, String, String)>) -> async_graphql::Result<Vec<(String, String, String, bool)>> {
+        // Extract authenticated user from GraphQL context (injected by auth middleware)
+        let subject = if let Ok(auth) = ctx.data::<auth::middleware::JWTAuthMiddleware>() {
+            permissions::storage::tuple::Subject {
+                entity: "user".to_string(),
+                id: auth.user.id.clone(),
+            }
+        } else {
+            // Unauthenticated — will be denied by default
+            permissions::storage::tuple::Subject {
+                entity: "anonymous".to_string(),
+                id: "anonymous".to_string(),
+            }
+        };
+
+        let eval_context = permissions::engine::context::Context::new();
+        let schema_registry = permissions::schema::registry::SchemaRegistry::new();
+
+        let check_refs: Vec<(&str, &str, &str)> = checks.iter()
+            .map(|(et, eid, p)| (et.as_str(), eid.as_str(), p.as_str()))
+            .collect();
+
+        let results = permissions::engine::check::bulk_check(
+            &self.storage.auth_store,
+            &schema_registry,
+            "default",
+            check_refs,
+            &subject,
+            &eval_context,
+        );
+
+        let final_results = checks.into_iter().zip(results).map(|((et, eid, p), res)| {
+            (et, eid, p, res == permissions::engine::check::CheckResult::Allow)
+        }).collect();
+
+        Ok(final_results)
+    }
+
     fn resolve_list(&self, parent_uid: u64, field_name: &str, filter: std::collections::HashMap<String, Value>, sort: std::collections::HashMap<String, Value>, first: Option<usize>, after: Option<String>, near_vector: Option<Vec<f64>>) -> Result<Vec<u64>, String> {
         // 1. Resolve the List Field from Storage
         // First check the legacy data key (for directly-assigned lists)

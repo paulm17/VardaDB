@@ -16,7 +16,7 @@ Designed for local-first applications, edge computing, and high-throughput local
 *   **Full-Text Search**: Built-in term indexing and search capabilities.
 *   **LSM-Tree Storage**: Built on **Fjall** (RocksDB-like) for high write throughput and reliability.
 *   **Query Caching**: Integrated LRU cache for high-speed read comparisons.
-*   **Secure Authentication**: Standalone crate for ReBAC, PASETO tokens, and durable email delivery.
+*   **Secure Auth Stack**: Integrated PASETO identity service and **Zanzibar-style ReBAC** authorization engine.
 
 ---
 
@@ -223,6 +223,51 @@ All identity data, including user records, session tokens, and confirmation flow
 
 ---
 
+## 🛡️ Authorization (VardaAuth)
+
+VardaDB features a sophisticated authorization engine (`permissions/`) based on **Google Zanzibar**. It provides Relationship-Based Access Control (ReBAC) that scales to millions of users and billions of relationships.
+
+### 1. Zanzibar-Style ReBAC
+Instead of basic role-based gates, VardaDB uses relationship tuples (e.g., `user:bob is viewer of document:123`) and a recursive evaluation engine to determine access. This allows for complex inheritance (e.g., "if you can edit the folder, you can view the file").
+
+### 2. Permify-Style Schema DSL
+Define your authorization model using a clean, human-readable DSL.
+```text
+entity user {}
+
+entity document {
+    relation viewer @user
+    relation editor @user
+    
+    permission view = viewer or editor
+    permission edit = editor
+}
+```
+
+### 3. Unified GraphQL Check
+Check permissions in bulk directly through the GraphQL API. This enables a seamless, secure flow where the frontend validates both authentication and multi-resource authorization in a single round-trip.
+
+```graphql
+query {
+  bulkCheckPermission(checks: [
+    { entityType: "document", entityId: "doc_1", permission: "view" },
+    { entityType: "folder", entityId: "shared_folder", permission: "edit" }
+  ]) {
+    entityType
+    entityId
+    permission
+    allowed
+  }
+}
+```
+
+### 4. High-Performance Evaluation
+*   **Recursive Evaluation**: Handles complex nested relationships and userset rewrites with cycle detection.
+*   **Attribute Support**: Dynamic rules using entity attributes (e.g., `status == 'published'`).
+*   **Fjall Backend**: Authorization tuples and attributes are stored in high-performance LSM-tree partitions (`auth_tuples`, `auth_attributes`).
+
+---
+
 ## 📁 File Storage (Blob Vault)
 
 VardaDB includes a built-in content-addressable storage (CAS) layer with support for the [TUS Resumable Upload](https://tus.io/) protocol.
@@ -354,6 +399,7 @@ cargo run -- start
 *   `src/storage`: Backend storage interfaces (Fjall, LWW Logic).
 *   `src/bridge`: Connectors (FjallResolver) and LWW application.
 *   `src/sync`: Zenoh-based replication and schema synchronization.
-*   `auth/`: Standalone authentication crate (Middleware, Handlers, Email Jobs).
+*   `auth/`: Standalone identity and authentication crate.
+*   `permissions/`: Zanzibar-style ReBAC authorization engine.
 *   `examples`: Demo code (`embedded_demo.rs`).
 *   `tests`: Integration tests (`scalar_test.rs`).

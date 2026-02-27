@@ -1309,7 +1309,92 @@ impl Schema {
         .argument(dynamic::InputValue::new("text", dynamic::TypeRef::named_nn(dynamic::TypeRef::STRING)))
         .argument(dynamic::InputValue::new("field", dynamic::TypeRef::named_nn(dynamic::TypeRef::STRING)))
         .argument(dynamic::InputValue::new("k", dynamic::TypeRef::named(dynamic::TypeRef::INT))));
-        
+        // Define AuthZ types
+        let check_permission_input = dynamic::InputObject::new("CheckPermissionInput")
+            .field(dynamic::InputValue::new("entityType", dynamic::TypeRef::named_nn(dynamic::TypeRef::STRING)))
+            .field(dynamic::InputValue::new("entityId", dynamic::TypeRef::named_nn(dynamic::TypeRef::STRING)))
+            .field(dynamic::InputValue::new("permission", dynamic::TypeRef::named_nn(dynamic::TypeRef::STRING)));
+            
+        let check_permission_result = dynamic::Object::new("CheckPermissionResult")
+            .field(dynamic::Field::new("entityType", dynamic::TypeRef::named_nn(dynamic::TypeRef::STRING), |ctx| {
+                dynamic::FieldFuture::new(async move {
+                    let val = ctx.parent_value.try_downcast_ref::<async_graphql::Value>()?;
+                    if let async_graphql::Value::Object(map) = val {
+                        if let Some(v) = map.get("entityType") {
+                            return Ok(Some(dynamic::FieldValue::value(v.clone())));
+                        }
+                    }
+                    Ok(None)
+                })
+            }))
+            .field(dynamic::Field::new("entityId", dynamic::TypeRef::named_nn(dynamic::TypeRef::STRING), |ctx| {
+                dynamic::FieldFuture::new(async move {
+                    let val = ctx.parent_value.try_downcast_ref::<async_graphql::Value>()?;
+                    if let async_graphql::Value::Object(map) = val {
+                        if let Some(v) = map.get("entityId") {
+                            return Ok(Some(dynamic::FieldValue::value(v.clone())));
+                        }
+                    }
+                    Ok(None)
+                })
+            }))
+            .field(dynamic::Field::new("permission", dynamic::TypeRef::named_nn(dynamic::TypeRef::STRING), |ctx| {
+                dynamic::FieldFuture::new(async move {
+                    let val = ctx.parent_value.try_downcast_ref::<async_graphql::Value>()?;
+                    if let async_graphql::Value::Object(map) = val {
+                        if let Some(v) = map.get("permission") {
+                            return Ok(Some(dynamic::FieldValue::value(v.clone())));
+                        }
+                    }
+                    Ok(None)
+                })
+            }))
+            .field(dynamic::Field::new("allowed", dynamic::TypeRef::named_nn(dynamic::TypeRef::BOOLEAN), |ctx| {
+                dynamic::FieldFuture::new(async move {
+                    let val = ctx.parent_value.try_downcast_ref::<async_graphql::Value>()?;
+                    if let async_graphql::Value::Object(map) = val {
+                        if let Some(v) = map.get("allowed") {
+                            return Ok(Some(dynamic::FieldValue::value(v.clone())));
+                        }
+                    }
+                    Ok(None)
+                })
+            }));
+
+        query_root = query_root.field(dynamic::Field::new("bulkCheckPermission", dynamic::TypeRef::named_nn_list("CheckPermissionResult"), |ctx| {
+            dynamic::FieldFuture::new(async move {
+                use crate::engine::resolver::Resolver;
+                let resolver = ctx.data::<Box<dyn Resolver + Send + Sync>>().unwrap();
+                
+                let checks_arg = ctx.args.try_get("checks")?;
+                let mut checks = Vec::new();
+                if let Ok(list) = checks_arg.list() {
+                    for item in list.iter() {
+                        if let Ok(obj) = item.object() {
+                            let entity_type = obj.get("entityType").and_then(|v| v.string().ok()).unwrap_or("").to_string();
+                            let entity_id = obj.get("entityId").and_then(|v| v.string().ok()).unwrap_or("").to_string();
+                            let permission = obj.get("permission").and_then(|v| v.string().ok()).unwrap_or("").to_string();
+                            checks.push((entity_type, entity_id, permission));
+                        }
+                    }
+                }
+                
+                let results = resolver.bulk_check_permission(&ctx, checks)?;
+                
+                let mut list = Vec::new();
+                for res in results {
+                    let mut map = async_graphql::indexmap::IndexMap::new();
+                    map.insert(async_graphql::Name::new("entityType"), async_graphql::Value::String(res.0));
+                    map.insert(async_graphql::Name::new("entityId"), async_graphql::Value::String(res.1));
+                    map.insert(async_graphql::Name::new("permission"), async_graphql::Value::String(res.2));
+                    map.insert(async_graphql::Name::new("allowed"), async_graphql::Value::Boolean(res.3));
+                    list.push(dynamic::FieldValue::owned_any(async_graphql::Value::Object(map)));
+                }
+                
+                Ok(Some(dynamic::FieldValue::list(list)))
+            })
+        }).argument(dynamic::InputValue::new("checks", dynamic::TypeRef::named_nn_list("CheckPermissionInput"))));
+
         let mut mutation_root = dynamic::Object::new("Mutation");
         for field in mutation_fields { mutation_root = mutation_root.field(field); }
 
@@ -1323,6 +1408,8 @@ impl Schema {
         schema_builder = schema_builder.register(mutation_type_enum);
         schema_builder = schema_builder.register(mutation_event_obj);
         schema_builder = schema_builder.register(search_result_obj);
+        schema_builder = schema_builder.register(check_permission_input);
+        schema_builder = schema_builder.register(check_permission_result);
 
         types.push(dynamic::Type::Scalar(dynamic::Scalar::new("Int64")));
         types.push(dynamic::Type::Scalar(dynamic::Scalar::new("DateTime")));

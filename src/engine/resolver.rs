@@ -55,4 +55,7 @@ pub trait Resolver {
     fn flush(&self) -> Result<(), String>;
     fn compact(&self) -> Result<u64, String>;  // Returns duration_ms
     fn needs_compaction(&self) -> bool;
+
+    // Authorization
+    fn bulk_check_permission(&self, ctx: &async_graphql::dynamic::ResolverContext<'_>, checks: Vec<(String, String, String)>) -> async_graphql::Result<Vec<(String, String, String, bool)>>;
 }

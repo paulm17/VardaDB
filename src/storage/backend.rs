@@ -6,6 +6,7 @@ use jobs::{JobStore, Queue};
 use std::sync::{Arc, Mutex, Weak};
 use fastembed::{TextEmbedding, InitOptions, EmbeddingModel};
 use tracing::{info, error};
+use permissions::storage::auth_store::AuthStore;
 
 // Global registry for flushing
 static ACTIVE_STORAGES: std::sync::OnceLock<Mutex<Vec<Weak<Storage>>>> = std::sync::OnceLock::new();
@@ -45,6 +46,8 @@ pub struct Storage {
     pub traces_keyspace: Keyspace,      // TRACES: Trace spans
     pub vector_store: crate::storage::vector::store::VectorStore, // VECTORS (Global for now, or need multi-vector store)
     
+    pub auth_store: AuthStore,          // AUTH: Authorization tuples and attributes
+    
     pub jobs_store: Arc<JobStore>,      // JOB STORE (Global)
     pub system_queue: Arc<Queue>,       // DEFAULT QUEUE (Global)
     pub node_id: u64,
@@ -82,6 +85,11 @@ impl Storage {
             vectors_keyspace, 
             crate::storage::vector::config::HNSWConfig::default()
         );
+
+        // AuthZ Store
+        let auth_tuples_keyspace = db.keyspace("auth_tuples", || KeyspaceCreateOptions::default())?;
+        let auth_attributes_keyspace = db.keyspace("auth_attributes", || KeyspaceCreateOptions::default())?;
+        let auth_store = AuthStore::new(auth_tuples_keyspace, auth_attributes_keyspace);
 
         // Vector Worker (Bounded Channel)
         let (tx, rx) = std::sync::mpsc::sync_channel::<(u64, Vec<f64>)>(5000);
@@ -188,6 +196,7 @@ impl Storage {
             metrics_keyspace,
             traces_keyspace,
             vector_store,
+            auth_store,
             jobs_store,
             system_queue,
             node_id,

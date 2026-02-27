@@ -7,5 +7,6 @@
 /client/rust/target
 /client/typescript/dist
 /client/typescript/node_modules
+/varda_blobs
 /varda_db_data
 /db_data
