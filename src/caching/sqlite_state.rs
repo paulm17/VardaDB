@@ -1,12 +1,12 @@
 use std::sync::Arc;
 use crate::storage::backend::Storage;
 
-pub struct FjallState {
+pub struct SqliteState {
     storage: Arc<Storage>,
     view_name: String,
 }
 
-impl FjallState {
+impl SqliteState {
     pub fn new(storage: Arc<Storage>, view_name: &str) -> Self {
         Self {
             storage,

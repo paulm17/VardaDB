@@ -174,9 +174,19 @@ pub async fn init_system(config: crate::config::VardaConfig) -> (Arc<ServerState
     // Initialize Auth Subsystem
     let auth_state = if let Some(auth_config) = config.auth.clone() {
         println!("Auth subsystem enabled");
-        let email_queue = Some(Arc::new(jobs::Queue::new("auth_email".to_string(), storage.jobs_store.clone())));
+        let email_queue: Option<std::sync::Arc<dyn jobs::JobEnqueuer>> = Some(Arc::new(jobs::Queue::new("auth_email".to_string(), storage.jobs_store.clone())));
         
-        match auth::state::AuthState::new(auth_config, &storage.db, email_queue.clone()) {
+        // Build auth store from pre-created SqliteTables
+        let auth_login_store = auth::state::AuthStore::new(
+            std::sync::Arc::new(crate::storage::sqlite_backend::SqliteTable::new("auth_users".to_string(), storage.backend.clone())) as std::sync::Arc<dyn jobs::KvStore>,
+            std::sync::Arc::new(crate::storage::sqlite_backend::SqliteTable::new("auth_tokens".to_string(), storage.backend.clone())) as std::sync::Arc<dyn jobs::KvStore>,
+            std::sync::Arc::new(crate::storage::sqlite_backend::SqliteTable::new("auth_confirmations".to_string(), storage.backend.clone())) as std::sync::Arc<dyn jobs::KvStore>,
+            std::sync::Arc::new(crate::storage::sqlite_backend::SqliteTable::new("auth_identities".to_string(), storage.backend.clone())) as std::sync::Arc<dyn jobs::KvStore>,
+            std::sync::Arc::new(crate::storage::sqlite_backend::SqliteTable::new("auth_social_state".to_string(), storage.backend.clone())) as std::sync::Arc<dyn jobs::KvStore>,
+            std::sync::Arc::new(crate::storage::sqlite_backend::SqliteTable::new("auth_keys".to_string(), storage.backend.clone())) as std::sync::Arc<dyn jobs::KvStore>,
+        );
+        
+        match auth::state::AuthState::new(auth_config, auth_login_store, email_queue.clone()) {
             Ok(state) => {
                 let arc_state = Arc::new(state);
                 

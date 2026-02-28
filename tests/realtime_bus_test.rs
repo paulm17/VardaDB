@@ -14,6 +14,7 @@ async fn test_bus_publish_subscribe() {
         payload: None,
         metadata: None,
         timestamp: None,
+        node_id: 0,
     };
 
     bus.publish(event.clone());

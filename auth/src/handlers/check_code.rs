@@ -15,7 +15,7 @@ pub async fn check_code_handler(
     let code = body.code.trim();
     let confirmation_key = format!("confirm:{}", code);
 
-    let confirmation_bytes = auth_state.store.confirmations.get(confirmation_key.as_bytes())
+    let confirmation_bytes = auth_state.store.confirmations.kv_get(confirmation_key.as_bytes())
         .map_err(|e| {
              tracing::error!("Auth store error: {:?}", e);
              (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "status": "fail", "message": "Internal error" })))

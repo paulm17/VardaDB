@@ -28,13 +28,11 @@ pub async fn register_user_handler(
     // Let's create `auth_users_by_email` dynamically on first use or scan.
     // Scanning is fine for MVP port since VardaDB is fast.
     let mut exists = false;
-    for kv in auth_state.store.users.iter() {
-        if let Ok((_k, v)) = kv.into_inner() {
+    for (_k, v) in auth_state.store.users.kv_prefix(b"") {
             if let Ok(user) = serde_json::from_slice::<UserRecord>(&v) {
                 if user.email == email {
                     exists = true;
                     break;
-                }
             } else if let Ok(user) = bincode::deserialize::<UserRecord>(&v) {
                 if user.email == email {
                     exists = true;
@@ -85,7 +83,7 @@ pub async fn register_user_handler(
         })))
     })?;
 
-    if let Err(e) = auth_state.store.users.insert(user_key.as_bytes(), &serialized_user) {
+    if let Err(e) = auth_state.store.users.kv_insert(user_key.as_bytes(), &serialized_user) {
         tracing::error!("Failed to insert user into store: {}", e);
         return Err((StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
             "status": "fail",

@@ -3,16 +3,18 @@
 mod tests {
     use super::super::store::*;
     use super::super::config::*;
-    use fjall::{Database, KeyspaceCreateOptions};
+    use crate::storage::sqlite_backend::{SqliteBackend, SqliteTable};
+    use std::sync::Arc;
 
     #[test]
     fn test_vector_insert_and_search() -> anyhow::Result<()> {
         let path = tempfile::tempdir()?;
-        let db = Database::builder(path.path()).open()?;
-        let keyspace = db.keyspace("vectors", || KeyspaceCreateOptions::default())?;
+        let backend = Arc::new(SqliteBackend::new(path.path())?);
+        backend.create_table("vectors")?;
+        let table = SqliteTable::new("vectors".to_string(), backend);
         
         let config = HNSWConfig::new(Some(5), Some(16), Some(16), None);
-        let store = VectorStore::new(keyspace, config);
+        let store = VectorStore::new(table, config);
 
         // 1. Insert 3 vectors
         // A: [1.0, 0.0]

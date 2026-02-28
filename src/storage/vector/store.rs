@@ -1,6 +1,6 @@
 use crate::storage::vector::config::{HNSWConfig, DistanceMetric};
 use crate::storage::vector::types::Vector;
-use fjall::Keyspace;
+use crate::storage::sqlite_backend::SqliteTable;
 use rand::Rng;
 use std::collections::{BinaryHeap, HashSet};
 use std::cmp::Ordering;
@@ -62,12 +62,12 @@ impl PartialOrd for VisitorCandidate {
 
 #[derive(Clone)]
 pub struct VectorStore {
-    partition: Keyspace,
+    partition: SqliteTable,
     config: HNSWConfig,
 }
 
 impl VectorStore {
-    pub fn new(partition: Keyspace, config: HNSWConfig) -> Self {
+    pub fn new(partition: SqliteTable, config: HNSWConfig) -> Self {
         Self { partition, config }
     }
 
@@ -96,6 +96,7 @@ impl VectorStore {
 
     fn get_entry_point(&self) -> Option<u128> {
         let val = self.partition.get(ENTRY_POINT_KEY).ok()??;
+        if val.len() < 16 { return None; }
         let arr: [u8; 16] = val[..16].try_into().ok()?;
         Some(u128::from_be_bytes(arr))
     }
@@ -106,10 +107,12 @@ impl VectorStore {
     }
 
     fn check_or_set_dim(&self, dim: usize) -> anyhow::Result<()> {
-        if let Ok(Some(val)) = self.partition.get(DIM_KEY) {
-             let stored_dim = u64::from_be_bytes(val[..8].try_into()?) as usize;
-             if stored_dim != dim {
-                 return Err(anyhow::anyhow!("Dimensionality mismatch. Expected {}, got {}", stored_dim, dim));
+        if let Some(val) = self.partition.get(DIM_KEY)? {
+             if val.len() >= 8 {
+                 let stored_dim = u64::from_be_bytes(val[..8].try_into()?) as usize;
+                 if stored_dim != dim {
+                     return Err(anyhow::anyhow!("Dimensionality mismatch. Expected {}, got {}", stored_dim, dim));
+                 }
              }
         } else {
             self.partition.insert(DIM_KEY, &(dim as u64).to_be_bytes())?;
@@ -320,8 +323,6 @@ impl VectorStore {
 
     pub fn get_vector(&self, id: u128) -> anyhow::Result<Vector> {
         let key = Self::vector_key(id, 0); 
-        // Logic to handle missing vectors gracefully?
-        // For core algo, if it's in the graph, we expect data to be there.
         let val = self.partition.get(&key)?.ok_or_else(|| anyhow::anyhow!("Vector not found {}", id))?;
         let vec: Vector = bincode::deserialize(&val)?;
         Ok(vec)
@@ -373,9 +374,7 @@ impl VectorStore {
         prefix.extend_from_slice(&level.to_be_bytes());
 
         let mut neighbors = Vec::new();
-        // Scanning prefix
-        for item in self.partition.prefix(prefix) {
-            let (key, _) = item.into_inner()?;
+        for (key, _) in self.partition.prefix(&prefix) {
             // Extract dst from key: e:{src}:{level}:{dst}
             // Lengths: 2 + 16 + 8 + 16 = 42
             if key.len() >= 42 {
@@ -387,9 +386,7 @@ impl VectorStore {
     }
 
     pub fn flush(&self) -> anyhow::Result<()> {
-        if let Err(e) = self.partition.rotate_memtable_and_wait() {
-            eprintln!("VectorStore: Failed to rotate memtable: {}", e);
-        }
+        // SQLite auto-persists via WAL — no manual flush needed
         Ok(())
     }
 }

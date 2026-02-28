@@ -48,6 +48,7 @@ async fn test_deep_mutation() {
         fn flush(&self) -> Result<(), String> { Ok(()) }
         fn compact(&self) -> Result<u64, String> { Ok(0) }
         fn needs_compaction(&self) -> bool { false }
+        fn bulk_check_permission(&self, _ctx: &async_graphql::dynamic::ResolverContext<'_>, _checks: Vec<(String, String, String)>) -> async_graphql::Result<Vec<(String, String, String, bool)>> { Ok(vec![]) }
     }
 
     let calls = Arc::new(Mutex::new(Vec::new()));

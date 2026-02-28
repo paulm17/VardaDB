@@ -14,7 +14,7 @@ Designed for local-first applications, edge computing, and high-throughput local
 *   **Advanced Scalar System**: Full parity with standard GraphQL scalars (Date, Time, Email, Url, etc).
 *   **Geospatial Support**: Native `GeoPoint`, `Polygon`, and `MultiPolygon` with spatial filtering (`gl_distance`).
 *   **Full-Text Search**: Built-in term indexing and search capabilities.
-*   **LSM-Tree Storage**: Built on **Fjall** (RocksDB-like) for high write throughput and reliability.
+*   **SQLite KV Storage**: High-performance, embedded storage via **rusqlite** with WAL mode for instant recovery.
 *   **Query Caching**: Integrated LRU cache for high-speed read comparisons.
 *   **Secure Auth Stack**: Integrated PASETO identity service and **Zanzibar-style ReBAC** authorization engine.
 
@@ -56,12 +56,13 @@ VardaDB can be embedded directly into your Rust applications, bypassing the netw
 ```rust
 use std::sync::Arc;
 use vardadb::storage::backend::Storage;
-use vardadb::bridge::fjall_resolver::FjallResolver;
+use vardadb::bridge::sqlite_resolver::SqliteResolver;
 use vardadb::engine::schema::Schema;
 use async_graphql::Request;
 
 let storage = Arc::new(Storage::new("my_db_path").unwrap());
-let resolver = FjallResolver::new(storage.clone());
+// SqliteResolver is currently maintained for API compatibility but interfaces with SQLite
+let resolver = SqliteResolver::new(storage.clone());
 let schema = Schema::load_with_resolver("type User {name: String}", resolver).unwrap();
 
 // Execute directly!
@@ -129,11 +130,11 @@ VardaDB supports a rich type system including:
 ### 2. Query Planning
 The **Query Planner** (`src/engine/planner.rs`) acts as the brain of the engine. It parses incoming GraphQL queries into an **ExecutionPlan**. Currently, it focuses on AST parsing and validation, but it is architected to support future optimizations like query cost analysis and depth limiting.
 
-### 3. Storage (Fjall)
-VardaDB uses **Fjall**, a Rust-based LSM-tree storage engine.
-*   **Durability**: Data is persisted to disk (`varda_db_data/`).
-*   **Performance**: Optimized for high write throughput using Memtables and SSTables.
-*   **Resolution**: The `FjallResolver` bridges the GraphQL Engine to the KV storage, translating graph traversals into efficient key lookups.
+### 3. Storage (SQLite)
+VardaDB uses **SQLite** (via `rusqlite`) configured as a high-performance Key-Value store.
+*   **Instant Recovery**: Thanks to WAL mode, startup is near-instant, avoiding the recovery delays typical of LSM-tree engines.
+*   **Durability**: Data is persisted to disk (`varda_db_data/`) with atomic checkpoints.
+*   **Resolution**: The `SqliteResolver` (bridging GraphQL to KV storage) now translates graph traversals into efficient B-Tree lookups.
 
 ### 4. Geo Support
 Built-in geospatial capabilities allow you to build location-aware apps.
@@ -155,7 +156,8 @@ VardaDB supports realtime capability groundwork through its event bus system (`s
 
 ### 7. Conflict Resolution (Last-Write-Wins)
 VardaDB implements a robust **Last-Write-Wins (LWW)** consistency model, inspired by **Evolu**, to handle distributed data synchronization and conflicts.
-*   **Timestamp-Based**: Every storage operation (Put/Delete) is associated with a timestamp.
+*   **Atomic Upsert**: Leveraging SQLite's `ON CONFLICT` and `UPSERT` capabilities, LWW comparisons are performed atomically at the database level.
+*   **Timestamp-Based**: Every storage operation (Put/Delete) is associated with a 16-byte HLC timestamp.
 *   **Idempotency**: "Stale" writes (writes with an older timestamp than what is currently stored) are safely ignored without error.
 *   **Convergence**: This ensures that all replicas eventually converge to the same state, provided they receive the same set of updates, regardless of order.
 
@@ -216,10 +218,10 @@ To ensure reliable delivery of critical communications (Magic Links, Password Re
 *   **Resilient**: Failed deliveries are retried automatically by the background worker.
 *   **Configurable**: SMTP settings are fully manageable via `config.toml`.
 
-### 4. Persistent Storage (Fjall)
-All identity data, including user records, session tokens, and confirmation flows, is stored in native Fjall keyspaces.
+### 4. Persistent Storage (SQLite)
+All identity data, including user records, session tokens, and confirmation flows, is stored in native SQLite tables.
 *   **User Management**: Secure password hashing with Argon2.
-*   **Automatic Pruning**: A recurring background task automatically prunes expired tokens and confirmations to maintain optimal database performance.
+*   **Automatic Pruning**: A recurring background task automatically prunes expired tokens and confirmations.
 
 ---
 
@@ -264,7 +266,7 @@ query {
 ### 4. High-Performance Evaluation
 *   **Recursive Evaluation**: Handles complex nested relationships and userset rewrites with cycle detection.
 *   **Attribute Support**: Dynamic rules using entity attributes (e.g., `status == 'published'`).
-*   **Fjall Backend**: Authorization tuples and attributes are stored in high-performance LSM-tree partitions (`auth_tuples`, `auth_attributes`).
+*   **SQLite Backend**: Authorization tuples and attributes are stored in high-performance SQLite tables (`auth_tuples`, `auth_attributes`).
 
 ---
 
@@ -396,8 +398,8 @@ cargo run -- start
 ## 📁 Project Structure
 
 *   `src/engine`: Core GraphQL logic (Schema, Scalars, Planner).
-*   `src/storage`: Backend storage interfaces (Fjall, LWW Logic).
-*   `src/bridge`: Connectors (FjallResolver) and LWW application.
+*   `src/storage`: Backend storage interfaces (SQLite, LWW Logic).
+*   `src/bridge`: Connectors (SqliteResolver currently maintained for API compatibility) and LWW application.
 *   `src/sync`: Zenoh-based replication and schema synchronization.
 *   `auth/`: Standalone identity and authentication crate.
 *   `permissions/`: Zanzibar-style ReBAC authorization engine.

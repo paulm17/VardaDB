@@ -31,7 +31,7 @@ pub async fn verify_magiclink_code_handler(
     let code = body.code.trim();
     let confirmation_key = format!("confirm:{}", code);
 
-    let confirmation_bytes = auth_state.store.confirmations.get(confirmation_key.as_bytes())
+    let confirmation_bytes = auth_state.store.confirmations.kv_get(confirmation_key.as_bytes())
         .map_err(|e| {
              tracing::error!("Auth store error: {:?}", e);
              (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "status": "fail", "message": "Internal error" })))
@@ -90,11 +90,11 @@ pub async fn verify_magiclink_code_handler(
     let a_key = format!("token:{}", access_token_details.token_uuid);
     let r_key = format!("token:{}", refresh_token_details.token_uuid);
 
-    auth_state.store.tokens.insert(a_key.as_bytes(), &serde_json::to_vec(&access_token_record).unwrap()).unwrap();
-    auth_state.store.tokens.insert(r_key.as_bytes(), &serde_json::to_vec(&refresh_token_record).unwrap()).unwrap();
+    auth_state.store.tokens.kv_insert(a_key.as_bytes(), &serde_json::to_vec(&access_token_record).unwrap()).unwrap();
+    auth_state.store.tokens.kv_insert(r_key.as_bytes(), &serde_json::to_vec(&refresh_token_record).unwrap()).unwrap();
 
     confirmation.flow = ConfirmationFlow::Completed;
-    auth_state.store.confirmations.insert(confirmation_key.as_bytes(), &serde_json::to_vec(&confirmation).unwrap()).unwrap();
+    auth_state.store.confirmations.kv_insert(confirmation_key.as_bytes(), &serde_json::to_vec(&confirmation).unwrap()).unwrap();
 
     let mut access_cookie = Cookie::new("access_token", access_token_details.token.clone());
     access_cookie.set_path("/");

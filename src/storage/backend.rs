@@ -1,4 +1,4 @@
-use fjall::{Database, Keyspace, KeyspaceCreateOptions};
+use crate::storage::sqlite_backend::{SqliteBackend, SqliteTable};
 use std::path::Path;
 use uuid::Uuid;
 use byteorder::{BigEndian, ByteOrder};
@@ -31,35 +31,31 @@ extern "C" fn crash_handler(_signum: libc::c_int) {
 }
 
 pub struct Storage {
-    pub db: Database,
+    pub backend: Arc<SqliteBackend>,
     // Database Management
-    // Map: DatabaseName -> (Main Keyspace, History Keyspace)
-    // We cache handles to avoid locking the Supervisor too often, though keyspace() is cheap.
-    // For simplicity, we can look them up on demand or cache them.
-    // Let's cache them in a RwLock for read-heavy access.
-    pub keyspaces: std::sync::RwLock<std::collections::HashMap<String, (Keyspace, Keyspace)>>,
+    // Map: DatabaseName -> (Main Table, History Table)
+    pub keyspaces: std::sync::RwLock<std::collections::HashMap<String, (SqliteTable, SqliteTable)>>,
     
-    // System Keyspaces (Global)
-    pub sys_keyspace: Keyspace,         // SYSTEM: Config (NodeID, etc)
-    pub quarantine_keyspace: Keyspace,  // QUARANTINE: Global? Or per DB? Let's make it global for now or deprecated.
-    pub metrics_keyspace: Keyspace,     // METRICS: Time-series metrics
-    pub traces_keyspace: Keyspace,      // TRACES: Trace spans
-    pub vector_store: crate::storage::vector::store::VectorStore, // VECTORS (Global for now, or need multi-vector store)
+    // System Tables (Global)
+    pub sys_table: SqliteTable,           // SYSTEM: Config (NodeID, etc)
+    pub quarantine_table: SqliteTable,    // QUARANTINE: Global
+    pub metrics_table: SqliteTable,       // METRICS: Time-series metrics
+    pub traces_table: SqliteTable,        // TRACES: Trace spans
+    pub vector_store: crate::storage::vector::store::VectorStore, // VECTORS
     
-    pub auth_store: AuthStore,          // AUTH: Authorization tuples and attributes
+    pub auth_store: AuthStore,            // AUTH: Authorization tuples and attributes
     
-    pub jobs_store: Arc<JobStore>,      // JOB STORE (Global)
-    pub system_queue: Arc<Queue>,       // DEFAULT QUEUE (Global)
+    pub jobs_store: Arc<JobStore<SqliteTable>>,        // JOB STORE (Global)
+    pub system_queue: Arc<Queue<SqliteTable>>,         // DEFAULT QUEUE (Global)
     pub node_id: u64,
     pub clock: std::sync::Mutex<crate::storage::timestamp::Timestamp>,
     pub vector_tx: std::sync::mpsc::SyncSender<(u64, Vec<f64>)>,
     
     // Incremental Fingerprints: DbName -> (Hash, Count)
-    // Using AtomicU64 for concurrent access without locking the map for values
-    pub fingerprints: dashmap::DashMap<String, (std::sync::atomic::AtomicU64, std::sync::atomic::AtomicU64)>,
+    pub fingerprints: std::sync::Arc<dashmap::DashMap<String, (std::sync::atomic::AtomicU64, std::sync::atomic::AtomicU64)>>,
     
-    // Flag indicating fingerprints are ready for sync (background rebuild complete)
-    pub fingerprints_ready: std::sync::atomic::AtomicBool,
+    // Flag indicating fingerprints are ready for sync
+    pub fingerprints_ready: std::sync::Arc<std::sync::atomic::AtomicBool>,
 
     // Embedding Model (Shared)
     pub embedding_model: Arc<std::sync::Mutex<TextEmbedding>>,
@@ -67,29 +63,44 @@ pub struct Storage {
 
 impl Storage {
     pub fn new(path: impl AsRef<Path>, node_id_override: Option<u64>) -> anyhow::Result<Self> {
-        // Limit worker threads to 2 to reduce compaction CPU impact during bulk inserts
-        // Default is min(CPU cores, 4) which can cause write stalls when compaction competes with inserts
-        let db = Database::builder(path)
-            .worker_threads(2)
-            .open()?;
+        let backend = Arc::new(SqliteBackend::new(path.as_ref())?);
         
-        // Open System Partition
-        let sys_keyspace = db.keyspace("sys", || KeyspaceCreateOptions::default())?;
-        let quarantine_keyspace = db.keyspace("quarantine", || KeyspaceCreateOptions::default())?;
-        let metrics_keyspace = db.keyspace("sys_metrics", || KeyspaceCreateOptions::default())?;
-        let traces_keyspace = db.keyspace("sys_traces", || KeyspaceCreateOptions::default())?;
+        // Create System Tables
+        backend.create_table("sys")?;
+        backend.create_table("quarantine")?;
+        backend.create_table("sys_metrics")?;
+        backend.create_table("sys_traces")?;
+        backend.create_table("vectors")?;
+        backend.create_table("auth_tuples")?;
+        backend.create_table("auth_attributes")?;
+        backend.create_table("jobs")?;
+        // Auth login tables (was previously created by AuthStore::init from Database)
+        backend.create_table("auth_users")?;
+        backend.create_table("auth_tokens")?;
+        backend.create_table("auth_confirmations")?;
+        backend.create_table("auth_identities")?;
+        backend.create_table("auth_social_state")?;
+        backend.create_table("auth_keys")?;
         
-        // Vectors (Global Index for now - TODO: Split per DB)
-        let vectors_keyspace = db.keyspace("vectors", || KeyspaceCreateOptions::default())?;
+        let sys_table = SqliteTable::new("sys".to_string(), backend.clone());
+        let quarantine_table = SqliteTable::new("quarantine".to_string(), backend.clone());
+        let metrics_table = SqliteTable::new("sys_metrics".to_string(), backend.clone());
+        let traces_table = SqliteTable::new("sys_traces".to_string(), backend.clone());
+        
+        // Vectors
+        let vectors_table = SqliteTable::new("vectors".to_string(), backend.clone());
         let vector_store = crate::storage::vector::store::VectorStore::new(
-            vectors_keyspace, 
+            vectors_table, 
             crate::storage::vector::config::HNSWConfig::default()
         );
 
         // AuthZ Store
-        let auth_tuples_keyspace = db.keyspace("auth_tuples", || KeyspaceCreateOptions::default())?;
-        let auth_attributes_keyspace = db.keyspace("auth_attributes", || KeyspaceCreateOptions::default())?;
-        let auth_store = AuthStore::new(auth_tuples_keyspace, auth_attributes_keyspace);
+        let auth_tuples_table = SqliteTable::new("auth_tuples".to_string(), backend.clone());
+        let auth_attributes_table = SqliteTable::new("auth_attributes".to_string(), backend.clone());
+        let auth_store = AuthStore::new(
+            std::sync::Arc::new(auth_tuples_table) as std::sync::Arc<dyn permissions::storage::auth_store::KvStore>,
+            std::sync::Arc::new(auth_attributes_table) as std::sync::Arc<dyn permissions::storage::auth_store::KvStore>
+        );
 
         // Vector Worker (Bounded Channel)
         let (tx, rx) = std::sync::mpsc::sync_channel::<(u64, Vec<f64>)>(5000);
@@ -98,8 +109,6 @@ impl Storage {
         std::thread::spawn(move || {
             println!("Storage: Vector Background Worker Started");
             while let Ok((uid, vec)) = rx.recv() {
-                // Determine Level 0 insert?
-                // VectorStore::insert checks levels. All good.
                 if let Err(e) = worker_store.insert(uid as u128, vec) {
                     eprintln!("Vector Worker Error for UID {}: {}", uid, e);
                 }
@@ -107,63 +116,60 @@ impl Storage {
             println!("Storage: Vector Background Worker Stopped");
         });
 
-        // Open Jobs Keyspace
-        let jobs_keyspace = db.keyspace("jobs", || KeyspaceCreateOptions::default())?;
-        let jobs_store = Arc::new(JobStore::new(Arc::new(jobs_keyspace)));
-        // Create Default "System" Queue
+        // Jobs Store
+        let jobs_table = SqliteTable::new("jobs".to_string(), backend.clone());
+        let jobs_store = Arc::new(JobStore::new(Arc::new(jobs_table)));
         let system_queue = Arc::new(Queue::new("system_queue".to_string(), jobs_store.clone()));
 
-        // Load active databases from metadata or discovery
-        // For now, we auto-discover keyspaces ending in "_main" and pair them.
+        // Auto-discover databases from existing tables
         let mut initial_keyspaces = std::collections::HashMap::new();
         
         // Always ensure "default" database exists
-        let default_main = db.keyspace("default_main", || KeyspaceCreateOptions::default())?;
-        let default_history = db.keyspace("default_history", || KeyspaceCreateOptions::default())?;
+        backend.create_main_table("default_main")?;
+        backend.create_table("default_history")?;
+        let default_main = SqliteTable::new_main("default_main".to_string(), backend.clone());
+        let default_history = SqliteTable::new("default_history".to_string(), backend.clone());
         initial_keyspaces.insert("default".to_string(), (default_main, default_history));
 
-        // Auto-discover other databases
-        // Patterns: `{name}_main` and `{name}_history`
-        let all_ks = db.list_keyspace_names();
-        println!("Storage: All keyspaces in manifest: {:?}", all_ks);
+        // Auto-discover other databases from sqlite_master
+        let all_tables = backend.list_tables();
+        println!("Storage: All tables in database: {:?}", all_tables);
         
-        for ks_name in all_ks {
-            if ks_name.ends_with("_main") && &*ks_name != "default_main" {
-                let db_name = ks_name.trim_end_matches("_main");
-                let history_ks_name = format!("{}_history", db_name);
+        for table_name in &all_tables {
+            if table_name.ends_with("_main") && table_name != "default_main" {
+                let db_name = table_name.trim_end_matches("_main");
+                let history_name = format!("{}_history", db_name);
                 
-                // Open handles
-                if let Ok(main_ks) = db.keyspace(&ks_name, || KeyspaceCreateOptions::default()) {
-                    if let Ok(hist_ks) = db.keyspace(&history_ks_name, || KeyspaceCreateOptions::default()) {
-                        println!("Storage: Discovered database '{}'", db_name);
-                        initial_keyspaces.insert(db_name.to_string(), (main_ks, hist_ks));
-                    }
+                if all_tables.contains(&history_name) {
+                    println!("Storage: Discovered database '{}'", db_name);
+                    let main_table = SqliteTable::new_main(table_name.clone(), backend.clone());
+                    let hist_table = SqliteTable::new(history_name, backend.clone());
+                    initial_keyspaces.insert(db_name.to_string(), (main_table, hist_table));
                 }
             }
         }
 
         // Load or Generate Node ID
         let node_id = if let Some(id) = node_id_override {
-             sys_keyspace.insert("node_id", &id.to_be_bytes())?;
+             sys_table.insert("node_id", &id.to_be_bytes())?;
              id
-        } else if let Some(val) = sys_keyspace.get("node_id")? {
-            let bytes = val.to_vec();
-            if bytes.len() == 8 {
-                BigEndian::read_u64(&bytes)
+        } else if let Some(val) = sys_table.get(b"node_id")? {
+            if val.len() == 8 {
+                BigEndian::read_u64(&val)
             } else {
                 let new_id = Uuid::new_v4().as_u128() as u64; 
-                sys_keyspace.insert("node_id", &new_id.to_be_bytes())?;
+                sys_table.insert("node_id", &new_id.to_be_bytes())?;
                 new_id
             }
         } else {
             let new_id = Uuid::new_v4().as_u128() as u64; 
-            sys_keyspace.insert("node_id", &new_id.to_be_bytes())?;
+            sys_table.insert("node_id", &new_id.to_be_bytes())?;
             new_id
         };
         
         info!("Storage: Initialized with Node ID: {}", node_id);
 
-        let clock = std::sync::Mutex::new(if let Some(val) = sys_keyspace.get("clock")? {
+        let clock = std::sync::Mutex::new(if let Some(val) = sys_table.get(b"clock")? {
             if val.len() >= 16 {
                 let bytes: [u8; 16] = val[0..16].try_into().unwrap();
                 let stored = crate::storage::timestamp::Timestamp::from_bytes(&bytes);
@@ -189,12 +195,12 @@ impl Storage {
         info!("Storage: Embedding Model Ready");
 
         let storage = Self {
-            db,
+            backend,
             keyspaces: std::sync::RwLock::new(initial_keyspaces),
-            sys_keyspace,
-            quarantine_keyspace,
-            metrics_keyspace,
-            traces_keyspace,
+            sys_table,
+            quarantine_table,
+            metrics_table,
+            traces_table,
             vector_store,
             auth_store,
             jobs_store,
@@ -202,8 +208,8 @@ impl Storage {
             node_id,
             clock,
             vector_tx: tx,
-            fingerprints: dashmap::DashMap::new(),
-            fingerprints_ready: std::sync::atomic::AtomicBool::new(false),
+            fingerprints: std::sync::Arc::new(dashmap::DashMap::new()),
+            fingerprints_ready: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             embedding_model,
         };
         
@@ -217,9 +223,6 @@ impl Storage {
     
     pub fn register_exit_hook(self: &Arc<Self>) {
         let mutex = ACTIVE_STORAGES.get_or_init(|| {
-            // Spawn a delayed thread to overwrite any signal handlers
-            // that heavy GUI frameworks (like Chromium/CEF) might install
-            // during their own initialization phase after VardaDB starts.
             std::thread::spawn(|| {
                 std::thread::sleep(std::time::Duration::from_secs(5));
                 unsafe {
@@ -241,14 +244,14 @@ impl Storage {
         let main_name = format!("{}_main", name);
         let history_name = format!("{}_history", name);
         
-        let main_ks = self.db.keyspace(&main_name, || KeyspaceCreateOptions::default())?;
-        let history_ks = self.db.keyspace(&history_name, || KeyspaceCreateOptions::default())?;
+        self.backend.create_main_table(&main_name)?;
+        self.backend.create_table(&history_name)?;
+        
+        let main_table = SqliteTable::new_main(main_name, self.backend.clone());
+        let history_table = SqliteTable::new(history_name, self.backend.clone());
         
         let mut lock = self.keyspaces.write().unwrap();
-        lock.insert(name.to_string(), (main_ks, history_ks));
-        
-        // TODO: Persist database list in `sys_keyspace` so we don't rely on auto-discovery?
-        // Discovery via `db.list_keyspace_names` works for now.
+        lock.insert(name.to_string(), (main_table, history_table));
         
         Ok(())
     }
@@ -258,25 +261,23 @@ impl Storage {
         lock.keys().cloned().collect()
     }
     
-    pub fn get_database(&self, name: &str) -> Option<(Keyspace, Keyspace)> {
+    pub fn get_database(&self, name: &str) -> Option<(SqliteTable, SqliteTable)> {
         let lock = self.keyspaces.read().unwrap();
         lock.get(name).cloned()
     }
 
     pub fn delete_database(&self, name: &str) -> anyhow::Result<()> {
-        let (main, history) = {
+        {
             let mut lock = self.keyspaces.write().unwrap();
-            match lock.remove(name) {
-                Some(ks) => ks,
-                None => return Err(anyhow::anyhow!("Database not found")),
+            if lock.remove(name).is_none() {
+                return Err(anyhow::anyhow!("Database not found"));
             }
         };
         
-        // Correct way to delete keyspace in Fjall?
-        // self.db.delete_keyspace(keyspace_handle)
-        // Check API: db.delete_keyspace(Keyspace) -> Result<()>
-        self.db.delete_keyspace(main)?;
-        self.db.delete_keyspace(history)?;
+        let main_name = format!("{}_main", name);
+        let history_name = format!("{}_history", name);
+        self.backend.drop_table(&main_name)?;
+        self.backend.drop_table(&history_name)?;
         Ok(())
     }
 
@@ -286,65 +287,32 @@ impl Storage {
         let keyspaces = self.keyspaces.read().unwrap();
         let (main, _) = keyspaces.get(db_name).ok_or(anyhow::anyhow!("Database not found"))?;
         
-        let val = main.get(key)?;
-        Ok(val.map(|v| {
-            if v.len() >= 16 {
-                v[16..].to_vec()
-            } else {
-                v.to_vec() 
-            }
-        }))
+        // Main table stores value in the value column and ts separately
+        // We need to return just the value (no timestamp prefix stripping needed
+        // because SQLite stores ts in its own column)
+        main.get(key)
     }
 
-    /// Last-Write-Wins Put
+    /// Last-Write-Wins Put — Atomic via SQLite ON CONFLICT
     pub fn put_with_lww(&self, db_name: &str, uid: u64, predicate: &str, value: &[u8], timestamp: &crate::storage::timestamp::Timestamp) -> anyhow::Result<()> {
         let keyspaces = self.keyspaces.read().unwrap();
         let (main, history) = keyspaces.get(db_name).ok_or(anyhow::anyhow!("Database not found"))?;
 
         let key = crate::storage::codec::Codec::encode_data_key(uid, predicate);
+        let ts_bytes = timestamp.to_bytes();
         
-        // 1. Check Stale
-        if let Some(existing) = main.get(&key)? {
-             if existing.len() >= 16 {
-                 let existing_ts_bytes: [u8; 16] = existing[0..16].try_into().unwrap();
-                 let existing_ts = crate::storage::timestamp::Timestamp::from_bytes(&existing_ts_bytes);
-                 
-                 if existing_ts >= *timestamp {
-                     return Ok(()); // Stale
-                 }
-             }
-        }
-
-        // 2. Write
-        let mut new_val_buf = Vec::with_capacity(16 + value.len());
-        new_val_buf.extend_from_slice(&timestamp.to_bytes());
-        new_val_buf.extend_from_slice(value);
-        
-        main.insert(&key, &new_val_buf)?;
+        // Atomic LWW upsert — ON CONFLICT only updates if new ts > existing ts
+        main.upsert_lww(&key, value, &ts_bytes)?;
 
         // Write HISTORY
-        let hist_key = crate::storage::codec::Codec::encode_history_key(&timestamp.to_bytes(), uid, predicate);
+        let hist_key = crate::storage::codec::Codec::encode_history_key(&ts_bytes, uid, predicate);
         history.insert(&hist_key, value)?;
         self.update_history_hash(db_name, &hist_key, value);
-        
-        // Auto-compaction: check L0 pressure (higher threshold for single writes)
-        // Fjall stalls writes at l0 >= 20 (soft) and >= 30 (hard halt)
-        let l0_count = main.l0_table_count();
-        if l0_count >= 16 {
-            if crate::debug_logging() {
-                println!("⚠️ L0 pressure high (l0_tables={}), triggering compaction...", l0_count);
-            }
-            let _ = main.major_compact();
-            if crate::debug_logging() {
-                println!("✅ Auto-compaction complete (l0_tables={})", main.l0_table_count());
-            }
-        }
         
         Ok(())
     }
 
-    /// Batch Last-Write-Wins Put
-    /// Uses Fjall WriteBatch for atomic multi-keyspace writes with single commit.
+    /// Batch Last-Write-Wins Put — Uses SQLite transaction for atomicity
     pub fn put_batch_lww(&self, db_name: &str, items: Vec<(u64, String, Vec<u8>)>, timestamp: &crate::storage::timestamp::Timestamp) -> anyhow::Result<()> {
         use std::time::Instant;
         let op_start = Instant::now();
@@ -354,50 +322,25 @@ impl Storage {
         let (main, _history) = keyspaces.get(db_name).ok_or(anyhow::anyhow!("Database not found"))?;
         let lock_time = op_start.elapsed();
 
-        // Use Fjall WriteBatch for atomic multi-keyspace writes
-        let batch_start = Instant::now();
-        let mut batch = self.db.batch();
-        let _fingerprint_updates: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+        let ts_bytes = timestamp.to_bytes();
+        let main_clone = main.clone();
 
-        for (uid, predicate, value) in items {
-            let key = crate::storage::codec::Codec::encode_data_key(uid, &predicate);
-            
-            // 2. Queue writes to batch
-            let mut new_val_buf = Vec::with_capacity(16 + value.len());
-            new_val_buf.extend_from_slice(&timestamp.to_bytes());
-            new_val_buf.extend_from_slice(&value);
-            
-            batch.insert(main, &key, &new_val_buf);
-        }
-        let prep_time = batch_start.elapsed();
-        
-        // Single atomic commit for all writes
-        let commit_start = Instant::now();
-        batch.commit()?;
-        let commit_time = commit_start.elapsed();
+        let batch_start = Instant::now();
+        self.backend.write_batch(|conn| {
+            for (uid, predicate, value) in &items {
+                let key = crate::storage::codec::Codec::encode_data_key(*uid, predicate);
+                main_clone.batch_upsert_lww_on_conn(conn, &key, value, &ts_bytes)?;
+            }
+            Ok(())
+        })?;
+        let commit_time = batch_start.elapsed();
         
         let total_time = op_start.elapsed();
         
         // Log if any phase took > 50ms
         if crate::debug_logging() && total_time.as_millis() > 50 {
-            println!("⏱️ put_batch_lww SLOW: {} items | lock={:?}, prep={:?}, commit={:?}, total={:?}",
-                     item_count, lock_time, prep_time, commit_time, total_time);
-        }
-        
-        // Auto-compaction: check L0 pressure after each batch commit
-        // Fjall stalls writes at l0 >= 20 (soft) and >= 30 (hard halt)
-        // Proactively compact at 12 to prevent reaching stall threshold
-        let l0_count = main.l0_table_count();
-        if l0_count >= 8 {
-            if crate::debug_logging() {
-                let compact_start = Instant::now();
-                println!("⚠️ L0 pressure high (l0_tables={}), triggering compaction...", l0_count);
-                let _ = main.major_compact();
-                println!("✅ Auto-compaction complete ({:?}, l0_tables={})", 
-                         compact_start.elapsed(), main.l0_table_count());
-            } else {
-                let _ = main.major_compact();
-            }
+            println!("⏱️ put_batch_lww SLOW: {} items | lock={:?}, commit={:?}, total={:?}",
+                     item_count, lock_time, commit_time, total_time);
         }
         
         Ok(())
@@ -409,22 +352,16 @@ impl Storage {
         let (main, history) = keyspaces.get(db_name).ok_or(anyhow::anyhow!("Database not found"))?;
 
         let key = crate::storage::codec::Codec::encode_data_key(uid, predicate);
+        let ts_bytes = timestamp.to_bytes();
         
-        // 1. Remove from LATEST if not stale
-        if let Some(existing) = main.get(&key)? {
-             if existing.len() >= 16 {
-                 let existing_ts_bytes: [u8; 16] = existing[0..16].try_into().unwrap();
-                 let existing_ts = crate::storage::timestamp::Timestamp::from_bytes(&existing_ts_bytes);
-                 if existing_ts >= *timestamp {
-                     return Ok(()); // Stale delete
-                 }
-             }
+        // Delete only if not stale
+        let deleted = main.delete_lww(&key, &ts_bytes)?;
+        if !deleted {
+            return Ok(()); // Stale delete
         }
-        
-        main.remove(&key)?;
 
-        // 2. Write Tombstone to HISTORY
-        let hist_key = crate::storage::codec::Codec::encode_history_key(&timestamp.to_bytes(), uid, predicate);
+        // Write Tombstone to HISTORY
+        let hist_key = crate::storage::codec::Codec::encode_history_key(&ts_bytes, uid, predicate);
         history.insert(&hist_key, &[])?;
         self.update_history_hash(db_name, &hist_key, &[]);
         
@@ -439,7 +376,7 @@ impl Storage {
         Ok(())
     }
 
-    /// Delete a raw key from the main keyspace
+    /// Delete a raw key from the main table
     pub fn delete_key(&self, db_name: &str, key: &[u8]) -> anyhow::Result<()> {
         let keyspaces = self.keyspaces.read().unwrap();
         let (main, _) = keyspaces.get(db_name).ok_or(anyhow::anyhow!("Database not found"))?;
@@ -457,154 +394,59 @@ impl Storage {
     pub fn contains_key(&self, db_name: &str, key: &[u8]) -> anyhow::Result<bool> {
         let keyspaces = self.keyspaces.read().unwrap();
         let (main, _) = keyspaces.get(db_name).ok_or(anyhow::anyhow!("Database not found"))?;
-        Ok(main.contains_key(key)?)
+        main.contains_key(key)
     }
 
     pub fn flush(&self) -> anyhow::Result<()> {
-        println!("Storage: Flush starting - Journal count: {}", self.db.journal_count());
+        println!("Storage: Flush starting...");
         
-        // Persist clock state (not persisted on every write for performance)
+        // Persist clock state
         {
             let clock = self.clock.lock().unwrap();
-            let _ = self.sys_keyspace.insert("clock", &clock.to_bytes());
+            let _ = self.sys_table.insert("clock", &clock.to_bytes());
         }
 
-        // Persist Internal State
+        // Persist fingerprints
         if let Err(e) = self.persist_fingerprints() {
             eprintln!("Storage: Failed to persist fingerprints: {}", e);
         }
 
-        let mut keyspaces_to_flush = Vec::new();
+        // WAL checkpoint — merges WAL into main database file
+        self.backend.shutdown()?;
         
-        // System keyspaces
-        keyspaces_to_flush.push(self.sys_keyspace.clone());
-        keyspaces_to_flush.push(self.quarantine_keyspace.clone());
-        keyspaces_to_flush.push(self.metrics_keyspace.clone());
-        keyspaces_to_flush.push(self.traces_keyspace.clone());
-        
-        // Dynamic keyspaces
-        {
-            let lock = self.keyspaces.read().unwrap();
-            for (main, history) in lock.values() {
-                keyspaces_to_flush.push(main.clone());
-                keyspaces_to_flush.push(history.clone());
-            }
-        }
-        
-        let keyspace_count = keyspaces_to_flush.len();
-        
-        for ks in keyspaces_to_flush {
-             // Call hidden API to force flush to disk and rotation
-             if let Err(e) = ks.rotate_memtable_and_wait() {
-                 eprintln!("Storage: Failed to rotate memtable for keyspace {}: {}", ks.name(), e);
-             }
-        }
-
-        // Vector Store (contains private partition)
-        if let Err(e) = self.vector_store.flush() {
-            eprintln!("Storage: Failed to flush vector store: {}", e);
-        }
-
-        self.db.persist(fjall::PersistMode::SyncAll)?;
-        println!("Storage: Flush complete - Journal count: {}, Flushed {} keyspaces", 
-                 self.db.journal_count(), 
-                 keyspace_count);
+        println!("Storage: Flush complete (WAL checkpoint done)");
         Ok(())
     }
 
-    /// Check if compaction is needed based on internal metrics
-    /// Returns true if any keyspace has high L0 segment count (indicating compaction pressure)
+    /// SQLite B-trees don't need compaction — this is a no-op.
     pub fn needs_compaction(&self) -> bool {
-        // Fjall stalls writes at l0 >= 20, so check well below that
-        let lock = self.keyspaces.read().unwrap();
-        lock.values().any(|(main, _)| main.l0_table_count() >= 12)
+        false
     }
 
-    /// Returns the number of active background compactions currently running
-    pub fn active_compactions(&self) -> usize {
-        self.db.active_compactions()
-    }
-
-    /// Trigger explicit BLOCKING compaction on all keyspaces
-    /// Uses major_compact() which forces full LSM compaction and waits until complete
-    /// Returns the total duration in milliseconds
+    /// No-op for SQLite. Returns 0ms.
     pub fn compact(&self) -> anyhow::Result<u64> {
-        use std::time::Instant;
-        let start = Instant::now();
-        
-        println!("🔧 Storage: Major compaction starting (journal count: {}, active: {})...", 
-                 self.db.journal_count(), self.db.active_compactions());
-        
-        // First, rotate all memtables to flush pending writes
-        {
-            let lock = self.keyspaces.read().unwrap();
-            for (main, history) in lock.values() {
-                let _ = main.rotate_memtable_and_wait();
-                let _ = history.rotate_memtable_and_wait();
-            }
-        }
-        let _ = self.sys_keyspace.rotate_memtable_and_wait();
-        let _ = self.quarantine_keyspace.rotate_memtable_and_wait();
-        
-        // Persist to trigger journal truncation
-        self.db.persist(fjall::PersistMode::SyncAll)?;
-        
-        // CRITICAL: Call major_compact() on all keyspaces - this is BLOCKING
-        // major_compact() forces full LSM tree compaction and waits until complete
-        {
-            let lock = self.keyspaces.read().unwrap();
-            for (main, history) in lock.values() {
-                if let Err(e) = main.major_compact() {
-                    eprintln!("   ⚠️ Major compact failed on main keyspace: {}", e);
-                }
-                if let Err(e) = history.major_compact() {
-                    eprintln!("   ⚠️ Major compact failed on history keyspace: {}", e);
-                }
-            }
-        }
-        
-        // Also major compact system keyspaces
-        let _ = self.sys_keyspace.major_compact();
-        let _ = self.quarantine_keyspace.major_compact();
-        
-        // Final persist
-        self.db.persist(fjall::PersistMode::SyncAll)?;
-        
-        let duration_ms = start.elapsed().as_millis() as u64;
-        println!("✅ Storage: Major compaction complete ({} ms, journal count: {}, active: {})", 
-                 duration_ms, self.db.journal_count(), self.db.active_compactions());
-        
-        Ok(duration_ms)
+        Ok(0)
     }
 
     // --- Sync & Quarantine ---
 
     pub fn get_history_range(&self, db_name: &str, start_ts: Option<&crate::storage::timestamp::Timestamp>, end_ts: Option<&crate::storage::timestamp::Timestamp>) -> anyhow::Result<Vec<(Vec<u8>, Vec<u8>)>> {
-        use std::ops::Bound;
         let keyspaces = self.keyspaces.read().unwrap();
         let (_, history) = keyspaces.get(db_name).ok_or(anyhow::anyhow!("Database not found"))?;
 
-        let _start_bound = if let Some(ts) = start_ts {
-            Bound::Included(ts.to_bytes().to_vec()) 
+        let results = if let (Some(start), Some(end)) = (start_ts, end_ts) {
+            let lower = start.to_bytes().to_vec();
+            let mut upper = end.to_bytes().to_vec();
+            upper.push(0xFF);
+            history.range(&lower, &upper)
+        } else if let Some(start) = start_ts {
+            let lower = start.to_bytes().to_vec();
+            // Scan from start to end of table
+            history.prefix(&lower)
         } else {
-            Bound::Unbounded
+            // Full scan
+            history.iter()
         };
-
-        let _end_bound = if let Some(ts) = end_ts {
-             let mut b = ts.to_bytes().to_vec();
-             b.push(0xFF); 
-             Bound::Excluded(b)
-        } else {
-            Bound::Unbounded
-        };
-
-        let iter = history.range((_start_bound, _end_bound));
-        let mut results = Vec::new();
-        for item in iter {
-             if let Ok((k, v)) = item.into_inner() {
-                  results.push((k.to_vec(), v.to_vec()));
-             }
-        }
         
         Ok(results)
     }
@@ -615,22 +457,16 @@ impl Storage {
         new_val.extend_from_slice(&timestamp.to_bytes());
         new_val.extend_from_slice(value);
 
-        self.quarantine_keyspace.insert(&key, &new_val)?;
+        self.quarantine_table.insert(&key, &new_val)?;
         Ok(())
     }
 
     pub fn scan_quarantine(&self) -> anyhow::Result<Vec<(Vec<u8>, Vec<u8>)>> {
-        let mut items = Vec::new();
-        for item in self.quarantine_keyspace.iter() {
-            if let Ok((k, v)) = item.into_inner() {
-                items.push((k.to_vec(), v.to_vec()));
-            }
-        }
-        Ok(items)
+        Ok(self.quarantine_table.iter())
     }
 
     pub fn delete_quarantine(&self, key: &[u8]) -> anyhow::Result<()> {
-        self.quarantine_keyspace.remove(key)?;
+        self.quarantine_table.remove(key)?;
         Ok(())
     }
 
@@ -690,11 +526,9 @@ impl Storage {
             let mut h: u64 = 0;
             let mut c: u64 = 0;
             
-            for item in history.iter() {
-                if let Ok((k, v)) = item.into_inner() {
-                     h ^= Self::hash_item(&k, &v);
-                     c += 1;
-                }
+            for (k, v) in history.iter() {
+                h ^= Self::hash_item(&k, &v);
+                c += 1;
             }
             
             self.fingerprints.insert(name.clone(), (
@@ -707,7 +541,6 @@ impl Storage {
     }
 
     pub fn get_global_fingerprint(&self, db_name: &str) -> Option<(u64, u64)> {
-        // Return (Hash, Count)
         if let Some(entry) = self.fingerprints.get(db_name) {
             let (h_atomic, c_atomic) = entry.value();
             use std::sync::atomic::Ordering;
@@ -729,21 +562,21 @@ impl Storage {
             
             let mut buf = [0u8; 16];
             BigEndian::write_u64(&mut buf[0..8], c);
-            BigEndian::write_u64(&mut buf[8..16], h); // Check endianness/order? Plan said count then hash.
+            BigEndian::write_u64(&mut buf[8..16], h);
             
             let key = format!("fp:{}", db_name);
-            self.sys_keyspace.insert(key, buf)?;
+            self.sys_table.insert(key.as_bytes(), &buf)?;
         }
         Ok(())
     }
 
     pub fn restore_fingerprints(&self) -> anyhow::Result<()> {
         let keyspaces = self.keyspaces.read().unwrap();
-        let mut needs_rebuild: Vec<(String, Keyspace)> = Vec::new();
+        let mut needs_rebuild: Vec<(String, SqliteTable)> = Vec::new();
         
-        for (name, (_, history_ks)) in keyspaces.iter() {
+        for (name, (_, history_table)) in keyspaces.iter() {
             let key = format!("fp:{}", name);
-            if let Some(val) = self.sys_keyspace.get(key)? {
+            if let Some(val) = self.sys_table.get(key.as_bytes())? {
                 if val.len() == 16 {
                     let c = BigEndian::read_u64(&val[0..8]);
                     let h = BigEndian::read_u64(&val[8..16]);
@@ -757,21 +590,16 @@ impl Storage {
                 }
             }
             
-            // Track databases needing rebuild
             println!("Storage: Fingerprint missing for '{}' - will rebuild in background", name);
-            // Initialize with zeros for now - will be updated by background thread
             self.fingerprints.insert(name.clone(), (
                 std::sync::atomic::AtomicU64::new(0),
                 std::sync::atomic::AtomicU64::new(0)
             ));
-            needs_rebuild.push((name.clone(), history_ks.clone()));
+            needs_rebuild.push((name.clone(), history_table.clone()));
         }
         
-        drop(keyspaces); // Release lock before spawning thread
+        drop(keyspaces);
         
-        // Mark fingerprints as ready IMMEDIATELY
-        // For missing fingerprints, (0,0) is correct for empty databases
-        // Incremental updates will maintain accuracy as data is written
         use std::sync::atomic::Ordering;
         self.fingerprints_ready.store(true, Ordering::Release);
         
@@ -779,8 +607,6 @@ impl Storage {
             println!("Storage: All fingerprints ready (restored from disk)");
         } else {
             println!("Storage: Fingerprints ready (initialized to zero, will rebuild in background)");
-            // Spawn optional background rebuild to compute accurate fingerprints
-            // This is an optimization - not required for correctness since incremental updates work
             self.spawn_fingerprint_rebuild(needs_rebuild);
         }
         
@@ -788,93 +614,54 @@ impl Storage {
     }
     
     /// Spawn a background thread to rebuild fingerprints for the given databases.
-    /// This allows fast startup while fingerprints are computed in the background.
-    fn spawn_fingerprint_rebuild(&self, db_list: Vec<(String, Keyspace)>) {
-        // We use raw pointers because:
-        // 1. DashMap<String, (AtomicU64, AtomicU64)> can't be cloned (AtomicU64 is !Clone)
-        // 2. Storage lives for the entire app lifetime, so these references are always valid
-        let fingerprints_ptr = &self.fingerprints as *const dashmap::DashMap<String, (std::sync::atomic::AtomicU64, std::sync::atomic::AtomicU64)>;
-        let ready_ptr = &self.fingerprints_ready as *const std::sync::atomic::AtomicBool;
-        let sys_keyspace = self.sys_keyspace.clone();
-        
-        // Convert pointers to usize for Send
-        let fingerprints_addr = fingerprints_ptr as usize;
-        let ready_addr = ready_ptr as usize;
-        
-        // Install a custom panic hook that filters out the known Fjall/DashMap bug
-        // This prevents the "attempt to shift right with overflow" message on empty keyspaces
-        std::panic::set_hook(Box::new(move |info| {
-            // Filter out the known DashMap panic from Fjall
-            let msg = info.to_string();
-            if msg.contains("shift right with overflow") || msg.contains("dashmap") {
-                // Silently ignore this known bug in Fjall with empty keyspaces
-                return;
-            }
-            // For other panics, use the default behavior
-            eprintln!("{}", info);
-        }));
+    fn spawn_fingerprint_rebuild(&self, db_list: Vec<(String, SqliteTable)>) {
+        // SqliteTable is Clone+Send, so we can move it into the thread safely
+        // Clone Arcs to keep fingerprints alive in background thread
+        let fingerprints = self.fingerprints.clone();
+        let ready_flag = self.fingerprints_ready.clone();
+        let sys_table = self.sys_table.clone();
         
         std::thread::spawn(move || {
             println!("Storage: Background fingerprint rebuild started for {} database(s)", db_list.len());
             let start = std::time::Instant::now();
             
-            // Safety: Storage outlives this thread, pointers are valid
-            let fingerprints = unsafe { 
-                &*(fingerprints_addr as *const dashmap::DashMap<String, (std::sync::atomic::AtomicU64, std::sync::atomic::AtomicU64)>) 
-            };
-            let ready_flag = unsafe { &*(ready_addr as *const std::sync::atomic::AtomicBool) };
-            
-            for (name, history_ks) in db_list {
-                // Scan all items to compute fingerprint
-                // Fjall has a bug with empty keyspaces that causes DashMap panic
-                // Use catch_unwind to ensure thread continues and sets fingerprints_ready
-                let scan_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let mut hash: u64 = 0;
-                    let mut count: u64 = 0;
-                    let scan_start = std::time::Instant::now();
-                    for item in history_ks.range::<Vec<u8>, _>(..) {
-                        if let Ok((k, v)) = item.into_inner() {
-                            hash ^= Self::hash_item(&k, &v);
-                            count += 1;
-                            if count % 100_000 == 0 {
-                                println!("Storage: Fingerprint rebuild for '{}' - scanned {} items ({:.1}s)...", 
-                                         name, count, scan_start.elapsed().as_secs_f64());
-                            }
-                        }
-                    }
-                    println!("Storage: Fingerprint rebuild for '{}' completed - {} items in {:.1}s", 
-                             name, count, scan_start.elapsed().as_secs_f64());
-                    (hash, count)
-                }));
+            for (name, history_table) in db_list {
+                let scan_start = std::time::Instant::now();
+                let mut hash: u64 = 0;
+                let mut count: u64 = 0;
                 
-                let (h, c) = match scan_result {
-                    Ok((hash, count)) => (hash, count),
-                    Err(_) => (0, 0), // Empty keyspace - fingerprint is trivially (0, 0)
-                };
+                for (k, v) in history_table.iter() {
+                    hash ^= Self::hash_item(&k, &v);
+                    count += 1;
+                    if count % 100_000 == 0 {
+                        println!("Storage: Fingerprint rebuild for '{}' - scanned {} items ({:.1}s)...", 
+                                 name, count, scan_start.elapsed().as_secs_f64());
+                    }
+                }
+                println!("Storage: Fingerprint rebuild for '{}' completed - {} items in {:.1}s", 
+                         name, count, scan_start.elapsed().as_secs_f64());
                 
                 // Update the DashMap entry
                 use std::sync::atomic::Ordering;
                 if let Some(entry) = fingerprints.get(&name) {
                     let (h_atomic, c_atomic) = entry.value();
-                    h_atomic.store(h, Ordering::Release);
-                    c_atomic.store(c, Ordering::Release);
+                    h_atomic.store(hash, Ordering::Release);
+                    c_atomic.store(count, Ordering::Release);
                 }
                 
-                // Persist to sys_keyspace
+                // Persist to sys table
                 let key = format!("fp:{}", name);
                 let mut buf = vec![0u8; 16];
-                BigEndian::write_u64(&mut buf[0..8], c);
-                BigEndian::write_u64(&mut buf[8..16], h);
-                if let Err(e) = sys_keyspace.insert(key, buf) {
+                BigEndian::write_u64(&mut buf[0..8], count);
+                BigEndian::write_u64(&mut buf[8..16], hash);
+                if let Err(e) = sys_table.insert(key.as_bytes(), &buf) {
                     eprintln!("Storage: Failed to persist rebuilt fingerprint for '{}': {}", name, e);
                 }
                 
-                println!("Storage: Rebuilt fingerprint for '{}' (Count: {}, Hash: {:x})", name, c, h);
+                println!("Storage: Rebuilt fingerprint for '{}' (Count: {}, Hash: {:x})", name, count, hash);
             }
             
-            // Mark fingerprints as ready - ALWAYS set this even if scans failed
             ready_flag.store(true, std::sync::atomic::Ordering::Release);
-            
             println!("Storage: Background fingerprint rebuild complete in {:?}", start.elapsed());
         });
     }
@@ -897,17 +684,12 @@ impl Storage {
     fn update_history_hash(&self, db_name: &str, key: &[u8], value: &[u8]) {
         let item_hash = Self::hash_item(key, value);
         
-        // Optimistic update using DashMap
-        // If entry missing, we might need to insert it (or ignore if lazy?)
-        // Better to initialize if missing.
-        
         if let Some(entry) = self.fingerprints.get(db_name) {
              let (h_stat, c_stat) = entry.value();
              use std::sync::atomic::Ordering;
              h_stat.fetch_xor(item_hash, Ordering::Relaxed);
              c_stat.fetch_add(1, Ordering::Relaxed);
         } else {
-             // Handle missing entry (Race condition on creation? or just insert)
              use std::sync::atomic::AtomicU64;
              self.fingerprints.insert(db_name.to_string(), (
                  AtomicU64::new(item_hash),
@@ -919,7 +701,7 @@ impl Storage {
 
 impl Drop for Storage {
     fn drop(&mut self) {
-        println!("Storage Drop triggered. Ensuring WAL and memtables are flushed...");
+        println!("Storage Drop triggered. Ensuring data is flushed...");
         if let Err(e) = self.flush() {
             eprintln!("Failed to flush storage during drop: {}", e);
         } else {

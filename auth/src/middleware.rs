@@ -69,11 +69,12 @@ pub async fn auth_middleware(
 
     // Bug Fix 2: Token blacklist check in middleware
     let token_key = format!("token:{}", token_details.token_uuid);
-    let token_exists = auth_state.store.tokens.contains_key(token_key.as_bytes())
+    let token_exists = auth_state.store.tokens.kv_get(token_key.as_bytes())
         .map_err(|e| {
             tracing::error!("Auth store error: {:?}", e);
             (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { status: "fail", message: "Internal error".to_string() }))
-        })?;
+        })?
+        .is_some();
 
     if !token_exists {
          let err = ErrorResponse {
@@ -85,7 +86,7 @@ pub async fn auth_middleware(
 
     // Fetch user from store
     let user_key = format!("user:{}", token_details.user_id);
-    let user_bytes = auth_state.store.users.get(user_key.as_bytes())
+    let user_bytes = auth_state.store.users.kv_get(user_key.as_bytes())
         .map_err(|e| {
             tracing::error!("Auth store error: {:?}", e);
             (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { status: "fail", message: "Internal error".to_string() }))

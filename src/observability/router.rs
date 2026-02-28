@@ -53,8 +53,7 @@ async fn list_metrics(
     // Note: fjall iter is alphabetical on keys.
     // "c:graphql_requests:17000..."
     
-    for item in state.storage.metrics_keyspace.iter() {
-        if let Ok((k, v)) = item.into_inner() {
+    for (k, v) in state.storage.metrics_table.iter() {
             if let Ok(key_str) = std::str::from_utf8(&k) {
                 // key_str: "type:name:ts"
                 let parts: Vec<&str> = key_str.split(':').collect();
@@ -78,7 +77,6 @@ async fn list_metrics(
                     }
                 }
             }
-        }
     }
     
     Json(serde_json::Value::Object(result))
@@ -93,12 +91,11 @@ async fn list_traces(
     
     let mut traces = Vec::new();
     
-    for item in state.storage.traces_keyspace.iter().rev() {
-         if let Ok((_, v)) = item.into_inner() {
-             if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&v) {
-                 traces.push(json);
-                 if traces.len() >= 50 { break; }
-             }
+    let mut items = state.storage.traces_table.iter();
+    items.reverse();
+    for (_, v) in items.into_iter().take(50) {
+         if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&v) {
+             traces.push(json);
          }
     }
     

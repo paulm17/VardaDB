@@ -31,13 +31,11 @@ pub async fn generate_magiclink_handler(
 
     // Find User
     let mut found_user = None;
-    for kv in auth_state.store.users.iter() {
-        if let Ok((_k, v)) = kv.into_inner() {
+    for (_k, v) in auth_state.store.users.kv_prefix(b"") {
             if let Ok(user) = serde_json::from_slice::<UserRecord>(&v) {
                 if user.email == email {
                     found_user = Some(user);
                     break;
-                }
             } else if let Ok(user) = bincode::deserialize::<UserRecord>(&v) {
                 if user.email == email {
                     found_user = Some(user);
@@ -69,7 +67,7 @@ pub async fn generate_magiclink_handler(
     let confirmation_key = format!("confirm:{}", code);
     let serialized_confirmation = serde_json::to_vec(&confirmation).unwrap();
 
-    if let Err(e) = auth_state.store.confirmations.insert(confirmation_key.as_bytes(), &serialized_confirmation) {
+    if let Err(e) = auth_state.store.confirmations.kv_insert(confirmation_key.as_bytes(), &serialized_confirmation) {
         tracing::error!("Failed to save magic link code: {}", e);
         return Err((StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
              "status": "fail",
@@ -95,7 +93,7 @@ pub async fn generate_magiclink_handler(
                 job_payload.to_string().into_bytes()
             );
             
-            let _ = queue.push(job);
+            let _ = queue.push_job(job);
             true
         } else {
             tracing::warn!("Auth email is disabled! Magic link generated but not sent: {}", code);

@@ -29,8 +29,8 @@ async-trait = "0.1"
 # Grafbase uses "async-graphql-value" and custom resolution.
 # We will verify feature availability.
 
-# Storage (Fjall)
-fjall = { version = "3.0.1", features = ["bytes_1", "lz4"] } 
+# Storage (SQLite)
+rusqlite = { version = "0.31", features = ["bundled"] }
 
 # Durable Execution Engine
 jobs = { path = "jobs" }

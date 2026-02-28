@@ -50,6 +50,7 @@ async fn test_execution_flow() {
         fn search_vectors(&self, _: &[f64], _: usize) -> Vec<(u64, f64)> { vec![] }
         fn search_hybrid(&self, _: &str, _: &str, _: &[f64], _: usize) -> Vec<(u64, f64)> { vec![] }
         fn flush(&self) -> Result<(), String> { Ok(()) }
+        fn bulk_check_permission(&self, _ctx: &async_graphql::dynamic::ResolverContext<'_>, _checks: Vec<(String, String, String)>) -> async_graphql::Result<Vec<(String, String, String, bool)>> { Ok(vec![]) }
         fn compact(&self) -> Result<u64, String> { Ok(0) }
         fn needs_compaction(&self) -> bool { false }
     }

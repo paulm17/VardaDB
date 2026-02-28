@@ -36,7 +36,7 @@ impl InfoStorage for VardaInfoStorage {
         let bytes = bincode::serialize(file_info)
             .map_err(|e| VardaStorageError::StorageError(e.to_string()))?;
             
-        self.storage.sys_keyspace.insert(&key, bytes)
+        self.storage.sys_table.insert(key.as_bytes(), bytes)
             .map_err(|e| VardaStorageError::StorageError(e.to_string()))?;
             
         Ok(())
@@ -45,7 +45,7 @@ impl InfoStorage for VardaInfoStorage {
     async fn get_info(&self, file_id: &str) -> Result<FileInfo, VardaStorageError> {
         let key = self.key(file_id);
             
-        if let Some(bytes) = self.storage.sys_keyspace.get(&key).map_err(|e| VardaStorageError::StorageError(e.to_string()))? {
+        if let Some(bytes) = self.storage.sys_table.get(key.as_bytes()).map_err(|e| VardaStorageError::StorageError(e.to_string()))? {
             let file_info: FileInfo = bincode::deserialize(&bytes)
                 .map_err(|e| VardaStorageError::StorageError(e.to_string()))?;
             Ok(file_info)
@@ -57,7 +57,7 @@ impl InfoStorage for VardaInfoStorage {
     async fn remove_info(&self, file_id: &str) -> Result<(), VardaStorageError> {
         let key = self.key(file_id);
             
-        self.storage.sys_keyspace.remove(&key)
+        self.storage.sys_table.remove(key.as_bytes())
             .map_err(|e| VardaStorageError::StorageError(e.to_string()))?;
             
         Ok(())

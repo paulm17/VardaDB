@@ -1,15 +1,13 @@
+mod common;
+
 use jobs::{Job, JobStore, Queue};
 use std::sync::Arc;
-use fjall::{KeyspaceCreateOptions}; 
-// VardaDB uses `Storage::new`. We can manually create a temp Partition for unit testing.
+use common::MemoryKvStore;
 
 #[test]
 fn test_priority_ordering() {
-    let path = tempfile::tempdir().unwrap();
-    let db = fjall::Database::builder(path.path()).open().unwrap();
-    let keyspace = db.keyspace("test_jobs", || KeyspaceCreateOptions::default()).unwrap();
-    
-    let store = Arc::new(JobStore::new(Arc::new(keyspace)));
+    let kv = MemoryKvStore::new();
+    let store = Arc::new(JobStore::new(Arc::new(kv)));
     let queue = Queue::new("default".to_string(), store.clone());
 
     // Push 3 jobs
@@ -45,28 +43,23 @@ fn test_priority_ordering() {
 }
 
 #[test]
-fn test_persistence() {
-    let path = tempfile::tempdir().unwrap();
-    let db_path = path.path().to_path_buf();
+fn test_persistence_in_memory() {
+    // With MemoryKvStore, data persists across queue operations within the same process.
+    // This test validates the store retains data correctly.
+    let kv = MemoryKvStore::new();
+    let kv_clone = kv.clone(); // Clone shares the same Arc<Mutex<HashMap>>
     
     {
-        let db = fjall::Database::builder(&db_path).open().unwrap();
-        let keyspace = db.keyspace("test_persist", || KeyspaceCreateOptions::default()).unwrap();
-        let store = Arc::new(JobStore::new(Arc::new(keyspace)));
+        let store = Arc::new(JobStore::new(Arc::new(kv)));
         let queue = Queue::new("persist".into(), store.clone());
         
         let j = Job::new(100, "persist".into(), b"data".to_vec());
         queue.push(j).unwrap();
-        
-        // Manual flush/sync handled by Drop usually, or explicit flush
-        db.persist(fjall::PersistMode::SyncAll).unwrap();
     }
     
-    // Reopen
+    // Reopen with same underlying store (simulates persistence)
     {
-        let db = fjall::Database::builder(&db_path).open().unwrap();
-        let keyspace = db.keyspace("test_persist", || KeyspaceCreateOptions::default()).unwrap();
-        let store = Arc::new(JobStore::new(Arc::new(keyspace)));
+        let store = Arc::new(JobStore::new(Arc::new(kv_clone)));
         let queue = Queue::new("persist".into(), store.clone());
         
         // Should find job

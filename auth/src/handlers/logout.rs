@@ -45,14 +45,14 @@ pub async fn logout_handler(
     if let Some(token) = access_token {
         if let Ok(details) = verify_paseto_token(&token, TokenKind::Access, &auth_state) {
             let key = format!("token:{}", details.token_uuid);
-            let _ = auth_state.store.tokens.remove(key.as_bytes());
+            let _ = auth_state.store.tokens.kv_remove(key.as_bytes());
         }
     }
 
     if let Some(token) = refresh_token {
         if let Ok(details) = verify_paseto_token(&token, TokenKind::Refresh, &auth_state) {
             let key = format!("token:{}", details.token_uuid);
-            let _ = auth_state.store.tokens.remove(key.as_bytes());
+            let _ = auth_state.store.tokens.kv_remove(key.as_bytes());
         }
     }
 

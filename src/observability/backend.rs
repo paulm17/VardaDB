@@ -206,7 +206,7 @@ where
                          key.extend_from_slice(&data.start_ts.to_be_bytes());
                          key.extend_from_slice(&(duration as u32).to_be_bytes()); 
                          
-                         let _ = self.storage.traces_keyspace.insert(&key, &json);
+                         let _ = self.storage.traces_table.insert(&key, &json);
                      }
                 }
             }
@@ -255,7 +255,7 @@ pub fn init(storage: Arc<Storage>) {
                 let key_str = entry.key();
                 let val = entry.value().load(Ordering::Relaxed);
                 let db_key = format!("c:{}:{}", key_str, now_ts);
-                let _ = flusher_storage.metrics_keyspace.insert(db_key.as_bytes(), &val.to_be_bytes());
+                let _ = flusher_storage.metrics_table.insert(db_key.as_bytes(), &val.to_be_bytes());
             }
             
             // Gauges
@@ -263,7 +263,7 @@ pub fn init(storage: Arc<Storage>) {
                 let key_str = entry.key();
                 let val_bits = entry.value().load(Ordering::Relaxed);
                 let db_key = format!("g:{}:{}", key_str, now_ts);
-                let _ = flusher_storage.metrics_keyspace.insert(db_key.as_bytes(), &val_bits.to_be_bytes());
+                let _ = flusher_storage.metrics_table.insert(db_key.as_bytes(), &val_bits.to_be_bytes());
             }
             
             // Histograms
@@ -279,10 +279,10 @@ pub fn init(storage: Arc<Storage>) {
                  lock.clear();
                  
                  let db_key_p50 = format!("h:{}:p50:{}", key_str, now_ts);
-                 let _ = flusher_storage.metrics_keyspace.insert(db_key_p50.as_bytes(), &p50.to_be_bytes());
+                 let _ = flusher_storage.metrics_table.insert(db_key_p50.as_bytes(), &p50.to_be_bytes());
                  
                  let db_key_p90 = format!("h:{}:p90:{}", key_str, now_ts);
-                 let _ = flusher_storage.metrics_keyspace.insert(db_key_p90.as_bytes(), &p90.to_be_bytes());
+                 let _ = flusher_storage.metrics_table.insert(db_key_p90.as_bytes(), &p90.to_be_bytes());
              }
              
              // System Metrics
@@ -293,10 +293,10 @@ pub fn init(storage: Arc<Storage>) {
              let mem_usage = sys.used_memory();
              
              let k_cpu = format!("g:system.cpu:{}", now_ts);
-             let _ = flusher_storage.metrics_keyspace.insert(k_cpu.as_bytes(), &(cpu_usage as f64).to_be_bytes());
+             let _ = flusher_storage.metrics_table.insert(k_cpu.as_bytes(), &(cpu_usage as f64).to_be_bytes());
              
              let k_mem = format!("g:system.memory:{}", now_ts);
-             let _ = flusher_storage.metrics_keyspace.insert(k_mem.as_bytes(), &(mem_usage as f64).to_be_bytes());
+             let _ = flusher_storage.metrics_table.insert(k_mem.as_bytes(), &(mem_usage as f64).to_be_bytes());
         }
     }); 
 }

@@ -1,12 +1,18 @@
 //! Queue implementation for VardaJobs.
 //! Handles high-level push/pop/ack operations using JobStore.
 
-use crate::storage::JobStore;
+use crate::storage::{JobStore, KvStore};
 use crate::types::{Job, JobId};
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::str::FromStr;
+
+/// Dyn-safe trait for pushing jobs into a queue.
+/// Used by sub-crates (e.g., auth) that don't know the concrete KvStore type.
+pub trait JobEnqueuer: Send + Sync {
+    fn push_job(&self, job: Job) -> Result<(), String>;
+}
 
 
 /// Helper to get current time in ms.
@@ -17,20 +23,23 @@ pub fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
-pub struct Queue {
+pub struct Queue<S: KvStore > {
     queue_name: String,
-    store: Arc<JobStore>,
-    // Simple local mutex to serialize pops on this queue instance.
-    // In a distributed/multi-process setup, we rely on Fjall's atomicity or external locks.
-    // But since VardaDB is single-process embedded, this mutex prevents thread races on Pop.
+    store: Arc<JobStore<S>>,
     pop_lock: Mutex<()>, 
     
     /// Maximum number of active jobs allowed for this queue.
     concurrency_limit: AtomicUsize,
 }
 
-impl Queue {
-    pub fn new(queue_name: String, store: Arc<JobStore>) -> Self {
+impl<S: KvStore + 'static> JobEnqueuer for Queue<S> {
+    fn push_job(&self, job: Job) -> Result<(), String> {
+        self.push(job)
+    }
+}
+
+impl<S: KvStore> Queue<S> {
+    pub fn new(queue_name: String, store: Arc<JobStore<S>>) -> Self {
         Self {
             queue_name,
             store,

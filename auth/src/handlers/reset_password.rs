@@ -18,7 +18,7 @@ pub async fn reset_password_handler(
     let code = body.code.trim();
     let confirmation_key = format!("confirm:{}", code);
 
-    let confirmation_bytes = auth_state.store.confirmations.get(confirmation_key.as_bytes())
+    let confirmation_bytes = auth_state.store.confirmations.kv_get(confirmation_key.as_bytes())
         .map_err(|e| {
              tracing::error!("Auth store error: {:?}", e);
              (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "status": "fail", "message": "Internal error" })))
@@ -60,7 +60,7 @@ pub async fn reset_password_handler(
 
     // Load User
     let user_key = format!("user:{}", confirmation.user_id);
-    let user_bytes = auth_state.store.users.get(user_key.as_bytes())
+    let user_bytes = auth_state.store.users.kv_get(user_key.as_bytes())
         .map_err(|e| {
              tracing::error!("Auth store error: {:?}", e);
              (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "status": "fail", "message": "Internal error" })))
@@ -77,14 +77,14 @@ pub async fn reset_password_handler(
     user.password_hash = Some(hashed_password);
     user.updated_at = Some(Utc::now().timestamp());
 
-    auth_state.store.users.insert(user_key.as_bytes(), &serde_json::to_vec(&user).unwrap()).map_err(|e| {
+    auth_state.store.users.kv_insert(user_key.as_bytes(), &serde_json::to_vec(&user).unwrap()).map_err(|e| {
          tracing::error!("Failed to update user: {:?}", e);
          (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "status": "fail", "message": "Internal error" })))
     })?;
 
     // Update confirmation flow
     confirmation.flow = ConfirmationFlow::Completed;
-    auth_state.store.confirmations.insert(confirmation_key.as_bytes(), &serde_json::to_vec(&confirmation).unwrap()).map_err(|e| {
+    auth_state.store.confirmations.kv_insert(confirmation_key.as_bytes(), &serde_json::to_vec(&confirmation).unwrap()).map_err(|e| {
          tracing::error!("Failed to update confirmation: {:?}", e);
          (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "status": "fail", "message": "Internal error" })))
     })?;

@@ -23,13 +23,11 @@ pub async fn login_user_handler(
 
     // Find user (linear scan since we don't have secondary index synced perfectly yet, fine for MVP)
     let mut found_user = None;
-    for kv in auth_state.store.users.iter() {
-        if let Ok((_k, v)) = kv.into_inner() {
+    for (_k, v) in auth_state.store.users.kv_prefix(b"") {
             if let Ok(user) = serde_json::from_slice::<UserRecord>(&v) {
                 if user.email == email {
                     found_user = Some(user);
                     break;
-                }
             } else if let Ok(user) = bincode::deserialize::<UserRecord>(&v) {
                 if user.email == email {
                     found_user = Some(user);
@@ -117,8 +115,8 @@ pub async fn login_user_handler(
     let a_key = format!("token:{}", access_token_details.token_uuid);
     let r_key = format!("token:{}", refresh_token_details.token_uuid);
 
-    auth_state.store.tokens.insert(a_key.as_bytes(), &serde_json::to_vec(&access_token_record).unwrap()).unwrap();
-    auth_state.store.tokens.insert(r_key.as_bytes(), &serde_json::to_vec(&refresh_token_record).unwrap()).unwrap();
+    auth_state.store.tokens.kv_insert(a_key.as_bytes(), &serde_json::to_vec(&access_token_record).unwrap()).unwrap();
+    auth_state.store.tokens.kv_insert(r_key.as_bytes(), &serde_json::to_vec(&refresh_token_record).unwrap()).unwrap();
 
     let mut response = Response::new(
         serde_json::json!({"status": "success", "access_token": access_token_details.token})

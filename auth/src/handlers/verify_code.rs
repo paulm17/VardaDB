@@ -16,7 +16,7 @@ pub async fn verify_code_handler(
     let code = body.code.trim();
     let confirmation_key = format!("confirm:{}", code);
 
-    let confirmation_bytes = auth_state.store.confirmations.get(confirmation_key.as_bytes())
+    let confirmation_bytes = auth_state.store.confirmations.kv_get(confirmation_key.as_bytes())
         .map_err(|e| {
              tracing::error!("Auth store error: {:?}", e);
              (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "status": "fail", "message": "Internal error" })))
@@ -44,7 +44,7 @@ pub async fn verify_code_handler(
     }
 
     confirmation.flow = ConfirmationFlow::Seen;
-    auth_state.store.confirmations.insert(confirmation_key.as_bytes(), &serde_json::to_vec(&confirmation).unwrap()).unwrap();
+    auth_state.store.confirmations.kv_insert(confirmation_key.as_bytes(), &serde_json::to_vec(&confirmation).unwrap()).unwrap();
 
     let redirect_url = confirmation.redirect_to.unwrap_or_else(|| "/".to_string());
     
