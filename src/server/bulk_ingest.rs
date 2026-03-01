@@ -1,4 +1,4 @@
-use crate::bridge::fjall_resolver::FjallResolver;
+use crate::bridge::sqlite_resolver::SqliteResolver;
 use crate::ServerState;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -72,7 +72,7 @@ pub async fn start_tcp_listener(state: Arc<ServerState>, port: u16) {
                     };
                     
                     // Create resolver targeting the correct database
-                    let resolver = FjallResolver::with_db(
+                    let resolver = SqliteResolver::with_db(
                         state_clone.storage.clone(), 
                         state_clone.event_bus.clone(),
                         db_name.clone()
@@ -143,7 +143,7 @@ pub async fn start_tcp_listener(state: Arc<ServerState>, port: u16) {
                             }
                         };
 
-                        // 4. Stream into FjallResolver
+                        // 4. Stream into SqliteResolver
                         for record in records {
                             let (uniques, inverses, search_fields) = if let Some(meta) = schema.type_metadata.get(&record.type_name) {
                                 (&meta.uniques, &meta.inverses, &meta.search_fields)

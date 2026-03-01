@@ -30,7 +30,8 @@ async-trait = "0.1"
 # We will verify feature availability.
 
 # Storage (SQLite)
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { version = "0.31", features = ["bundled", "load_extension"] }
+sqlite-vec = "0.1"
 
 # Durable Execution Engine
 jobs = { path = "jobs" }

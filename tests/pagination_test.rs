@@ -1,6 +1,6 @@
 use vardadb::engine::schema::Schema;
 use vardadb::storage::backend::Storage;
-use vardadb::bridge::fjall_resolver::FjallResolver;
+use vardadb::bridge::sqlite_resolver::SqliteResolver;
 use std::sync::Arc;
 use tempfile::tempdir;
 use serde_json::Value;
@@ -17,7 +17,7 @@ async fn test_pagination_flow() {
         }
     ";
     let schema = Schema::load_from_sdl(sdl).expect("Failed to load schema");
-    let resolver = Box::new(FjallResolver::new(storage.clone(), "default"));
+    let resolver = Box::new(SqliteResolver::new(storage.clone(), "default"));
     
     for i in 1..=5 {
         let mutation = format!(

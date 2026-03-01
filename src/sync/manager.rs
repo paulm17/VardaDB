@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use crate::sync::network_layer::NetworkLayer;
-use crate::bridge::fjall_resolver::FjallResolver;
+use crate::bridge::sqlite_resolver::SqliteResolver;
 use zenoh::config::Config;
 use crate::engine::resolver::Resolver;
 use crate::config::ZenohConfig;
@@ -10,20 +10,22 @@ use tokio::sync::RwLock;
 
 pub struct SyncManager {
     network: Arc<NetworkLayer>,
-    resolver: Arc<FjallResolver>,
+    resolver: Arc<SqliteResolver>,
     prefix: String,
     schema: Arc<RwLock<Arc<crate::engine::schema::Schema>>>,
     cache: Arc<crate::engine::cache::QueryCache>,
     remote_append_path: Option<String>,
+    planner_config: Arc<crate::config::PlannerConfig>,
 }
 
 impl SyncManager {
     pub async fn new(
-        resolver: Arc<FjallResolver>,
+        resolver: Arc<SqliteResolver>,
         config: ZenohConfig,
         remote_append_path: Option<String>,
         schema: Arc<RwLock<Arc<crate::engine::schema::Schema>>>,
         cache: Arc<crate::engine::cache::QueryCache>,
+        planner_config: Arc<crate::config::PlannerConfig>,
     ) -> anyhow::Result<Self> {
         let mut z_config = Config::default(); 
         
@@ -51,6 +53,7 @@ impl SyncManager {
             schema,
             cache,
             remote_append_path,
+            planner_config,
         })
     }
 
@@ -147,6 +150,7 @@ impl SyncManager {
         let prefix_worker = self.prefix.clone();
         let schema_worker = self.schema.clone();
         let cache_worker = self.cache.clone();
+        let planner_worker = self.planner_config.clone();
         
         // Get Node ID from Resolver -> Storage
         // self.resolver.storage is Arc<Storage>, Storage has public node_id? 
@@ -202,7 +206,7 @@ impl SyncManager {
                          if current_sdl != new_sdl {
                              println!("Sync: Received new schema. Applying...");
                              let new_resolver_instance = resolver_worker.as_ref().clone(); 
-                             match crate::engine::schema::Schema::load_with_resolver(&new_sdl, new_resolver_instance) {
+                             match crate::engine::schema::Schema::load_with_resolver_and_config(&new_sdl, new_resolver_instance, planner_worker.clone()) {
                                  Ok(new_schema) => {
                                      *lock = Arc::new(new_schema);
                                       let storage_path = "varda_db_data"; 

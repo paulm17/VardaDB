@@ -1,4 +1,4 @@
-use vardadb::bridge::fjall_resolver::FjallResolver;
+use vardadb::bridge::sqlite_resolver::SqliteResolver;
 use vardadb::storage::backend::Storage;
 use vardadb::storage::codec::Codec;
 use vardadb::engine::resolver::Resolver;
@@ -29,7 +29,7 @@ fn test_bridge_resolution() {
     storage.insert("default", &index_key, &uid_bytes).unwrap();
     
     // 2. Initialize Resolver
-    let resolver = FjallResolver::new(storage.clone(), "default");
+    let resolver = SqliteResolver::new(storage.clone(), "default");
     
     // 3. Test find_uid (Index Scan)
     let found_uid = resolver.find_uid("name", "Alice");

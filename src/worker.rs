@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use tokio::time::{sleep, Duration};
 use crate::storage::backend::Storage;
-use crate::bridge::fjall_resolver::FjallResolver;
+use crate::bridge::sqlite_resolver::SqliteResolver;
 use crate::engine::resolver::Resolver;
 use async_graphql::Value;
 use std::collections::HashMap;
@@ -88,7 +88,7 @@ impl Worker {
 
     async fn process_heartbeat(&self) {
         // Find Active Agents in "default" DB
-        let resolver = FjallResolver::new(self.storage.clone(), "default");
+        let resolver = SqliteResolver::new(self.storage.clone(), "default");
         
         let mut filter = HashMap::new();
         filter.insert("active".to_string(), Value::Boolean(true));

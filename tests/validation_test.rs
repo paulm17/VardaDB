@@ -2,14 +2,14 @@
 #[tokio::test(flavor = "multi_thread")]
 async fn test_validation() {
     use vardadb::engine::schema::Schema;
-    use vardadb::bridge::fjall_resolver::FjallResolver;
+    use vardadb::bridge::sqlite_resolver::SqliteResolver;
     use vardadb::storage::backend::Storage;
     use std::sync::Arc;
     use serde_json::Value as JsonValue;
 
     let tmp_dir = tempfile::tempdir().unwrap();
     let storage = Storage::new(tmp_dir.path(), None).unwrap();
-    let resolver = Box::new(FjallResolver::new(Arc::new(storage), "default"));
+    let resolver = Box::new(SqliteResolver::new(Arc::new(storage), "default"));
 
     let sdl = "
         type User {

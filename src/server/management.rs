@@ -3,7 +3,7 @@ use tokio::sync::RwLock;
 use async_trait::async_trait;
 use crate::storage::backend::Storage;
 use crate::realtime::bus::EventBus;
-use crate::bridge::fjall_resolver::FjallResolver;
+use crate::bridge::sqlite_resolver::SqliteResolver;
 use management::{DatabaseManager, DbStatus};
 
 #[derive(Clone)]
@@ -12,6 +12,7 @@ pub struct ManagementState {
     pub schemas: Arc<dashmap::DashMap<String, Arc<RwLock<Arc<crate::engine::schema::Schema>>>>>,
     pub event_bus: EventBus,
     pub storage_path: std::path::PathBuf,
+    pub planner_config: Arc<crate::config::PlannerConfig>,
 }
 
 #[async_trait]
@@ -23,8 +24,8 @@ impl DatabaseManager for ManagementState {
                  let schema_body = crate::defaults::AGENT_SCHEMA;
                  println!("Injecting Agent Schema into database: {}", name);
                  
-                 let resolver = FjallResolver::with_db(self.storage.clone(), self.event_bus.clone(), name.to_string());
-                 match crate::engine::schema::Schema::load_with_resolver(schema_body, resolver) {
+                 let resolver = SqliteResolver::with_db(self.storage.clone(), self.event_bus.clone(), name.to_string());
+                 match crate::engine::schema::Schema::load_with_resolver_and_config(schema_body, resolver, self.planner_config.clone()) {
                     Ok(new_schema) => {
                          let arc_schema = Arc::new(RwLock::new(Arc::new(new_schema)));
                          self.schemas.insert(name.to_string(), arc_schema);
@@ -98,9 +99,9 @@ impl DatabaseManager for ManagementState {
              return Err(format!("Database '{}' not found", db_name));
         }
     
-        let resolver = FjallResolver::with_db(self.storage.clone(), self.event_bus.clone(), db_name.to_string());
+        let resolver = SqliteResolver::with_db(self.storage.clone(), self.event_bus.clone(), db_name.to_string());
         
-        match crate::engine::schema::Schema::load_with_resolver(sdl, resolver) {
+        match crate::engine::schema::Schema::load_with_resolver_and_config(sdl, resolver, self.planner_config.clone()) {
             Ok(new_schema) => {
                  let arc_schema = Arc::new(RwLock::new(Arc::new(new_schema)));
                  self.schemas.insert(db_name.to_string(), arc_schema);

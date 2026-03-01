@@ -1,6 +1,6 @@
 use async_graphql::Request;
 use std::sync::Arc;
-use vardadb::bridge::fjall_resolver::FjallResolver;
+use vardadb::bridge::sqlite_resolver::SqliteResolver;
 use vardadb::storage::backend::Storage;
 use serde_json::Value;
 
@@ -20,7 +20,7 @@ async fn test_geo_support() {
     // Setup Resolver
     let tmp_dir = tempfile::tempdir().unwrap();
     let storage = Arc::new(Storage::new(tmp_dir.path(), None).unwrap());
-    let resolver = FjallResolver::new(storage.clone(), "default");
+    let resolver = SqliteResolver::new(storage.clone(), "default");
     let boxed_resolver: Box<dyn vardadb::engine::resolver::Resolver + Send + Sync> = Box::new(resolver.clone());
 
     // Create a Store with Point and Polygon
@@ -53,8 +53,8 @@ async fn test_geo_support() {
     // For query, we need a new resolver instance or share the storage?
     // Storage is Arc, so we can reuse or recreate.
     // The previous resolver was consumed by box? Box<T> owns T.
-    // We need another one for the query or clone it (FjallResolver is Clone).
-    let resolver_query = FjallResolver::new(storage, "default");
+    // We need another one for the query or clone it (SqliteResolver is Clone).
+    let resolver_query = SqliteResolver::new(storage, "default");
     let boxed_resolver_query: Box<dyn vardadb::engine::resolver::Resolver + Send + Sync> = Box::new(resolver_query);
 
     // Query it back

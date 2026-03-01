@@ -9,13 +9,13 @@ use crate::storage::timestamp::Timestamp;
 use crate::realtime::bus::{EventBus, MutationEvent, MutationType};
 
 #[derive(Clone)]
-pub struct FjallResolver {
+pub struct SqliteResolver {
     pub storage: Arc<Storage>,
     pub bus: EventBus,
     pub db_name: String,
 }
 
-impl FjallResolver {
+impl SqliteResolver {
     pub fn new(storage: Arc<Storage>, db_name: &str) -> Self {
         Self {
             storage,
@@ -24,7 +24,7 @@ impl FjallResolver {
         }
     }
 
-    /// Create a FjallResolver with a shared EventBus.
+    /// Create a SqliteResolver with a shared EventBus.
     /// Use this to ensure all resolver instances publish to the same bus.
     pub fn with_bus(storage: Arc<Storage>, bus: EventBus) -> Self {
         Self {
@@ -51,6 +51,29 @@ impl FjallResolver {
 
     pub fn compute_fingerprint_range(&self, start: &Timestamp, end: &Timestamp) -> anyhow::Result<crate::sync::reconciliation::RangeFingerprint> {
         crate::sync::reconciliation::compute_fingerprint(&self.storage, &self.db_name, start, end)
+    }
+
+    /// Convert a serde_json::Value to a rusqlite::types::Value for SQL pushdown.
+    /// json_extract() returns typed values: TEXT for strings, INTEGER for ints,
+    /// REAL for floats, so the comparison parameter must match.
+    fn json_to_sqlite_value(val: &Value) -> rusqlite::types::Value {
+        match val {
+            Value::String(s) => rusqlite::types::Value::Text(s.clone()),
+            Value::Number(n) => {
+                if let Some(i) = n.as_i64() {
+                    rusqlite::types::Value::Integer(i)
+                } else if let Some(f) = n.as_f64() {
+                    rusqlite::types::Value::Real(f)
+                } else {
+                    rusqlite::types::Value::Null
+                }
+            }
+            Value::Boolean(b) => rusqlite::types::Value::Integer(if *b { 1 } else { 0 }),
+            Value::Null => rusqlite::types::Value::Null,
+            Value::Enum(e) => rusqlite::types::Value::Text(e.to_string()),
+            // For complex types (Object, List), fall back to text representation
+            other => rusqlite::types::Value::Text(serde_json::to_string(other).unwrap_or_default()),
+        }
     }
 
     pub fn get_history_range(&self, start: &Timestamp, end: &Timestamp) -> anyhow::Result<Vec<(Vec<u8>, Vec<u8>)>> {
@@ -287,251 +310,156 @@ impl FjallResolver {
          Ok(())
     }
 
-    // Helper for BM25 Stats
-    fn increment_stat(&self, key: &[u8], delta: i64) -> Result<(), String> {
-        let val_opt = self.storage.get(&self.db_name, key).map_err(|e| e.to_string())?;
-        let current = if let Some(bytes) = val_opt {
-            if bytes.len() >= 8 {
-               byteorder::BigEndian::read_i64(&bytes)
-            } else { 0 }
-        } else { 0 };
-        
-        let new_val = current + delta;
-        let mut buf = [0u8; 8];
-        byteorder::BigEndian::write_i64(&mut buf, new_val);
-        self.storage.insert(&self.db_name, key, &buf).map_err(|e| e.to_string())?;
-        Ok(())
-    }
 
-    fn get_stat(&self, key: &[u8]) -> Option<i64> {
-         if let Ok(Some(bytes)) = self.storage.get(&self.db_name, key) {
-             if bytes.len() >= 8 {
-                 Some(byteorder::BigEndian::read_i64(&bytes))
-             } else { None }
-         } else { None }
-    }
 
     fn write_term_index(&self, uid: u64, field: &str, text: &str, strategy: &str) -> Result<(), String> {
-        let tokens = crate::engine::tokenizer::Tokenizer::tokenize(text, strategy);
-        let doc_len = tokens.len() as i64;
         let index_field = if strategy == "term" { field.to_string() } else { format!("{}.{}", field, strategy) };
-
-        // 1. Update Doc Count (N)
-        let n_key = Codec::encode_stat_key(&index_field, 0, None);
-        self.increment_stat(&n_key, 1)?;
-
-        // 2. Update Total Length (for AvgDL)
-        let len_key = Codec::encode_stat_key(&index_field, 1, None);
-        self.increment_stat(&len_key, doc_len)?;
+        let uid_i64 = uid as i64;
+        let table = if strategy == "term" { "fts_term_data" } else { "fts_data" };
+        let sql_del = format!("DELETE FROM {} WHERE uid = ?1 AND field = ?2", table);
+        let sql_ins = format!("INSERT INTO {}(uid, field, text_content) VALUES (?1, ?2, ?3)", table);
         
-        // 3. Store Doc Length (Per Doc)
-        let doc_meta_key = Codec::encode_doc_meta_key(&index_field, uid);
-        let len_u32 = doc_len as u32;
-        self.storage.insert(&self.db_name, &doc_meta_key, &len_u32.to_be_bytes()).map_err(|e| e.to_string())?;
-
-        // 4. Count Term Frequencies
-        let mut tf_map: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
-        for term in tokens {
-            *tf_map.entry(term).or_insert(0) += 1;
-        }
-
-        // 5. Update Index and DF
-        for (term, tf) in tf_map {
-            let key = Codec::encode_term_index_key(&index_field, &term, uid);
-            // Value = TF (u32)
-            self.storage.insert(&self.db_name, &key, &tf.to_be_bytes()).map_err(|e| e.to_string())?;
-
-            // Increment DF
-            let df_key = Codec::encode_stat_key(&index_field, 2, Some(&term));
-            self.increment_stat(&df_key, 1)?;
-        }
+        self.storage.backend.with_writer(|conn| {
+            conn.execute(&sql_del, rusqlite::params![uid_i64, index_field])?;
+            conn.execute(&sql_ins, rusqlite::params![uid_i64, index_field, text])?;
+            Ok(())
+        }).map_err(|e| e.to_string())?;
         Ok(())
     }
 
-    fn remove_term_index(&self, uid: u64, field: &str, text: &str, strategy: &str) -> Result<(), String> {
-        let tokens = crate::engine::tokenizer::Tokenizer::tokenize(text, strategy);
-        let doc_len = tokens.len() as i64;
+    fn remove_term_index(&self, uid: u64, field: &str, _text: &str, strategy: &str) -> Result<(), String> {
         let index_field = if strategy == "term" { field.to_string() } else { format!("{}.{}", field, strategy) };
-
-        // 1. Decrement Doc Count (N)
-        let n_key = Codec::encode_stat_key(&index_field, 0, None);
-        self.increment_stat(&n_key, -1)?;
-
-        // 2. Decrement Total Length
-        let len_key = Codec::encode_stat_key(&index_field, 1, None);
-        self.increment_stat(&len_key, -doc_len)?;
-        
-        // 3. Remove Doc Length
-        let doc_meta_key = Codec::encode_doc_meta_key(&index_field, uid);
-        self.storage.remove(&self.db_name, &doc_meta_key).map_err(|e| e.to_string())?;
-
-        // 4. Count TF
-        let mut tf_map: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
-        for term in tokens {
-            *tf_map.entry(term).or_insert(0) += 1;
-        }
-
-        for (term, _) in tf_map {
-            let key = Codec::encode_term_index_key(&index_field, &term, uid);
-            self.storage.remove(&self.db_name, &key).map_err(|e| e.to_string())?;
-
-            // Decrement DF
-            let df_key = Codec::encode_stat_key(&index_field, 2, Some(&term));
-            self.increment_stat(&df_key, -1)?;
-        }
+        let uid_i64 = uid as i64;
+        let table = if strategy == "term" { "fts_term_data" } else { "fts_data" };
+        let sql_del = format!("DELETE FROM {} WHERE uid = ?1 AND field = ?2", table);
+        self.storage.backend.with_writer(|conn| {
+            conn.execute(&sql_del, rusqlite::params![uid_i64, index_field])?;
+            Ok(())
+        }).map_err(|e| e.to_string())?;
         Ok(())
     }
     
     // Ranked Search (BM25)
     pub fn search_text_bm25(&self, query: &str, field: &str, strategy: &str, k: usize, require_all: bool) -> Vec<(u64, f64)> {
         let index_field = if strategy == "term" { field.to_string() } else { format!("{}.{}", field, strategy) };
-        let tokens = crate::engine::tokenizer::Tokenizer::tokenize(query, strategy);
-        if tokens.is_empty() { return vec![]; }
+        let safe_query: String = query.chars().filter(|c| c.is_alphanumeric() || c.is_whitespace()).collect();
+        let terms: Vec<&str> = safe_query.split_whitespace().collect();
+        if terms.is_empty() { return vec![]; }
         
-        // Deduplicate tokens for counting unique matches if requiring all
-        let unique_tokens: std::collections::HashSet<String> = if require_all {
-            tokens.iter().cloned().collect()
+        let fts_query = if require_all {
+            terms.join(" AND ")
         } else {
-            std::collections::HashSet::new()
+            terms.join(" OR ")
         };
 
-        // 1. Get Global Stats
-        let n_key = Codec::encode_stat_key(&index_field, 0, None);
-        let n: f64 = self.get_stat(&n_key).unwrap_or(0) as f64;
+        let conn = match self.storage.backend.get_reader() {
+            Ok(c) => c,
+            Err(_) => return vec![],
+        };
         
-        let len_key = Codec::encode_stat_key(&index_field, 1, None);
-        let total_len: f64 = self.get_stat(&len_key).unwrap_or(0) as f64;
-        let avg_dl = if n > 0.0 { total_len / n } else { 0.0 };
+        let table = if strategy == "term" { "fts_term_data" } else { "fts_data" };
+        let sql = format!("SELECT uid, bm25({}) FROM {} WHERE text_content MATCH ?1 AND field = ?2 ORDER BY rank LIMIT ?3", table, table);
+        let out = (|| -> Result<Vec<(u64, f64)>, rusqlite::Error> {
+            // Note: ranking in sqlite FTS is negative (most negative is best). So we negate it to positive.
+            let mut stmt = conn.prepare(&sql)?;
 
-        if n == 0.0 { return vec![]; }
+            let rows = stmt.query_map(
+                rusqlite::params![fts_query, index_field, k as i64],
+                |row| {
+                    let uid: i64 = row.get(0)?;
+                    let score: f64 = row.get(1)?;
+                    Ok((uid as u64, -score))
+                }
+            )?;
 
-        let k1 = 1.2;
-        let b = 0.75;
-        
-        let mut scores: std::collections::HashMap<u64, f64> = std::collections::HashMap::new();
-
-        for term in tokens {
-            // Get DF
-            let df_key = Codec::encode_stat_key(&index_field, 2, Some(&term));
-            let df: f64 = self.get_stat(&df_key).unwrap_or(0) as f64;
-            
-            if df == 0.0 { continue; }
-            
-            // IDF (Dgraph uses this variant usually)
-            let idf = ((n - df + 0.5) / (df + 0.5) + 1.0).ln();
-            
-            // Scan Index
-            let prefix = Codec::encode_term_index_prefix(&index_field, &term);
-            // Note: Directly accessing self.storage.main_keyspace from here requires pub visibility or getter.
-            // backend.rs has `pub main_keyspace`.
-            let (main_ks, _) = match self.storage.get_database(&self.db_name) {
-                 Some(d) => d,
-                 None => return vec![],
-            };
-
-            // Note: Directly accessing self.storage.main_keyspace from here requires pub visibility or getter.
-            // backend.rs has `pub main_keyspace`.
-            let iter = main_ks.prefix(&prefix);
-            
-            for (key, val) in iter {
-                    if !key.starts_with(&prefix) { break; }
-                    
-                    // Decode UID and TF
-                    if key.len() < 8 { continue; }
-                    let uid = byteorder::BigEndian::read_u64(&key[key.len()-8..]);
-                    let tf = if val.len() >= 4 { byteorder::BigEndian::read_u32(&val) as f64 } else { 1.0 };
-                    
-                    // Get document length (dl)
-                    let dl_key = Codec::encode_doc_meta_key(&index_field, uid);
-                    let dl = if let Ok(Some(bytes)) = self.storage.get(&self.db_name, &dl_key) {
-                        if bytes.len() >= 4 { byteorder::BigEndian::read_u32(&bytes) as f64 } else { 10.0 }
-                    } else { 10.0 };
-                    
-                    let score = idf * (tf * (k1 + 1.0)) / (tf + k1 * (1.0 - b + b * (dl / avg_dl)));
-                    
-                    *scores.entry(uid).or_insert(0.0) += score;
+            let mut out = Vec::new();
+            for r in rows {
+                if let Ok(val) = r {
+                    out.push(val);
+                }
             }
-        }
+            Ok(out)
+        })().unwrap_or_default();
         
-        let mut final_scores = scores;
-
-        if require_all {
-             let mut intersection: Option<std::collections::HashSet<u64>> = None;
-             for term in &unique_tokens {
-                 let prefix = Codec::encode_term_index_prefix(&index_field, term);
-                 let (main_ks, _) = match self.storage.get_database(&self.db_name) {
-                     Some(d) => d,
-                     None => return vec![],
-                 };
-                 let iter = main_ks.prefix(&prefix);
-                 
-                 let mut term_uids = std::collections::HashSet::new();
-                 for (key, _val) in iter {
-                         if !key.starts_with(&prefix) { break; }
-                         if key.len() < 8 { continue; }
-                         let uid = byteorder::BigEndian::read_u64(&key[key.len()-8..]);
-                         term_uids.insert(uid);
-                 }
-                 
-                 if let Some(existing) = intersection {
-                     intersection = Some(existing.intersection(&term_uids).cloned().collect());
-                 } else {
-                     intersection = Some(term_uids);
-                 }
-                 
-                 if intersection.as_ref().map(|s| s.is_empty()).unwrap_or(false) {
-                     return vec![];
-                 }
-             }
-             
-             if let Some(valid_uids) = intersection {
-                 final_scores.retain(|uid, _| valid_uids.contains(uid));
-             }
-        }
-        
-        // Sort and Take K
-        let mut result: Vec<(u64, f64)> = final_scores.into_iter().collect();
-        result.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        result.truncate(k);
-        result
+        self.storage.backend.return_reader(conn);
+        out
     }
 
     // Hybrid Search (RRF)
     pub fn search_hybrid(&self, text_query: &str, field: &str, vector: &[f64], k: usize, require_all: bool) -> Vec<(u64, f64)> {
-        let k_limit = k * 2; // Fetch more candidates
+        let index_field = format!("{}.fulltext", field); // strategy is assumed 'fulltext'
+        let safe_query: String = text_query.chars().filter(|c| c.is_alphanumeric() || c.is_whitespace()).collect();
+        let terms: Vec<&str> = safe_query.split_whitespace().collect();
+        if terms.is_empty() { return vec![]; }
         
-        // 1. Vector Search
-        let vec_res = match self.storage.search_vectors(vector, k_limit) {
-            Ok(res) => res, // [(uid, dist)]
-            Err(_) => vec![]
+        let fts_query = if require_all {
+            terms.join(" AND ")
+        } else {
+            terms.join(" OR ")
         };
         
-        // 2. Text Search (Assuming fulltext strategy)
-        let text_res = self.search_text_bm25(text_query, field, "fulltext", k_limit, require_all); // [(uid, score)]
-        
-        // 3. RRF Fusion
-        // Score = 1 / (C + rank)
-        let c_const = 60.0;
-        let mut rrf_scores: std::collections::HashMap<u64, f64> = std::collections::HashMap::new();
-        
-        // Process Vector Results (Rank based on distance asc: 0 is best)
-        for (rank, (uid, _dist)) in vec_res.iter().enumerate() {
-            let score = 1.0 / (c_const + (rank as f64) + 1.0);
-            *rrf_scores.entry(*uid).or_insert(0.0) += score;
-        }
+        let vec_f32: Vec<f32> = vector.iter().map(|v| *v as f32).collect();
+        let vec_bytes = unsafe {
+            std::slice::from_raw_parts(vec_f32.as_ptr() as *const u8, vec_f32.len() * 4)
+        };
 
-        // Process Text Results (Rank based on score desc: 0 is best)
-        for (rank, (uid, _score)) in text_res.iter().enumerate() {
-            let score = 1.0 / (c_const + (rank as f64) + 1.0);
-            *rrf_scores.entry(*uid).or_insert(0.0) += score;
+        let conn = match self.storage.backend.get_reader() {
+            Ok(c) => c,
+            Err(_) => return vec![],
+        };
+
+        // CTE RRF using FULL OUTER JOIN
+        // Note: FTS5 rank returns negative score, sqlite-vec returns positive distance, lower is better for both.
+        // We use ROW_NUMBER() over ranking. FTS matches use `rank`, vec matches use `distance`.
+        let sql = "
+        WITH text_search AS (
+            SELECT uid, 
+                   ROW_NUMBER() OVER (ORDER BY rank) as position
+            FROM fts_data WHERE text_content MATCH ?1 AND field = ?2 LIMIT 100
+        ),
+        vec_search AS (
+            SELECT uid, 
+                   ROW_NUMBER() OVER (ORDER BY distance) as position
+            FROM vec_data WHERE embedding MATCH ?3 AND k = 100
+        )
+        SELECT COALESCE(t.uid, v.uid) as id,
+               (COALESCE(1.0 / (60.0 + t.position), 0.0) +
+                COALESCE(1.0 / (60.0 + v.position), 0.0)) as rrf_score
+        FROM text_search t
+        FULL OUTER JOIN vec_search v ON t.uid = v.uid
+        ORDER BY rrf_score DESC
+        LIMIT ?4;
+        ";
+
+        let out = (|| -> Result<Vec<(u64, f64)>, rusqlite::Error> {
+            let mut stmt = conn.prepare(sql)?;
+
+            let rows = stmt.query_map(
+                rusqlite::params![fts_query, index_field, vec_bytes, k as i64],
+                |row| {
+                    let uid: i64 = row.get(0)?;
+                    let score: f64 = row.get(1)?;
+                    Ok((uid as u64, score))
+                }
+            )?;
+
+            let mut out = Vec::new();
+            for r in rows {
+                if let Ok(val) = r {
+                    out.push(val);
+                }
+            }
+            Ok(out)
+        })();
+        
+        if let Err(e) = &out {
+            println!("search_hybrid error: {:?}", e);
         }
         
-        // Result sorted by RRF Score DESC
-        let mut result: Vec<(u64, f64)> = rrf_scores.into_iter().collect();
-        result.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        result.truncate(k);
-        
-        result
+        let out = out.unwrap_or_default();
+
+        self.storage.backend.return_reader(conn);
+        out
     }
 
 
@@ -764,6 +692,10 @@ impl FjallResolver {
         let mut candidates: Option<std::collections::HashSet<u64>> = None;
 
         for (field, condition) in filter {
+            // Skip logical operators — these are handled by check_filter_recursive, not here
+            if field == "and" || field == "or" || field == "not" {
+                continue;
+            }
             // 1. Check Unique Indexes (Exact Equality)
             // { email: { eq: "..." } } OR { email: "..." }
             let eq_value = match condition {
@@ -827,10 +759,90 @@ impl FjallResolver {
                         }
                     }
                 }
+
+                // SQL filter pushdown for eq on non-unique fields
+                if let Some((main_ks, _)) = self.storage.get_database(&self.db_name) {
+                    let sqlite_val = Self::json_to_sqlite_value(val);
+                    let uids = main_ks.filter_by_field_value(field, "=", sqlite_val);
+                    // Even if empty, this is the definitive answer from SQL pushdown
+                    let set: std::collections::HashSet<u64> = uids.into_iter().collect();
+                    if let Some(current) = candidates {
+                        candidates = Some(current.intersection(&set).copied().collect());
+                    } else {
+                        candidates = Some(set);
+                    }
+                    continue;
+                }
             }
 
-            // 2. Check Search Indexes
+            // 2. SQL Filter Pushdown for comparison operators (gt, lt, ge, le, ne, contains, in)
             if let Value::Object(map) = condition {
+                let mut handled_by_pushdown = false;
+
+                // Check for simple scalar comparison ops that can be pushed to SQL
+                for (op, target) in map.iter() {
+                    let sql_op = match op.as_str() {
+                        "gt" => Some(">"),
+                        "lt" => Some("<"),
+                        "ge" => Some(">="),
+                        "le" => Some("<="),
+                        "ne" => Some("!="),
+                        _ => None,
+                    };
+
+                    if let Some(sql_op) = sql_op {
+                        if let Some((main_ks, _)) = self.storage.get_database(&self.db_name) {
+                            let sqlite_val = Self::json_to_sqlite_value(target);
+                            let uids = main_ks.filter_by_field_value(field, sql_op, sqlite_val);
+                            let set: std::collections::HashSet<u64> = uids.into_iter().collect();
+                            if let Some(current) = candidates {
+                                candidates = Some(current.intersection(&set).copied().collect());
+                            } else {
+                                candidates = Some(set);
+                            }
+                            handled_by_pushdown = true;
+                        }
+                    }
+
+                    // Handle "contains" operator
+                    if op.as_str() == "contains" {
+                        if let Value::String(substr) = target {
+                            if let Some((main_ks, _)) = self.storage.get_database(&self.db_name) {
+                                let uids = main_ks.filter_by_field_contains(field, substr);
+                                let set: std::collections::HashSet<u64> = uids.into_iter().collect();
+                                if let Some(current) = candidates {
+                                    candidates = Some(current.intersection(&set).copied().collect());
+                                } else {
+                                    candidates = Some(set);
+                                }
+                                handled_by_pushdown = true;
+                            }
+                        }
+                    }
+
+                    // Handle "in" operator
+                    if op.as_str() == "in" {
+                        if let Value::List(list) = target {
+                            let target_values: Vec<rusqlite::types::Value> = list.iter()
+                                .map(|v| Self::json_to_sqlite_value(v))
+                                .collect();
+                            if let Some((main_ks, _)) = self.storage.get_database(&self.db_name) {
+                                let uids = main_ks.filter_by_field_in(field, &target_values);
+                                let set: std::collections::HashSet<u64> = uids.into_iter().collect();
+                                if let Some(current) = candidates {
+                                    candidates = Some(current.intersection(&set).copied().collect());
+                                } else {
+                                    candidates = Some(set);
+                                }
+                                handled_by_pushdown = true;
+                            }
+                        }
+                    }
+                }
+
+                if handled_by_pushdown {
+                    continue;
+                }
                  // Handle "allofterms"
                      if let Some(Value::String(terms_str)) = map.get("allofterms") {
                     let terms = crate::engine::tokenizer::Tokenizer::tokenize(terms_str, "term");
@@ -1590,7 +1602,7 @@ impl FjallResolver {
     }
 }
 
-impl Resolver for FjallResolver {
+impl Resolver for SqliteResolver {
     fn bulk_check_permission(&self, ctx: &async_graphql::dynamic::ResolverContext<'_>, checks: Vec<(String, String, String)>) -> async_graphql::Result<Vec<(String, String, String, bool)>> {
         // Extract authenticated user from GraphQL context (injected by auth middleware)
         let subject = if let Ok(auth) = ctx.data::<auth::middleware::JWTAuthMiddleware>() {

@@ -1,2 +1,2 @@
-pub mod fjall_resolver;
+pub mod sqlite_resolver;
 pub mod mcp;

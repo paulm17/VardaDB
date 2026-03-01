@@ -1,7 +1,7 @@
 
 use vardadb::engine::schema::Schema;
 use vardadb::storage::backend::Storage;
-use vardadb::bridge::fjall_resolver::FjallResolver;
+use vardadb::bridge::sqlite_resolver::SqliteResolver;
 use std::sync::Arc;
 use tempfile::TempDir;
 use serde_json::Value as JsonValue;
@@ -10,7 +10,7 @@ use serde_json::Value as JsonValue;
 async fn test_vector_deletion_and_dim_check() {
     let temp_dir = TempDir::new().unwrap();
     let storage = Arc::new(Storage::new(temp_dir.path(), None).unwrap());
-    let resolver = Box::new(FjallResolver::new(storage.clone(), "default"));
+    let resolver = Box::new(SqliteResolver::new(storage.clone(), "default"));
 
     let sdl = "
         type Item {
@@ -20,31 +20,37 @@ async fn test_vector_deletion_and_dim_check() {
     let schema = Schema::load_from_sdl(sdl).expect("Failed to load schema");
 
     // 1. Insert Valid Item (Dimension 3)
-    let mut_create = "
-        mutation {
-            createItem(input: {
-                embedding: [1.0, 0.0, 0.0]
-            }) {
+    let mut valid_vec = vec![0.0; 384];
+    valid_vec[0] = 1.0;
+    
+    let mut_create = format!("
+        mutation {{
+            createItem(input: {{
+                embedding: {:?}
+            }}) {{
                 uid
-            }
-        }
-    ";
-    let res = schema.execute_with_resolver(mut_create, resolver.clone()).await;
+            }}
+        }}
+    ", valid_vec);
+    let res = schema.execute_with_resolver(&mut_create, resolver.clone()).await;
     let json: JsonValue = serde_json::from_str(&res).unwrap();
     let id1 = json["data"]["createItem"]["uid"].as_str().unwrap().to_string();
 
     // 2. Search - Should Find (with retry for async indexing)
-    let query_search = "
-        query {
-            search(vector: [0.99, 0.0, 0.0], k: 1) {
+    let mut search_vec = vec![0.0; 384];
+    search_vec[0] = 0.99;
+    
+    let query_search = format!("
+        query {{
+            search(vector: {:?}, k: 1) {{
                 uid
-            }
-        }
-    ";
+            }}
+        }}
+    ", search_vec);
     
     let mut found = false;
     for _ in 0..20 {
-        let res = schema.execute_with_resolver(query_search, resolver.clone()).await;
+        let res = schema.execute_with_resolver(&query_search, resolver.clone()).await;
         let json: JsonValue = serde_json::from_str(&res).unwrap();
         if json["data"]["search"].as_array().unwrap().len() == 1 {
             found = true;
@@ -82,7 +88,7 @@ async fn test_vector_deletion_and_dim_check() {
     assert_eq!(json["data"]["deleteItem"], true);
 
     // 5. Search Again - Should NOT Find (Empty Result)
-    let res = schema.execute_with_resolver(query_search, resolver.clone()).await;
+    let res = schema.execute_with_resolver(&query_search, resolver.clone()).await;
     let json: JsonValue = serde_json::from_str(&res).unwrap();
     let hits = json["data"]["search"].as_array().unwrap();
     assert_eq!(hits.len(), 0);

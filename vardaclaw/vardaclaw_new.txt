@@ -1,0 +1,2 @@
+src/commands.rs: The slash command definitions (used only by CLI/Telegram).
+src/server/ (Directory): The HTTP server (was for the standalone app).

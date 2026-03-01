@@ -1,6 +1,6 @@
 use vardadb::engine::schema::Schema;
 use vardadb::storage::backend::Storage;
-use vardadb::bridge::fjall_resolver::FjallResolver;
+use vardadb::bridge::sqlite_resolver::SqliteResolver;
 use vardadb::engine::resolver::{InverseInfo, Resolver};
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -24,39 +24,46 @@ async fn test_hybrid_search() {
     ";
     
     let schema = Schema::load_from_sdl(sdl).expect("Failed to load schema");
-    let resolver = Box::new(FjallResolver::new(storage.clone(), "default"));
+    let resolver = Box::new(SqliteResolver::new(storage.clone(), "default"));
 
     let empty_uniques: Vec<String> = vec![];
     let empty_inverses: Vec<InverseInfo> = vec![];
 
     // 2. Inject Data
-    // Doc 1: "Rust Database" + Vector [1.0, 0.0]
+    // Doc 1: "Rust Database" + Vector [1.0, 0.0] padded to 384
+    let mut vec1 = vec![0.0; 384]; vec1[0] = 1.0;
     let mut fields1 = std::collections::HashMap::new();
     fields1.insert("title".to_string(), GqlValue::String("Rust Database".to_string()));
     let uid1 = resolver.create_node("Doc", fields1, &empty_uniques, &empty_inverses, &std::collections::HashMap::from([("title".to_string(), vec!["fulltext".to_string()])]), None).unwrap();
-    storage.put_vector(uid1, vec![1.0, 0.0]).unwrap();
+    storage.put_vector(uid1, vec1.clone()).unwrap();
     
-    // Doc 2: "Python Script" + Vector [0.0, 1.0]
+    // Doc 2: "Python Script" + Vector [0.0, 1.0] padded
+    let mut vec2 = vec![0.0; 384]; vec2[1] = 1.0;
     let mut fields2 = std::collections::HashMap::new();
     fields2.insert("title".to_string(), GqlValue::String("Python Script".to_string()));
     let uid2 = resolver.create_node("Doc", fields2, &empty_uniques, &empty_inverses, &std::collections::HashMap::from([("title".to_string(), vec!["fulltext".to_string()])]), None).unwrap();
-    storage.put_vector(uid2, vec![0.0, 1.0]).unwrap();
+    storage.put_vector(uid2, vec2).unwrap();
     
-    // Doc 3: "Rust Script" + Vector [0.9, 0.1]
+    // Doc 3: "Rust Script" + Vector [0.9, 0.1] padded
+    let mut vec3 = vec![0.0; 384]; vec3[0] = 0.9; vec3[1] = 0.1;
     let mut fields3 = std::collections::HashMap::new();
     fields3.insert("title".to_string(), GqlValue::String("Rust Script".to_string()));
     let uid3 = resolver.create_node("Doc", fields3, &empty_uniques, &empty_inverses, &std::collections::HashMap::from([("title".to_string(), vec!["fulltext".to_string()])]), None).unwrap();
-    storage.put_vector(uid3, vec![0.9, 0.1]).unwrap();
+    storage.put_vector(uid3, vec3).unwrap();
+
+    // Give vector queue time to flush
+    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
     // 3. Search Hybrid
+    let query_vec_str = format!("{:?}", vec1);
     let query = format!(r#"
         query {{
-            hybridSearch(text: "Rust", field: "title", vector: [1.0, 0.0], k: 3) {{
+            hybridSearch(text: "Rust", field: "title", vector: {}, k: 3) {{
                 uid
                 distance
             }}
         }}
-    "#);
+    "#, query_vec_str);
     
     let resp = schema.execute_with_resolver(&query, resolver.clone()).await;
     let json: JsonValue = serde_json::from_str(&resp).unwrap();

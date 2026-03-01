@@ -1,4 +1,4 @@
-use vardadb::bridge::fjall_resolver::FjallResolver;
+use vardadb::bridge::sqlite_resolver::SqliteResolver;
 use vardadb::engine::schema::Schema;
 
 // Use multi-thread runtime to avoid block_in_place panic
@@ -12,7 +12,7 @@ async fn test_search_flow() {
         vardadb::storage::backend::Storage::new(db_path, Some(1)).expect("Failed to create storage")
     );
     let event_bus = vardadb::realtime::bus::EventBus::new();
-    let resolver = FjallResolver::with_bus(storage.clone(), event_bus);
+    let resolver = SqliteResolver::with_bus(storage.clone(), event_bus);
     
     let sdl = "
     type Book {

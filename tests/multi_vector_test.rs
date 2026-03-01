@@ -1,7 +1,7 @@
 
 use vardadb::engine::schema::Schema;
 use vardadb::storage::backend::Storage;
-use vardadb::bridge::fjall_resolver::FjallResolver;
+use vardadb::bridge::sqlite_resolver::SqliteResolver;
 use std::sync::Arc;
 use tempfile::TempDir;
 use serde_json::Value as JsonValue;
@@ -12,7 +12,7 @@ use serde_json::Value as JsonValue;
 async fn test_multi_vector_satellite_pattern() {
     let temp_dir = TempDir::new().unwrap();
     let storage = Arc::new(Storage::new(temp_dir.path(), None).unwrap());
-    let resolver = Box::new(FjallResolver::new(storage.clone(), "default"));
+    let resolver = Box::new(SqliteResolver::new(storage.clone(), "default"));
 
     // 1. Define Schema with Satellite Nodes
     let sdl = "
@@ -44,30 +44,35 @@ async fn test_multi_vector_satellite_pattern() {
     // Note: To create TitleVec with a vector, we need to pass embedding data.
     // And for `content_vec` too.
     
-    let mut_create = "
-        mutation {
-            createDocument(input: {
+    let mut title_vec_input = vec![0.0; 384];
+    title_vec_input[0] = 1.0;
+    let mut content_vec_input = vec![0.0; 384];
+    content_vec_input[1] = 1.0;
+
+    let mut_create = format!("
+        mutation {{
+            createDocument(input: {{
                 title: \"Multi-Vector Guide\",
                 content: \"This is the content...\",
-                title_vec: {
-                    embedding: [1.0, 0.0, 0.0]
-                },
-                content_vec: {
-                    embedding: [0.0, 1.0, 0.0]
-                }
-            }) {
+                title_vec: {{
+                    embedding: {:?}
+                }},
+                content_vec: {{
+                    embedding: {:?}
+                }}
+            }}) {{
                 uid
-                title_vec {
+                title_vec {{
                     uid
-                }
-                content_vec {
+                }}
+                content_vec {{
                     uid
-                }
-            }
-        }
-    ";
+                }}
+            }}
+        }}
+    ", title_vec_input, content_vec_input);
     
-    let res = schema.execute_with_resolver(mut_create, resolver.clone()).await;
+    let res = schema.execute_with_resolver(&mut_create, resolver.clone()).await;
     println!("Creation Res: {}", res);
     let json: JsonValue = serde_json::from_str(&res).unwrap();
     if !json["errors"].is_null() {
@@ -78,6 +83,9 @@ async fn test_multi_vector_satellite_pattern() {
     let title_vec_id = json["data"]["createDocument"]["title_vec"]["uid"].as_str().unwrap();
     
     println!("Created Doc: {}, TitleVec: {}", doc_id, title_vec_id);
+    
+    // Give background vector writer time to flush
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
     
     // 3. Search by Title Vector ([1.0, 0.0, 0.0]) -> Should find TitleVec -> Resolve Doc
     // Note: `search` query is generated for Types with @vector.
@@ -91,13 +99,13 @@ async fn test_multi_vector_satellite_pattern() {
     
     // Let's check `schema.rs`.
     // Step 984 viewed schema.rs but didn't focus on Query generation for search.
-    // Step 985 viewed FjallResolver.
+    // Step 985 viewed SqliteResolver.
     // I need to confirm the Query field name.
     
     // Assuming generic `search` returns `[SearchResult]`. `SearchResult` has `uid` and `distance`.
     // It returns *any* node that matches?
     // In `schema.rs`, `search` query uses `resolver.search_vectors(query, k)`.
-    // `search_vectors` in `FjallResolver` searches `VectorStore`.
+    // `search_vectors` in `SqliteResolver` searches `VectorStore`.
     // `VectorStore` mixes all vectors in one index?
     // `VectorStore::insert(id, ...)` uses `id` (u64/u128).
     // Yes, it MIXES ALL VECTORS.
@@ -122,16 +130,20 @@ async fn test_multi_vector_satellite_pattern() {
     
     // This test will verify exactly that behavior.
     
-    let query_title = "
-        query {
-            search(vector: [0.99, 0.01, 0.0], k: 1) {
+    let mut title_search_query = vec![0.0; 384];
+    title_search_query[0] = 0.99;
+    title_search_query[1] = 0.01;
+
+    let query_title = format!("
+        query {{
+            search(vector: {:?}, k: 1) {{
                 uid
                 distance
-            }
-        }
-    ";
+            }}
+        }}
+    ", title_search_query);
     
-    let res = schema.execute_with_resolver(query_title, resolver.clone()).await;
+    let res = schema.execute_with_resolver(&query_title, resolver.clone()).await;
     println!("Search Title Res: {}", res);
     let json: JsonValue = serde_json::from_str(&res).unwrap();
     let hits = json["data"]["search"].as_array().unwrap();
@@ -160,14 +172,18 @@ async fn test_multi_vector_satellite_pattern() {
     
     
     // 4. Search by Content Vector ([0.0, 1.0, 0.0])
-    let query_content = "
-        query {
-            search(vector: [0.01, 0.99, 0.0], k: 1) {
+    let mut content_search_query = vec![0.0; 384];
+    content_search_query[0] = 0.01;
+    content_search_query[1] = 0.99;
+
+    let query_content = format!("
+        query {{
+            search(vector: {:?}, k: 1) {{
                 uid
-            }
-        }
-    ";
-    let res = schema.execute_with_resolver(query_content, resolver.clone()).await;
+            }}
+        }}
+    ", content_search_query);
+    let res = schema.execute_with_resolver(&query_content, resolver.clone()).await;
     let json: JsonValue = serde_json::from_str(&res).unwrap();
     let hits = json["data"]["search"].as_array().unwrap();
     let hit_uid_content = hits[0]["uid"].as_str().unwrap();

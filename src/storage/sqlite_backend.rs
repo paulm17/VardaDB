@@ -1,5 +1,7 @@
+use byteorder::ByteOrder;
 use rusqlite::{Connection, params};
 use rusqlite::OptionalExtension;
+use rusqlite::ffi::sqlite3_auto_extension;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -25,6 +27,13 @@ impl SqliteBackend {
             std::fs::create_dir_all(parent)?;
         }
         
+        
+        unsafe {
+            // Register sqlite-vec extension
+            sqlite3_auto_extension(Some(std::mem::transmute(
+                sqlite_vec::sqlite3_vec_init as *const ()
+            )));
+        }
         let writer = Connection::open(&db_path)?;
         Self::apply_pragmas(&writer)?;
         
@@ -55,6 +64,18 @@ impl SqliteBackend {
             "CREATE TABLE IF NOT EXISTS \"{}\" (key BLOB PRIMARY KEY, value BLOB NOT NULL) WITHOUT ROWID;",
             name
         ))?;
+        Ok(())
+    }
+
+    /// Create Full-Text Search and Vector tables for native search
+    pub fn create_native_search_tables(&self) -> anyhow::Result<()> {
+        let conn = self.writer.lock().unwrap();
+        // BGESmallENV15 outputs 384-dimensional embeddings
+        conn.execute_batch(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS fts_data USING fts5(uid UNINDEXED, field UNINDEXED, text_content, tokenize='porter unicode61');
+             CREATE VIRTUAL TABLE IF NOT EXISTS fts_term_data USING fts5(uid UNINDEXED, field UNINDEXED, text_content, tokenize='unicode61');
+             CREATE VIRTUAL TABLE IF NOT EXISTS vec_data USING vec0(uid INTEGER PRIMARY KEY, embedding float[384]);"
+        )?;
         Ok(())
     }
 
@@ -91,7 +112,9 @@ impl SqliteBackend {
                 return Ok(conn);
             }
         }
-        // Create new reader connection
+        // Create new reader connection. Auto-extension is already registered globally by `new`
+        // but it doesn't hurt to ensure it or just let the connection open.
+        // Actually sqlite3_auto_extension applies to all subsequent db connections.
         let conn = Connection::open(&self.path)?;
         Self::apply_pragmas(&conn)?;
         Ok(conn)
@@ -408,6 +431,187 @@ impl SqliteTable {
         );
         conn.prepare_cached(&sql)?.execute(params![key, value, ts])?;
         Ok(())
+    }
+
+    /// Filter pushdown: scan the main table for keys matching a specific field name
+    /// and apply a comparison operator on the JSON value stored in the blob.
+    ///
+    /// Key encoding: [0x01][UID:8 bytes big-endian][field_name bytes]
+    /// Value encoding: [timestamp:16 bytes][json_payload bytes]
+    ///
+    /// The SQL query:
+    /// 1. Scans all keys with prefix [0x01] that end with the field name suffix
+    /// 2. Extracts the JSON payload by skipping the 16-byte timestamp prefix
+    /// 3. Applies the comparison operator in SQL via json_extract
+    /// 4. Returns the UID bytes (key[1..9]) for matching rows
+    ///
+    /// `op` must be one of: "=", "!=", ">", "<", ">=", "<=", "LIKE"
+    /// `target` is a properly typed SQLite value matching what json_extract returns
+    pub fn filter_by_field_value(
+        &self,
+        field_name: &str,
+        op: &str,
+        target: rusqlite::types::Value,
+    ) -> Vec<u64> {
+        // Build the field suffix as bytes for matching
+        let field_bytes = field_name.as_bytes();
+        let field_len = field_bytes.len();
+
+        // Data prefix byte
+        let data_prefix: u8 = 0x01;
+
+        // Key structure: [0x01][UID:8][field_name]
+        // Value structure: [timestamp:16][json_payload]
+        // json_extract(substr(value,17), '$') returns the typed JSON value
+
+        let conn = match self.backend.get_reader() {
+            Ok(c) => c,
+            Err(_) => return vec![],
+        };
+
+        let sql = format!(
+            "SELECT substr(key, 2, 8) FROM \"{}\" \
+             WHERE substr(key, 1, 1) = ?1 \
+             AND length(key) = ?2 \
+             AND substr(key, 10) = ?3 \
+             AND json_extract(CAST(substr(value, 17) AS TEXT), '$') {} ?4",
+            self.name, op
+        );
+
+        let expected_key_len = 1 + 8 + field_len;
+
+        let result = (|| -> Result<Vec<u64>, rusqlite::Error> {
+            let mut stmt = conn.prepare_cached(&sql)?;
+            let rows = stmt.query_map(
+                rusqlite::params![
+                    &[data_prefix][..],
+                    expected_key_len as i64,
+                    field_bytes,
+                    target,
+                ],
+                |row| {
+                    let uid_bytes: Vec<u8> = row.get(0)?;
+                    if uid_bytes.len() == 8 {
+                        Ok(byteorder::BigEndian::read_u64(&uid_bytes))
+                    } else {
+                        Ok(0)
+                    }
+                },
+            )?;
+            Ok(rows.filter_map(|r| r.ok()).filter(|uid| *uid != 0).collect())
+        })();
+
+        self.backend.return_reader(conn);
+        result.unwrap_or_default()
+    }
+
+    /// Filter pushdown for `contains` (string LIKE %target%)
+    pub fn filter_by_field_contains(
+        &self,
+        field_name: &str,
+        substring: &str,
+    ) -> Vec<u64> {
+        let field_bytes = field_name.as_bytes();
+        let field_len = field_bytes.len();
+        let data_prefix: u8 = 0x01;
+        let expected_key_len = 1 + 8 + field_len;
+        let like_pattern = format!("%{}%", substring);
+
+        let conn = match self.backend.get_reader() {
+            Ok(c) => c,
+            Err(_) => return vec![],
+        };
+
+        let sql = format!(
+            "SELECT substr(key, 2, 8) FROM \"{}\" \
+             WHERE substr(key, 1, 1) = ?1 \
+             AND length(key) = ?2 \
+             AND substr(key, 10) = ?3 \
+             AND CAST(json_extract(CAST(substr(value, 17) AS TEXT), '$') AS TEXT) LIKE ?4",
+            self.name
+        );
+
+        let result = (|| -> Result<Vec<u64>, rusqlite::Error> {
+            let mut stmt = conn.prepare_cached(&sql)?;
+            let rows = stmt.query_map(
+                rusqlite::params![
+                    &[data_prefix][..],
+                    expected_key_len as i64,
+                    field_bytes,
+                    like_pattern,
+                ],
+                |row| {
+                    let uid_bytes: Vec<u8> = row.get(0)?;
+                    if uid_bytes.len() == 8 {
+                        Ok(byteorder::BigEndian::read_u64(&uid_bytes))
+                    } else {
+                        Ok(0)
+                    }
+                },
+            )?;
+            Ok(rows.filter_map(|r| r.ok()).filter(|uid| *uid != 0).collect())
+        })();
+
+        self.backend.return_reader(conn);
+        result.unwrap_or_default()
+    }
+
+    /// Filter pushdown for `in` (value IN set)
+    pub fn filter_by_field_in(
+        &self,
+        field_name: &str,
+        target_values: &[rusqlite::types::Value],
+    ) -> Vec<u64> {
+        if target_values.is_empty() { return vec![]; }
+        let field_bytes = field_name.as_bytes();
+        let field_len = field_bytes.len();
+        let data_prefix: u8 = 0x01;
+        let expected_key_len = 1 + 8 + field_len;
+
+        let conn = match self.backend.get_reader() {
+            Ok(c) => c,
+            Err(_) => return vec![],
+        };
+
+        let placeholders: Vec<String> = target_values.iter().enumerate()
+            .map(|(i, _)| format!("?{}", i + 4))
+            .collect();
+
+        let sql = format!(
+            "SELECT substr(key, 2, 8) FROM \"{}\" \
+             WHERE substr(key, 1, 1) = ?1 \
+             AND length(key) = ?2 \
+             AND substr(key, 10) = ?3 \
+             AND json_extract(CAST(substr(value, 17) AS TEXT), '$') IN ({})",
+            self.name,
+            placeholders.join(", ")
+        );
+
+        let result = (|| -> Result<Vec<u64>, rusqlite::Error> {
+            let mut stmt = conn.prepare(&sql)?;
+            // Build params: [data_prefix, key_len, field_bytes, ...target_values]
+            let mut all_params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+            all_params.push(Box::new(vec![data_prefix]));
+            all_params.push(Box::new(expected_key_len as i64));
+            all_params.push(Box::new(field_bytes.to_vec()));
+            for tv in target_values {
+                all_params.push(Box::new(tv.clone()));
+            }
+            let param_refs: Vec<&dyn rusqlite::types::ToSql> = all_params.iter().map(|p| p.as_ref()).collect();
+
+            let rows = stmt.query_map(param_refs.as_slice(), |row| {
+                let uid_bytes: Vec<u8> = row.get(0)?;
+                if uid_bytes.len() == 8 {
+                    Ok(byteorder::BigEndian::read_u64(&uid_bytes))
+                } else {
+                    Ok(0)
+                }
+            })?;
+            Ok(rows.filter_map(|r| r.ok()).filter(|uid| *uid != 0).collect())
+        })();
+
+        self.backend.return_reader(conn);
+        result.unwrap_or_default()
     }
 }
 

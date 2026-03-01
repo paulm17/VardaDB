@@ -5713,6 +5713,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "sqlite-vec"
+version = "0.1.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4ec77b84fb8dd5f0f8def127226db83b5d1152c5bf367f09af03998b76ba554a"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "stabby"
 version = "72.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6892,6 +6901,7 @@ dependencies = [
  "serde_json",
  "sha1",
  "sha2",
+ "sqlite-vec",
  "sysinfo",
  "tempfile",
  "thiserror 1.0.69",

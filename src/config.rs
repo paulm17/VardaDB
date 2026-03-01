@@ -17,6 +17,44 @@ pub struct VardaConfig {
     #[serde(default)]
     pub r2: R2Config,
     pub auth: Option<auth::config::AuthConfig>,
+    #[serde(default)]
+    pub planner: PlannerConfig,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct PlannerConfig {
+    #[serde(default = "default_planner_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_planner_mode")]
+    pub mode: String,
+    #[serde(default = "default_planner_max_depth")]
+    pub max_depth: usize,
+    #[serde(default = "default_planner_max_estimated_cost")]
+    pub max_estimated_cost: f64,
+    #[serde(default = "default_planner_max_actual_cost")]
+    pub max_actual_cost: f64,
+    #[serde(default = "default_planner_default_list_size")]
+    pub default_list_size: i32,
+}
+
+fn default_planner_enabled() -> bool { true }
+fn default_planner_mode() -> String { "enforce".to_string() }
+fn default_planner_max_depth() -> usize { 15 }
+fn default_planner_max_estimated_cost() -> f64 { 1000.0 }
+fn default_planner_max_actual_cost() -> f64 { 2000.0 }
+fn default_planner_default_list_size() -> i32 { 20 }
+
+impl Default for PlannerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_planner_enabled(),
+            mode: default_planner_mode(),
+            max_depth: default_planner_max_depth(),
+            max_estimated_cost: default_planner_max_estimated_cost(),
+            max_actual_cost: default_planner_max_actual_cost(),
+            default_list_size: default_planner_default_list_size(),
+        }
+    }
 }
 
 #[derive(Deserialize, Debug, Clone, Default)]
@@ -139,6 +177,7 @@ impl Default for VardaConfig {
             vardaclaw: VardaClawConfig::default(),
             r2: R2Config::default(),
             auth: None, // Auth is disabled by default
+            planner: PlannerConfig::default(),
         }
     }
 }

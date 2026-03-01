@@ -150,7 +150,7 @@ pub async fn upload_chunk(
             info.content_hash = Some(hash.clone());
             info.is_final = true;
             
-            let resolver = crate::bridge::fjall_resolver::FjallResolver::with_bus(
+            let resolver = crate::bridge::sqlite_resolver::SqliteResolver::with_bus(
                 state.server_state.storage.clone(),
                 state.server_state.event_bus.clone(),
             );

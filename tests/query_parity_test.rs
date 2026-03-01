@@ -1,6 +1,6 @@
 use async_graphql::Request;
 use std::sync::Arc;
-use vardadb::bridge::fjall_resolver::FjallResolver;
+use vardadb::bridge::sqlite_resolver::SqliteResolver;
 use vardadb::storage::backend::Storage;
 use serde_json::Value;
 
@@ -18,7 +18,7 @@ async fn test_query_parity() {
 
     let tmp_dir = tempfile::tempdir().unwrap();
     let storage = Arc::new(Storage::new(tmp_dir.path(), None).unwrap());
-    let resolver = FjallResolver::new(storage.clone(), "default");
+    let resolver = SqliteResolver::new(storage.clone(), "default");
 
     // 1. Create Data
     let mutations = vec![

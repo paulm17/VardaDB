@@ -1,5 +1,5 @@
 
-use vardadb::bridge::fjall_resolver::FjallResolver;
+use vardadb::bridge::sqlite_resolver::SqliteResolver;
 use vardadb::storage::backend::Storage;
 use vardadb::engine::resolver::Resolver;
 use vardadb::engine::schema::Schema;
@@ -11,7 +11,7 @@ use serde_json::Value as JsonValue;
 async fn test_resolver_optimization() {
     let tmp_dir = tempfile::tempdir().unwrap();
     let storage = Arc::new(Storage::new(tmp_dir.path(), None).unwrap());
-    let resolver = Box::new(FjallResolver::new(storage.clone(), "default"));
+    let resolver = Box::new(SqliteResolver::new(storage.clone(), "default"));
 
     // Schema
     let sdl = "

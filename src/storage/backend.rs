@@ -41,8 +41,6 @@ pub struct Storage {
     pub quarantine_table: SqliteTable,    // QUARANTINE: Global
     pub metrics_table: SqliteTable,       // METRICS: Time-series metrics
     pub traces_table: SqliteTable,        // TRACES: Trace spans
-    pub vector_store: crate::storage::vector::store::VectorStore, // VECTORS
-    
     pub auth_store: AuthStore,            // AUTH: Authorization tuples and attributes
     
     pub jobs_store: Arc<JobStore<SqliteTable>>,        // JOB STORE (Global)
@@ -71,6 +69,7 @@ impl Storage {
         backend.create_table("sys_metrics")?;
         backend.create_table("sys_traces")?;
         backend.create_table("vectors")?;
+        backend.create_native_search_tables()?;
         backend.create_table("auth_tuples")?;
         backend.create_table("auth_attributes")?;
         backend.create_table("jobs")?;
@@ -87,13 +86,6 @@ impl Storage {
         let metrics_table = SqliteTable::new("sys_metrics".to_string(), backend.clone());
         let traces_table = SqliteTable::new("sys_traces".to_string(), backend.clone());
         
-        // Vectors
-        let vectors_table = SqliteTable::new("vectors".to_string(), backend.clone());
-        let vector_store = crate::storage::vector::store::VectorStore::new(
-            vectors_table, 
-            crate::storage::vector::config::HNSWConfig::default()
-        );
-
         // AuthZ Store
         let auth_tuples_table = SqliteTable::new("auth_tuples".to_string(), backend.clone());
         let auth_attributes_table = SqliteTable::new("auth_attributes".to_string(), backend.clone());
@@ -104,14 +96,22 @@ impl Storage {
 
         // Vector Worker (Bounded Channel)
         let (tx, rx) = std::sync::mpsc::sync_channel::<(u64, Vec<f64>)>(5000);
-        let worker_store = vector_store.clone();
+        let worker_backend = backend.clone();
         
         std::thread::spawn(move || {
             println!("Storage: Vector Background Worker Started");
             while let Ok((uid, vec)) = rx.recv() {
-                if let Err(e) = worker_store.insert(uid as u128, vec) {
-                    eprintln!("Vector Worker Error for UID {}: {}", uid, e);
-                }
+                let vec_f32: Vec<f32> = vec.iter().map(|v| *v as f32).collect();
+                let vec_bytes = unsafe { std::slice::from_raw_parts(vec_f32.as_ptr() as *const u8, vec_f32.len() * 4) };
+                
+                let _ = worker_backend.with_writer(|conn| {
+                     // Upsert vector into vec_data table
+                     conn.execute(
+                         "INSERT OR REPLACE INTO vec_data(uid, embedding) VALUES (?1, ?2)",
+                         rusqlite::params![uid as i64, vec_bytes]
+                     )?;
+                     Ok(())
+                });
             }
             println!("Storage: Vector Background Worker Stopped");
         });
@@ -201,7 +201,6 @@ impl Storage {
             quarantine_table,
             metrics_table,
             traces_table,
-            vector_store,
             auth_store,
             jobs_store,
             system_queue,
@@ -493,14 +492,38 @@ impl Storage {
     }
 
     pub fn delete_vector(&self, uid: u64) -> anyhow::Result<()> {
-        self.vector_store.delete(uid as u128)?;
+        let uid_i64 = uid as i64;
+        self.backend.with_writer(|conn| {
+            conn.execute("DELETE FROM vec_data WHERE uid = ?1", rusqlite::params![uid_i64])?;
+            Ok(())
+        })?;
         Ok(())
     }
 
     pub fn search_vectors(&self, query: &[f64], k: usize) -> anyhow::Result<Vec<(u64, f64)>> {
-        let results = self.vector_store.search(query, k)?;
-        let converted = results.into_iter().map(|(id, dist)| (id as u64, dist)).collect();
-        Ok(converted)
+        let vec_f32: Vec<f32> = query.iter().map(|v| *v as f32).collect();
+        let vec_bytes = unsafe { std::slice::from_raw_parts(vec_f32.as_ptr() as *const u8, vec_f32.len() * 4) };
+        
+        let conn = self.backend.get_reader()?;
+        let res = (|| -> anyhow::Result<Vec<(u64, f64)>> {
+            let mut stmt = conn.prepare("SELECT uid, distance FROM vec_data WHERE embedding MATCH ?1 AND k = ?2 ORDER BY distance")?;
+            let rows = stmt.query_map(rusqlite::params![vec_bytes, k as i64], |row| {
+                let uid: i64 = row.get(0)?;
+                let distance: f64 = row.get(1)?;
+                Ok((uid as u64, distance))
+            })?;
+            
+            let mut results = Vec::new();
+            for r in rows {
+                if let Ok(val) = r {
+                    results.push(val);
+                }
+            }
+            Ok(results)
+        })();
+        
+        self.backend.return_reader(conn);
+        res
     }
 
     // --- Incremental Fingerprint Logic ---

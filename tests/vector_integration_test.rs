@@ -1,6 +1,6 @@
 
 use vardadb::storage::backend::Storage;
-use vardadb::bridge::fjall_resolver::FjallResolver;
+use vardadb::bridge::sqlite_resolver::SqliteResolver;
 use vardadb::engine::resolver::{Resolver, VectorConfig};
 use async_graphql::Value;
 use std::collections::HashMap;
@@ -11,8 +11,8 @@ async fn test_automatic_embedding_generation() -> anyhow::Result<()> {
     let path = tempfile::tempdir()?;
     let storage = Arc::new(Storage::new(path.path(), Some(1))?);
     // Use with_bus to avoid messing with bus? Or generic new?
-    // FjallResolver::new is fine.
-    let resolver = FjallResolver::new(storage.clone(), "default");
+    // SqliteResolver::new is fine.
+    let resolver = SqliteResolver::new(storage.clone(), "default");
 
     // 1. Define Vector Config
     let vector_config = VectorConfig {
@@ -58,7 +58,7 @@ async fn test_automatic_embedding_generation() -> anyhow::Result<()> {
     let query_embeddings = storage.embedding_model.lock().unwrap().embed(vec!["Hello world".to_string()], None)?;
     let query_vec: Vec<f64> = query_embeddings[0].iter().map(|f| *f as f64).collect();
     
-    // FjallResolver search_vectors returns Vec<(u64, f64)>
+    // SqliteResolver search_vectors returns Vec<(u64, f64)>
     let results = resolver.search_vectors(&query_vec, 5);
     println!("Search results: {:?}", results);
     

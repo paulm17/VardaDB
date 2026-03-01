@@ -70,7 +70,7 @@ impl Schema {
     }
 
 
-    pub fn create_builder(sdl: &str) -> Result<(dynamic::SchemaBuilder, std::collections::HashMap<String, TypeMetadata>), String> {
+    pub fn create_builder(sdl: &str) -> Result<(dynamic::SchemaBuilder, std::collections::HashMap<String, TypeMetadata>, std::sync::Arc<crate::engine::planner::cost::schema_cache::DemandControlledSchema>), String> {
         let system_sdl = "
             scalar DateTime
             scalar Int64
@@ -1598,7 +1598,9 @@ impl Schema {
 
         schema_builder = schema_builder.register(sort_direction);
 
-        Ok((schema_builder, metadata_map))
+        let schema_cache = std::sync::Arc::new(crate::engine::planner::cost::schema_cache::DemandControlledSchema::new(&full_sdl)?);
+
+        Ok((schema_builder, metadata_map, schema_cache))
     }
 
     pub async fn execute_with_resolver(&self, query: &str, resolver: Box<dyn crate::engine::resolver::Resolver + Send + Sync>) -> String {
@@ -1615,18 +1617,30 @@ impl Schema {
     }
 
     pub fn load_from_sdl(sdl: &str) -> Result<Schema, String> {
-        let (builder, type_metadata) = Self::create_builder(sdl)?;
+        let (builder, type_metadata, _schema_cache) = Self::create_builder(sdl)?;
         let schema = builder.finish().map_err(|e| e.to_string())?;
         Ok(Self { inner: schema, sdl: sdl.to_string(), type_metadata })
     }
 
-    pub fn load_with_resolver<R: crate::engine::resolver::Resolver + Send + Sync + 'static>(sdl: &str, resolver: R) -> Result<Schema, String> {
-        let (builder, type_metadata) = Self::create_builder(sdl)?;
+    pub fn load_with_resolver_and_config<R: crate::engine::resolver::Resolver + Send + Sync + 'static>(
+        sdl: &str, 
+        resolver: R,
+        planner_config: std::sync::Arc<crate::config::PlannerConfig>
+    ) -> Result<Schema, String> {
+        let (mut builder, type_metadata, schema_cache) = Self::create_builder(sdl)?;
+        
+        builder = builder.extension(crate::engine::planner::QueryPlannerFactory::new(planner_config, schema_cache));
+        
         let schema = builder
             .data(Box::new(resolver) as Box<dyn crate::engine::resolver::Resolver + Send + Sync>)
             .finish()
             .map_err(|e| e.to_string())?;
         Ok(Self { inner: schema, sdl: sdl.to_string(), type_metadata })
+    }
+
+    pub fn load_with_resolver<R: crate::engine::resolver::Resolver + Send + Sync + 'static>(sdl: &str, resolver: R) -> Result<Schema, String> {
+        let planner_config = std::sync::Arc::new(crate::config::PlannerConfig::default());
+        Self::load_with_resolver_and_config(sdl, resolver, planner_config)
     }
 
     /// Returns the generated SDL from async-graphql (includes all generated types)
@@ -1785,7 +1799,7 @@ mod tests {
         ";
         let builder_res = Schema::create_builder(sdl);
         assert!(builder_res.is_ok(), "Builder creation failed: {:?}", builder_res.err());
-        let (builder, _) = builder_res.unwrap();
+        let (builder, _, _) = builder_res.unwrap();
         let schema_res = builder.finish();
         
         // This is expected to fail before the fix because VideoStatus is treated as object/relation

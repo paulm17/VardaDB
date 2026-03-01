@@ -6,16 +6,16 @@ async fn test_cascade_delete() {
     // alias serde_json::Value to avoid confusion with async_graphql::Value
     use serde_json::Value as JsonValue;
     use vardadb::engine::schema::Schema;
-    use vardadb::bridge::fjall_resolver::FjallResolver;
+    use vardadb::bridge::sqlite_resolver::SqliteResolver;
     use vardadb::storage::backend::Storage; // Correct struct name
 
     let tmp_dir = tempfile::tempdir().unwrap();
     let storage = Storage::new(tmp_dir.path(), None).unwrap();
-    // Assuming FjallResolver::new takes Storage (or Arc<Storage>?)
-    // Let's check FjallResolver signature. Usually it takes Arc<Storage> or just Storage if lightweight.
+    // Assuming SqliteResolver::new takes Storage (or Arc<Storage>?)
+    // Let's check SqliteResolver signature. Usually it takes Arc<Storage> or just Storage if lightweight.
     // Based on previous code, it likely takes `Storage` or `Arc<Storage>`. Storage holds Keyspace (Arc-like internally) + Partition (Arc-like).
     // Let's assume passed by value or clone.
-    let resolver = Box::new(FjallResolver::new(std::sync::Arc::new(storage), "default"));
+    let resolver = Box::new(SqliteResolver::new(std::sync::Arc::new(storage), "default"));
     
     // Schema with Cascade
     let sdl = "

@@ -11,7 +11,7 @@ use tempfile::TempDir;
 use async_graphql::Value;
 
 use vardadb::storage::backend::Storage;
-use vardadb::bridge::fjall_resolver::FjallResolver;
+use vardadb::bridge::sqlite_resolver::SqliteResolver;
 use vardadb::engine::schema::Schema;
 use vardadb::realtime::bus::EventBus;
 
@@ -22,7 +22,7 @@ use crate::{TestRunner, TestResult};
 pub struct TestHarness {
     pub storage: Arc<Storage>,
     pub schema: Schema,
-    pub resolver: FjallResolver,
+    pub resolver: SqliteResolver,
     pub event_bus: EventBus,
     _temp_dir: TempDir, // Kept alive to prevent cleanup
 }
@@ -37,7 +37,7 @@ impl TestHarness {
         );
         
         let event_bus = EventBus::new();
-        let resolver = FjallResolver::with_bus(storage.clone(), event_bus.clone());
+        let resolver = SqliteResolver::with_bus(storage.clone(), event_bus.clone());
         let schema = Schema::load_with_resolver(sdl, resolver.clone())?;
 
         Ok(Self {

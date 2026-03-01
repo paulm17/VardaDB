@@ -3,7 +3,7 @@ use std::sync::Arc;
 use tokio::time::{sleep, Duration};
 use futures_util::StreamExt;
 use vardadb::engine::schema::Schema;
-use vardadb::bridge::fjall_resolver::FjallResolver;
+use vardadb::bridge::sqlite_resolver::SqliteResolver;
 // use vardadb::engine::resolver::Resolver;
 
 const SDL: &str = r#"
@@ -22,7 +22,7 @@ async fn test_realtime_subscription() {
     // let options = fjall::Config::new(db_path.clone());
     // let keyspace = fjall::Keyspace::open(options).unwrap();
     let storage = Arc::new(vardadb::storage::backend::Storage::new(db_path, None).unwrap());
-    let resolver = Arc::new(FjallResolver::new(storage.clone(), "default"));
+    let resolver = Arc::new(SqliteResolver::new(storage.clone(), "default"));
     
     let schema = Arc::new(Schema::load_from_sdl(SDL).unwrap());
 

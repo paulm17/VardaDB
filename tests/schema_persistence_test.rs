@@ -24,6 +24,7 @@ async fn test_schema_persistence() {
             schemas: schemas.clone(),
             event_bus: event_bus,
             storage_path: db_path.clone(),
+            planner_config: Arc::new(vardadb::config::PlannerConfig::default()),
         };
 
         // Create DB

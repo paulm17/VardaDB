@@ -1,6 +1,6 @@
 use vardadb::engine::schema::Schema;
 use vardadb::storage::backend::Storage;
-use vardadb::bridge::fjall_resolver::FjallResolver;
+use vardadb::bridge::sqlite_resolver::SqliteResolver;
 use std::sync::Arc;
 use tempfile::tempdir;
 use serde_json::Value;
@@ -20,7 +20,7 @@ async fn test_unique_indexing() {
     let schema = Schema::load_from_sdl(sdl).expect("Failed to load schema");
     
     // 2. Create Resolver
-    let resolver = Box::new(FjallResolver::new(storage.clone(), "default"));
+    let resolver = Box::new(SqliteResolver::new(storage.clone(), "default"));
     
     // 3. Create User "Alice"
     let mutation = "

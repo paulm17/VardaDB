@@ -3,13 +3,13 @@
 async fn test_verse_query_structure() {
     use serde_json::Value as JsonValue;
     use vardadb::engine::schema::Schema;
-    use vardadb::bridge::fjall_resolver::FjallResolver;
+    use vardadb::bridge::sqlite_resolver::SqliteResolver;
     use vardadb::storage::backend::Storage;
     use std::sync::Arc;
 
     let tmp_dir = tempfile::tempdir().unwrap();
     let storage = Storage::new(tmp_dir.path(), None).unwrap();
-    let resolver = Box::new(FjallResolver::new(Arc::new(storage), "default"));
+    let resolver = Box::new(SqliteResolver::new(Arc::new(storage), "default"));
 
     // Load actual schema from file path (simulated relative path or hardcoded relevant parts)
     // Since I can't easily load the full file in test without path issues, I'll define a minimal compatible SDL.

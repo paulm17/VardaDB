@@ -1,7 +1,7 @@
 
 use vardadb::engine::schema::Schema;
 use vardadb::storage::backend::Storage;
-use vardadb::bridge::fjall_resolver::FjallResolver;
+use vardadb::bridge::sqlite_resolver::SqliteResolver;
 use std::sync::Arc;
 use tempfile::TempDir;
 
@@ -11,30 +11,38 @@ async fn test_vector_api_search() {
     let storage = Arc::new(Storage::new(temp_dir.path(), None).unwrap());
     
     // 1. Inject Data: 3 Vectors
-    storage.put_vector(100, vec![1.0, 0.0]).unwrap();
-    storage.put_vector(101, vec![0.9, 0.1]).unwrap();
-    storage.put_vector(102, vec![0.0, 1.0]).unwrap();
+    let mut v1 = vec![0.0; 384]; v1[0] = 1.0;
+    let mut v2 = vec![0.0; 384]; v2[0] = 0.9; v2[1] = 0.1;
+    let mut v3 = vec![0.0; 384]; v3[1] = 1.0;
+
+    storage.put_vector(100, v1.clone()).unwrap();
+    storage.put_vector(101, v2).unwrap();
+    storage.put_vector(102, v3).unwrap();
+    
+    // Give async vector worker time to insert
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
     // 2. Initialize Schema
-    let resolver = FjallResolver::new(storage.clone(), "default");
+    let resolver = SqliteResolver::new(storage.clone(), "default");
     let sdl = "type User { name: String }"; // Minimal SDL
     let schema = Schema::load_with_resolver(sdl, resolver).unwrap();
 
-    // 3. Search for neighbors of [1.0, 0.0]
-    let query = r#"
-        query {
-            search(vector: [1.0, 0.0], k: 2) {
+    // 3. Search for neighbors of v1
+    let query_vector = format!("{:?}", v1);
+    let query = format!(r#"
+        query {{
+            search(vector: {}, k: 2) {{
                 uid
                 distance
-            }
-        }
-    "#;
+            }}
+        }}
+    "#, query_vector);
 
     // We use execute_with_resolver but pass a NEW resolver (sharing the storage)
     // because execute_with_resolver requires passing a resolver instance.
     // In a real app, the server does this for every request.
-    let req_resolver = FjallResolver::new(storage.clone(), "default");
-    let resp_json = schema.execute_with_resolver(query, Box::new(req_resolver)).await;
+    let req_resolver = SqliteResolver::new(storage.clone(), "default");
+    let resp_json = schema.execute_with_resolver(&query, Box::new(req_resolver)).await;
     
     println!("Response: {}", resp_json);
 

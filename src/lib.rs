@@ -65,7 +65,7 @@ use tokio::net::TcpListener;
 use tower_http::cors::{CorsLayer, Any};
 use crate::storage::backend::Storage;
 
-use crate::bridge::fjall_resolver::FjallResolver;
+use crate::bridge::sqlite_resolver::SqliteResolver;
 use crate::realtime::bus::EventBus;
 use metrics::{counter, histogram};
 use tracing::info;
@@ -81,9 +81,9 @@ pub struct ServerState {
     pub event_bus: EventBus,
     pub storage_path: std::path::PathBuf,
     pub llm_config: crate::config::LLMConfig,
-    // pub mlx_server: Option<Arc<crate::llm::MlxServer>>, // Removed
     pub llama_server: Option<Arc<crate::llm::LlamaServer>>,
     pub auth: Option<Arc<auth::state::AuthState>>,
+    pub planner_config: std::sync::Arc<crate::config::PlannerConfig>,
 }
 
 impl axum::extract::FromRef<ServerState> for crate::server::management::ManagementState {
@@ -93,6 +93,7 @@ impl axum::extract::FromRef<ServerState> for crate::server::management::Manageme
             schemas: state.schemas.clone(),
             event_bus: state.event_bus.clone(),
             storage_path: state.storage_path.clone(),
+            planner_config: state.planner_config.clone(),
         }
     }
 }
@@ -145,14 +146,16 @@ pub async fn init_system(config: crate::config::VardaConfig) -> (Arc<ServerState
     // Create a shared EventBus that will be used by all resolvers
     let shared_event_bus = EventBus::new();
 
-    let resolver = FjallResolver::with_bus(storage.clone(), shared_event_bus.clone());
+    let resolver = SqliteResolver::with_bus(storage.clone(), shared_event_bus.clone());
 
-    let initial_schema = crate::engine::schema::Schema::load_with_resolver(&sdl, resolver.clone())
+    let planner_config = std::sync::Arc::new(config.planner.clone());
+
+    let initial_schema = crate::engine::schema::Schema::load_with_resolver_and_config(&sdl, resolver.clone(), planner_config.clone())
         .or_else(|e| {
             println!("Failed to load persisted schema: {}. Falling back to default.", e);
              let default_sdl = "type Health { status: String }";
-             let blank_resolver = FjallResolver::with_bus(storage.clone(), shared_event_bus.clone()); 
-             crate::engine::schema::Schema::load_with_resolver(default_sdl, blank_resolver)
+             let blank_resolver = SqliteResolver::with_bus(storage.clone(), shared_event_bus.clone()); 
+             crate::engine::schema::Schema::load_with_resolver_and_config(default_sdl, blank_resolver, planner_config.clone())
         })
         .expect("Failed to build schema");
 
@@ -226,6 +229,7 @@ pub async fn init_system(config: crate::config::VardaConfig) -> (Arc<ServerState
         // mlx_server: mlx_server, // Removed
         llama_server: llama_server,
         auth: auth_state,
+        planner_config: planner_config.clone(),
     }); // Wrapped in Arc
 
     // Start Anti-Gravity (Zenoh) Sync
@@ -235,9 +239,11 @@ pub async fn init_system(config: crate::config::VardaConfig) -> (Arc<ServerState
     let sync_schema = state.schemas.get("default").expect("Default schema missing").clone();
     let sync_cache = state.cache.clone();
     
+    let sync_planner_config = planner_config.clone();
+    
     tokio::spawn(async move {
          println!("Initializing Zenoh Sync...");
-         match crate::sync::manager::SyncManager::new(sync_resolver, zenoh_config, remote_append_path, sync_schema, sync_cache).await {
+         match crate::sync::manager::SyncManager::new(sync_resolver, zenoh_config, remote_append_path, sync_schema, sync_cache, sync_planner_config).await {
              Ok(manager) => {
                  if let Err(e) = manager.start().await {
                      eprintln!("SyncManager Error: {}", e);
@@ -290,12 +296,12 @@ pub async fn init_system(config: crate::config::VardaConfig) -> (Arc<ServerState
     });
 
     // 3. Setup Routes
-    // Create Management State
     let mgmt_state = crate::server::management::ManagementState {
         storage: storage.clone(),
         schemas: schemas.clone(),
         event_bus: shared_event_bus.clone(),
         storage_path: std::path::PathBuf::from(&config.server.storage_path),
+        planner_config: planner_config.clone(),
     };
     
     let mgmt_manager = Arc::new(mgmt_state);
@@ -371,7 +377,7 @@ pub async fn run(config: crate::config::VardaConfig) {
         let mcp_schema = state.schemas.get("default").expect("Default schema missing").value().clone();
         
         // We need a resolver. We can create a new one since it's cheap (just Arc clones internally)
-        let mcp_resolver = Box::new(FjallResolver::with_bus(state.storage.clone(), state.event_bus.clone()));
+        let mcp_resolver = Box::new(SqliteResolver::with_bus(state.storage.clone(), state.event_bus.clone()));
         
         let mcp_server = crate::bridge::mcp::MCPServer::new(mcp_schema, mcp_resolver);
         
@@ -431,7 +437,7 @@ async fn graphql_handler(
         // Check if DB exists in Storage
         if state.storage.get_database(&db_name).is_some() {
              println!("Lazy loading schema for database: {}", db_name);
-             let resolver = FjallResolver::new(state.storage.clone(), &db_name);
+             let resolver = SqliteResolver::new(state.storage.clone(), &db_name);
              
              let db_schema_path = state.storage_path.join(format!("{}_schema.graphql", db_name));
              let sdl = std::fs::read_to_string(&db_schema_path).unwrap_or_else(|_| "type Health { status: String }".to_string());
@@ -501,7 +507,7 @@ async fn admin_schema_handler(
 ) -> impl IntoResponse {
     println!("Received new schema update...");
     // CRITICAL: Use shared EventBus to ensure SyncManager and subscriptions use the same bus
-    let resolver = FjallResolver::with_bus(state.storage.clone(), state.event_bus.clone());
+    let resolver = SqliteResolver::with_bus(state.storage.clone(), state.event_bus.clone());
     
     match crate::engine::schema::Schema::load_with_resolver(&body, resolver) {
         Ok(new_schema) => {
@@ -638,7 +644,7 @@ async fn subscription_handler(
                 // Re-using lazy load logic properly:
                  if state.storage.get_database(&selected_db).is_some() {
                      println!("Lazy loading schema for database (WS): {}", selected_db);
-                     let resolver = FjallResolver::new(state.storage.clone(), &selected_db);
+                     let resolver = SqliteResolver::new(state.storage.clone(), &selected_db);
                      let db_schema_path = state.storage_path.join(format!("{}_schema.graphql", selected_db));
                      let sdl = std::fs::read_to_string(&db_schema_path).unwrap_or_else(|_| "type Health { status: String }".to_string());
                      
