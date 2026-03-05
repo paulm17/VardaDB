@@ -89,9 +89,9 @@ pub struct LLMConfig {
     pub llama_server_path: Option<String>,
 }
 
-fn default_llm_provider() -> String { "ollama".to_string() }
-fn default_llm_model() -> String { "llama3".to_string() }
-fn default_llm_port() -> u16 { 11434 }
+fn default_llm_provider() -> String { "mlx".to_string() }
+fn default_llm_model() -> String { "".to_string() }
+fn default_llm_port() -> u16 { 8080 }
 fn default_draft_tokens() -> usize { 5 }
 
 impl Default for LLMConfig {

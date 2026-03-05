@@ -81,7 +81,7 @@ pub struct ServerState {
     pub event_bus: EventBus,
     pub storage_path: std::path::PathBuf,
     pub llm_config: crate::config::LLMConfig,
-    pub llama_server: Option<Arc<crate::llm::LlamaServer>>,
+    pub llama_server: Option<Arc<crate::llm::MlxEngine>>,
     pub auth: Option<Arc<auth::state::AuthState>>,
     pub planner_config: std::sync::Arc<crate::config::PlannerConfig>,
 }
@@ -162,11 +162,11 @@ pub async fn init_system(config: crate::config::VardaConfig) -> (Arc<ServerState
     // MlxServer init removed
     
     // Initialize Llama Server if Llama Provider
-    let llama_server = if config.llm.provider == "llama" {
-        match crate::llm::LlamaServer::start(config.llm.clone()) {
+    let llama_server = if config.llm.provider == "llama" || config.llm.provider == "local" || config.llm.provider == "mlx" {
+        match crate::llm::MlxEngine::start(config.llm.clone()) {
             Ok(server) => Some(server),
             Err(e) => {
-                eprintln!("Failed to start Llama Server: {}", e);
+                eprintln!("Failed to start MLX Engine: {}", e);
                 None
             }
         }
@@ -321,6 +321,8 @@ pub async fn init_system(config: crate::config::VardaConfig) -> (Arc<ServerState
 
     let app = Router::new()
         .route("/chat", post(crate::llm::chat_handler))
+        .route("/llm/load", post(crate::llm::load_handler))
+        .route("/llm/unload", post(crate::llm::unload_handler))
         .route("/graphql", post(graphql_handler).get(subscription_handler))
         .route("/rpc", get(subscription_handler)) // Support Surrealist native connection
         .route("/playground", get(playground_handler))
