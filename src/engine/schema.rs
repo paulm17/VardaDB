@@ -422,6 +422,17 @@ impl Schema {
             }
         }
         
+        // Debug: dump all type inverses
+        for (type_name, meta) in &metadata_map {
+            if !meta.inverses.is_empty() {
+                eprintln!("[Schema] Type '{}' inverses:", type_name);
+                for inv in &meta.inverses {
+                    eprintln!("  field='{}' → {}.{} (is_list={})", 
+                        inv.field, inv.inverse_type, inv.inverse_field, inv.inverse_is_list);
+                }
+            }
+        }
+
         let metadata_arc = std::sync::Arc::new(metadata_map.clone());
 
         // Pass 2: Generate Schema Artifacts

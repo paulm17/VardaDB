@@ -1068,6 +1068,15 @@ impl SqliteResolver {
 
     pub fn create_node_internal(&self, type_name: &str, uid: u64, mut fields: std::collections::HashMap<String, serde_json::Value>, uniques: &[String], inverses: &[crate::engine::resolver::InverseInfo], search_fields: &std::collections::HashMap<String, Vec<String>>, source: crate::realtime::bus::MutationSource, timestamp_override: Option<crate::storage::timestamp::Timestamp>) -> Result<(), String> {
         let fn_start = std::time::Instant::now();
+        // Debug: trace inverse edge creation
+        if !inverses.is_empty() {
+            eprintln!("[create_node_internal] type={} uid={} inverses={}", type_name, uid, inverses.len());
+            for info in inverses {
+                let field_val = fields.get(&info.field);
+                eprintln!("  inverse field='{}' val={:?} → {}.{} is_list={}",
+                    info.field, field_val, info.inverse_type, info.inverse_field, info.inverse_is_list);
+            }
+        }
         // Normalize fields: If value is Object with uid/id, flatten to String(uid)
         for (_, value) in fields.iter_mut() {
             if let serde_json::Value::Object(map) = value {
@@ -1192,7 +1201,7 @@ impl SqliteResolver {
                       }
                       _ => {}
                   }
-                  println!("DEBUG INVERSE: field={} targets={:?}", info.field, new_targets);
+
                   for target in new_targets {
                       if info.inverse_is_list {
                           // O(1) edge insert — add directly to batch
@@ -1256,6 +1265,142 @@ impl SqliteResolver {
         });
 
         Ok(())
+    }
+
+    /// High-throughput batch insert — wraps ALL records in ONE SQLite transaction.
+    ///
+    /// `create_node_internal` auto-commits each `main.insert()` individually.
+    /// For 203k SynsetRelations × ~5 fields = ~1M individual commits — extremely slow.
+    /// This method holds the writer lock for the full batch (one BEGIN/COMMIT), which
+    /// is typically 100× faster for large bulk imports.
+    ///
+    /// Trade-offs vs `create_node_internal`:
+    ///   ✗ No unique-field enforcement (caller must ensure data is clean)
+    ///   ✗ No BM25 / term indexing
+    ///   ✗ No realtime event publishing
+    pub fn batch_create_nodes(
+        &self,
+        records: &[crate::server::bulk_ingest::BulkRecord],
+        type_metadata: &std::collections::HashMap<String, crate::engine::schema::TypeMetadata>,
+    ) -> Result<(), String> {
+        // Read keyspace BEFORE writer lock (different mutex — no deadlock concern).
+        let keyspaces = self.storage.keyspaces.read().unwrap();
+        let (main, _) = keyspaces
+            .get(&self.db_name)
+            .ok_or_else(|| format!("Database not found: {}", self.db_name))?;
+        let main_clone = main.clone();
+        drop(keyspaces);
+
+        let ts = self.storage.next_timestamp();
+        let ts_bytes = ts.to_bytes();
+
+        self.storage.backend.write_batch(|conn| {
+            // Log metadata for debugging
+            for (type_name, meta) in type_metadata {
+                if !meta.inverses.is_empty() {
+                    tracing::debug!("[batch_create_nodes] Type '{}' has {} inverses", type_name, meta.inverses.len());
+                }
+            }
+
+            for record in records {
+                let uid = record.uid.unwrap_or_else(|| {
+                    let t = self.storage.next_timestamp();
+                    (t.millis << 16) | (t.counter as u64)
+                });
+
+                // Type index entry
+                let type_idx_key = Codec::encode_type_index_key(&record.type_name, uid);
+                main_clone.batch_insert_on_conn(conn, &type_idx_key, &[])?;
+
+                // _type data field
+                let type_val = serde_json::to_vec(
+                    &serde_json::Value::String(record.type_name.clone())
+                ).map_err(|e| anyhow::anyhow!(e))?;
+                let type_data_key = Codec::encode_data_key(uid, "_type");
+                let mut type_buf = Vec::with_capacity(16 + type_val.len());
+                type_buf.extend_from_slice(&ts_bytes);
+                type_buf.extend_from_slice(&type_val);
+                main_clone.batch_upsert_lww_on_conn(conn, &type_data_key, &type_buf, &ts_bytes)?;
+
+                // User fields — normalize { id/uid: X } references to their string value
+                for (field, value) in &record.fields {
+                    let normalized: serde_json::Value = match value {
+                        serde_json::Value::Object(map) => {
+                            map.get("uid").or_else(|| map.get("id"))
+                                .and_then(|v| match v {
+                                    serde_json::Value::String(s) =>
+                                        Some(serde_json::Value::String(s.clone())),
+                                    serde_json::Value::Number(n) =>
+                                        Some(serde_json::Value::String(n.to_string())),
+                                    _ => None,
+                                })
+                                .unwrap_or_else(|| value.clone())
+                        }
+                        _ => value.clone(),
+                    };
+                    let val_bytes = serde_json::to_vec(&normalized)
+                        .map_err(|e| anyhow::anyhow!(e))?;
+                    let key = Codec::encode_data_key(uid, field);
+                    let mut val_buf = Vec::with_capacity(16 + val_bytes.len());
+                    val_buf.extend_from_slice(&ts_bytes);
+                    val_buf.extend_from_slice(&val_bytes);
+                    main_clone.batch_upsert_lww_on_conn(conn, &key, &val_buf, &ts_bytes)?;
+                }
+
+                // @hasInverse edge writing
+                if let Some(meta) = type_metadata.get(&record.type_name) {
+                    for info in &meta.inverses {
+                        if let Some(val) = record.fields.get(&info.field) {
+                            // Extract target UIDs from the ORIGINAL field value (before normalization)
+                            let mut targets = Vec::new();
+                            Self::extract_target_uids(val, &mut targets);
+
+                            for target in targets {
+                                if info.inverse_is_list {
+                                    // List inverse: write edge key
+                                    let edge_key = Codec::encode_edge_key(target, &info.inverse_field, uid);
+                                    main_clone.batch_insert_on_conn(conn, &edge_key, &[])?;
+                                } else {
+                                    // Non-list inverse: write data key with LWW
+                                    let inv_val = serde_json::Value::String(uid.to_string());
+                                    let inv_val_bytes = serde_json::to_vec(&inv_val)
+                                        .map_err(|e| anyhow::anyhow!(e))?;
+                                    let inv_key = Codec::encode_data_key(target, &info.inverse_field);
+                                    let mut inv_buf = Vec::with_capacity(16 + inv_val_bytes.len());
+                                    inv_buf.extend_from_slice(&ts_bytes);
+                                    inv_buf.extend_from_slice(&inv_val_bytes);
+                                    main_clone.batch_upsert_lww_on_conn(conn, &inv_key, &inv_buf, &ts_bytes)?;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(())
+        }).map_err(|e| e.to_string())
+    }
+
+    /// Helper: extract u64 target UIDs from a JSON field value (string, number, object with id/uid, or array thereof)
+    fn extract_target_uids(val: &serde_json::Value, targets: &mut Vec<u64>) {
+        match val {
+            serde_json::Value::String(s) => { if let Ok(id) = s.parse::<u64>() { targets.push(id); } }
+            serde_json::Value::Number(n) => { if let Some(id) = n.as_u64() { targets.push(id); } }
+            serde_json::Value::Object(map) => {
+                if let Some(id_val) = map.get("uid").or_else(|| map.get("id")) {
+                    match id_val {
+                        serde_json::Value::String(s) => { if let Ok(id) = s.parse::<u64>() { targets.push(id); } }
+                        serde_json::Value::Number(n) => { if let Some(id) = n.as_u64() { targets.push(id); } }
+                        _ => {}
+                    }
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    Self::extract_target_uids(item, targets);
+                }
+            }
+            _ => {}
+        }
     }
 
     pub fn update_node_internal(&self, type_name: &str, uid: u64, mut fields: std::collections::HashMap<String, serde_json::Value>, uniques: &[String], inverses: &[crate::engine::resolver::InverseInfo], search_fields: &std::collections::HashMap<String, Vec<String>>, source: crate::realtime::bus::MutationSource, timestamp_override: Option<crate::storage::timestamp::Timestamp>) -> Result<(), String> {
@@ -1688,12 +1833,25 @@ impl Resolver for SqliteResolver {
 
         // Also scan edge index keys (for inverse-linked lists)
         let edge_prefix = Codec::encode_edge_prefix(parent_uid, field_name);
+        
+        if field_name == "chapters" {
+            println!("[resolve_list] Checking edges for parent={} field='{}' prefix_len={}", parent_uid, field_name, edge_prefix.len());
+        }
+        
         if let Some((main_ks, _)) = self.storage.get_database(&self.db_name) {
             let iter = main_ks.prefix(&edge_prefix);
+            
+            if field_name == "chapters" {
+                println!("[resolve_list] Found {} potential edges for chapters", iter.len());
+            }
+            
             for (key, _val) in iter {
                     if !key.starts_with(&edge_prefix) { break; }
                     if let Some(source_uid) = Codec::decode_edge_source_uid(&key) {
                         uids.push(source_uid);
+                        if field_name == "chapters" {
+                            println!("[resolve_list] Added chapter edge source_uid={}", source_uid);
+                        }
                     }
             }
         }

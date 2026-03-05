@@ -40,9 +40,9 @@ pub struct PlannerConfig {
 fn default_planner_enabled() -> bool { true }
 fn default_planner_mode() -> String { "enforce".to_string() }
 fn default_planner_max_depth() -> usize { 15 }
-fn default_planner_max_estimated_cost() -> f64 { 1000.0 }
-fn default_planner_max_actual_cost() -> f64 { 2000.0 }
-fn default_planner_default_list_size() -> i32 { 20 }
+fn default_planner_max_estimated_cost() -> f64 { 5000000000.0 }
+fn default_planner_max_actual_cost() -> f64 { 1000000000.0 }
+fn default_planner_default_list_size() -> i32 { 100 }
 
 impl Default for PlannerConfig {
     fn default() -> Self {

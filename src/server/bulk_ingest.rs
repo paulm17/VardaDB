@@ -90,18 +90,8 @@ pub async fn start_tcp_listener(state: Arc<ServerState>, port: u16) {
                     // Process first batch if the handshake frame was actually data
                     if let Some(first_buf) = first_batch {
                         if let Ok(records) = serde_json::from_slice::<Vec<BulkRecord>>(&first_buf) {
-                            for record in records {
-                                let (uniques, inverses, search_fields) = if let Some(meta) = schema.type_metadata.get(&record.type_name) {
-                                    (&meta.uniques, &meta.inverses, &meta.search_fields)
-                                } else {
-                                    (&vec![], &vec![], &std::collections::HashMap::new())
-                                };
-                                let uid = record.uid.unwrap_or_else(|| {
-                                   std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).expect("Time").as_nanos() as u64
-                                });
-                                if let Err(e) = resolver.create_node_internal(&record.type_name, uid, record.fields, uniques, inverses, search_fields, crate::realtime::bus::MutationSource::Local, None) {
-                                    error!("Bulk ingest resolver error for UID {}: {}", uid, e);
-                                }
+                            if let Err(e) = resolver.batch_create_nodes(&records, &schema.type_metadata) {
+                                error!("Bulk ingest batch_create_nodes error: {}", e);
                             }
                             use tokio::io::AsyncWriteExt;
                             let _ = socket.write_all(&[1u8]).await;
@@ -143,34 +133,13 @@ pub async fn start_tcp_listener(state: Arc<ServerState>, port: u16) {
                             }
                         };
 
-                        // 4. Stream into SqliteResolver
-                        for record in records {
-                            let (uniques, inverses, search_fields) = if let Some(meta) = schema.type_metadata.get(&record.type_name) {
-                                (&meta.uniques, &meta.inverses, &meta.search_fields)
-                            } else {
-                                (&vec![], &vec![], &std::collections::HashMap::new())
-                            };
-                            
-                            let uid = record.uid.unwrap_or_else(|| {
-                               let start = std::time::SystemTime::now();
-                               let since_the_epoch = start.duration_since(std::time::UNIX_EPOCH).expect("Time went backwards");
-                               since_the_epoch.as_nanos() as u64
-                            });
-                            
-                            if let Err(e) = resolver.create_node_internal(
-                                &record.type_name, 
-                                uid, 
-                                record.fields, 
-                                uniques, 
-                                inverses, 
-                                search_fields, 
-                                crate::realtime::bus::MutationSource::Local,
-                                None
-                            ) {
-                                error!("Bulk ingest resolver error for UID {}: {}", uid, e);
-                            }
+                        // 4. Batch-insert entire slice in ONE SQLite transaction.
+                        //    batch_create_nodes is 100× faster than per-record create_node_internal
+                        //    for large bulk imports (one BEGIN/COMMIT vs N auto-commits).
+                        if let Err(e) = resolver.batch_create_nodes(&records, &schema.type_metadata) {
+                            error!("Bulk ingest batch_create_nodes error: {}", e);
                         }
-                        
+
                         // Send ACK back to client to prevent TCP buffer overflow
                         use tokio::io::AsyncWriteExt;
                         if let Err(e) = socket.write_all(&[1u8]).await {

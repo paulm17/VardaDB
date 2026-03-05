@@ -186,18 +186,34 @@ pub struct SqliteTable {
     backend: Arc<SqliteBackend>,
     /// If true, this table has a `ts` column (main tables).
     has_ts: bool,
+    insert_sql: String,
+    upsert_lww_sql: String,
 }
 
 impl SqliteTable {
     pub fn new(name: String, backend: Arc<SqliteBackend>) -> Self {
-        Self { name, backend, has_ts: false }
-    }
+    let insert_sql = format!(
+        "INSERT INTO \"{}\" (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        name
+    );
+    let upsert_lww_sql = String::new(); // History tables don't use upsert_lww
+    Self { name, backend, has_ts: false, insert_sql, upsert_lww_sql }
+}
 
-    /// Create a handle for a main table (has a `ts` column).
-    pub fn new_main(name: String, backend: Arc<SqliteBackend>) -> Self {
-        Self { name, backend, has_ts: true }
-    }
-
+/// Create a handle for a main table (has a `ts` column).
+pub fn new_main(name: String, backend: Arc<SqliteBackend>) -> Self {
+    let insert_sql = format!(
+        "INSERT INTO \"{}\" (key, value, ts) VALUES (?1, ?2, ?3) ON CONFLICT(key) DO UPDATE SET value = excluded.value, ts = excluded.ts",
+        name
+    );
+    let upsert_lww_sql = format!(
+        "INSERT INTO \"{}\" (key, value, ts) VALUES (?1, ?2, ?3) \
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, ts = excluded.ts \
+         WHERE excluded.ts > \"{}\".ts",
+        name, name
+    );
+    Self { name, backend, has_ts: true, insert_sql, upsert_lww_sql }
+}
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -413,23 +429,18 @@ impl SqliteTable {
     /// Batch insert within a transaction (for put_batch_lww).
     /// The caller must wrap this in a write_batch transaction.
     pub fn batch_insert_on_conn(&self, conn: &Connection, key: &[u8], value: &[u8]) -> anyhow::Result<()> {
-        let sql = format!(
-            "INSERT INTO \"{}\" (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            self.name
-        );
-        conn.prepare_cached(&sql)?.execute(params![key, value])?;
+        if self.has_ts {
+            let default_ts = [0u8; 16];
+            conn.prepare_cached(&self.insert_sql)?.execute(params![key, value, &default_ts[..]])?;
+        } else {
+            conn.prepare_cached(&self.insert_sql)?.execute(params![key, value])?;
+        }
         Ok(())
     }
 
     /// Batch LWW upsert within a transaction for main tables.
     pub fn batch_upsert_lww_on_conn(&self, conn: &Connection, key: &[u8], value: &[u8], ts: &[u8]) -> anyhow::Result<()> {
-        let sql = format!(
-            "INSERT INTO \"{}\" (key, value, ts) VALUES (?1, ?2, ?3) \
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value, ts = excluded.ts \
-             WHERE excluded.ts > \"{}\".ts",
-            self.name, self.name
-        );
-        conn.prepare_cached(&sql)?.execute(params![key, value, ts])?;
+        conn.prepare_cached(&self.upsert_lww_sql)?.execute(params![key, value, ts])?;
         Ok(())
     }
 

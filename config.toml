@@ -40,5 +40,9 @@ prefix = "varda/ops"
 # password = "your_password" # (Optional)
 # Delivery retry and backoff settings
 # max_attempts = 3
-initial_delay_secs = 5
-max_delay_secs = 60
+# initial_delay_secs = 5
+# max_delay_secs = 60
+
+[planner]
+max_estimated_cost = 50000
+max_actual_cost = 100000
