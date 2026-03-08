@@ -1,7 +1,7 @@
+use byteorder::{BigEndian, ByteOrder};
+use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::time::{SystemTime, UNIX_EPOCH};
-use serde::{Serialize, Deserialize};
-use byteorder::{BigEndian, ByteOrder};
 
 /// Hybrid Logical Clock Timestamp
 /// 16 bytes total:
@@ -18,7 +18,11 @@ pub struct Timestamp {
 impl Timestamp {
     /// Create a new Timestamp (initial)
     pub fn new(millis: u64, counter: u16, node_id: u64) -> Self {
-        Self { millis, counter, node_id }
+        Self {
+            millis,
+            counter,
+            node_id,
+        }
     }
 
     /// Get current wall clock time in millis
@@ -35,7 +39,7 @@ impl Timestamp {
         // 48-bit millis + 16-bit counter = 64-bit combined
         // But Evolu does: 6 bytes millis, 2 bytes counter.
         // We can write millis as u64 then overwrite last 2 bytes? No.
-        
+
         // Manual pack:
         // Millis: 6 bytes
         let m = self.millis;
@@ -53,23 +57,26 @@ impl Timestamp {
 
         // NodeID: 8 bytes
         BigEndian::write_u64(&mut buf[8..16], self.node_id);
-        
+
         buf
     }
 
     pub fn from_bytes(buf: &[u8; 16]) -> Self {
-        let millis = 
-            ((buf[0] as u64) << 40) |
-            ((buf[1] as u64) << 32) |
-            ((buf[2] as u64) << 24) |
-            ((buf[3] as u64) << 16) |
-            ((buf[4] as u64) << 8) |
-            (buf[5] as u64);
-        
+        let millis = ((buf[0] as u64) << 40)
+            | ((buf[1] as u64) << 32)
+            | ((buf[2] as u64) << 24)
+            | ((buf[3] as u64) << 16)
+            | ((buf[4] as u64) << 8)
+            | (buf[5] as u64);
+
         let counter = ((buf[6] as u16) << 8) | (buf[7] as u16);
         let node_id = BigEndian::read_u64(&buf[8..16]);
 
-        Self { millis, counter, node_id }
+        Self {
+            millis,
+            counter,
+            node_id,
+        }
     }
 }
 
@@ -82,17 +89,17 @@ impl Timestamp {
         } else {
             0
         };
-        
+
         Self {
             millis: next_millis,
             counter: next_counter,
-            node_id: self.node_id
+            node_id: self.node_id,
         }
     }
 
     pub fn receive(&self, remote: &Timestamp, physical_time: u64) -> Self {
         let next_millis = self.millis.max(remote.millis).max(physical_time);
-        
+
         let next_counter = if next_millis == self.millis && next_millis == remote.millis {
             self.counter.max(remote.counter).wrapping_add(1)
         } else if next_millis == self.millis {
@@ -106,7 +113,7 @@ impl Timestamp {
         Self {
             millis: next_millis,
             counter: next_counter,
-            node_id: self.node_id
+            node_id: self.node_id,
         }
     }
 
@@ -126,7 +133,8 @@ impl PartialOrd for Timestamp {
 impl Ord for Timestamp {
     fn cmp(&self, other: &Self) -> Ordering {
         // Lexicographical comparison
-        self.millis.cmp(&other.millis)
+        self.millis
+            .cmp(&other.millis)
             .then(self.counter.cmp(&other.counter))
             .then(self.node_id.cmp(&other.node_id))
     }
@@ -141,7 +149,7 @@ mod tests {
         let t1 = Timestamp::new(100, 0, 1);
         let t2 = Timestamp::new(100, 1, 1);
         let t3 = Timestamp::new(101, 0, 1);
-        
+
         assert!(t1 < t2);
         assert!(t2 < t3);
     }
@@ -157,9 +165,9 @@ mod tests {
     #[test]
     fn test_send() {
         let t = Timestamp::new(100, 5, 1);
-        
+
         // Case 1: Physical time is behind (clock drift) -> Increment counter
-        let next = t.send(90); 
+        let next = t.send(90);
         assert_eq!(next.millis, 100);
         assert_eq!(next.counter, 6);
 

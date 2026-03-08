@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
-use vardadb::{run, build_schema, codegen};
 use std::fs;
+use vardadb::{build_schema, codegen, run};
 
 #[derive(Parser)]
 #[command(name = "vardadb")]
@@ -8,27 +8,27 @@ use std::fs;
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
-    
+
     /// Path to config file (default: config.toml)
     #[arg(short, long, default_value = "config.toml")]
     config: String,
-    
+
     /// Run as MCP Server (stdio)
     #[arg(long, default_value = "false")]
     mcp: bool,
-    
+
     /// Override server port (e.g., 8000)
     #[arg(short, long)]
     port: Option<u16>,
-    
+
     /// Override data directory path
     #[arg(short = 'd', long)]
     data_dir: Option<String>,
-    
+
     /// Override schema SDL file path
     #[arg(short, long)]
     schema: Option<String>,
-    
+
     /// Override node ID for multi-node deployments
     #[arg(long)]
     node_id: Option<u64>,
@@ -42,7 +42,7 @@ enum Commands {
     ExportSchema {
         /// Path to the Input SDL file (VardaDB Schema)
         #[arg(short, long)]
-        schema: Option<String>, 
+        schema: Option<String>,
         /// Output path (Optional, prints to stdout if missing)
         #[arg(short, long)]
         output: Option<String>,
@@ -66,7 +66,7 @@ enum Commands {
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
-    
+
     // Load Config
     let config = match vardadb::config::VardaConfig::load_from_file(&cli.config) {
         Ok(c) => c,
@@ -75,7 +75,7 @@ async fn main() {
             std::process::exit(1);
         }
     };
-    
+
     // Override with CLI flags
     let mut config = config;
     if cli.mcp {
@@ -100,7 +100,9 @@ async fn main() {
         }
         Some(Commands::ExportSchema { schema, output }) => {
             // Use CLI schema path if provided, else config
-            let schema_path = schema.or(config.server.schema_path).expect("Schema path must be provided in config or CLI");
+            let schema_path = schema
+                .or(config.server.schema_path)
+                .expect("Schema path must be provided in config or CLI");
             let content = fs::read_to_string(&schema_path).expect("Failed to read schema file");
             match build_schema(&content) {
                 Ok(s) => {
@@ -118,7 +120,9 @@ async fn main() {
             }
         }
         Some(Commands::Generate { schema, output }) => {
-             let schema_path = schema.or(config.server.schema_path).expect("Schema path must be provided in config or CLI");
+            let schema_path = schema
+                .or(config.server.schema_path)
+                .expect("Schema path must be provided in config or CLI");
             let content = fs::read_to_string(&schema_path).expect("Failed to read schema file");
             match build_schema(&content) {
                 Ok(s) => {
@@ -126,7 +130,7 @@ async fn main() {
                     // Generate TypeScript
                     match codegen::generate_typescript(&sdl) {
                         Ok(ts) => {
-                             if let Some(path) = output {
+                            if let Some(path) = output {
                                 fs::write(path, ts).expect("Failed to write output file");
                             } else {
                                 println!("{}", ts);
@@ -157,4 +161,3 @@ async fn main() {
         }
     }
 }
-

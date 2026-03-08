@@ -1,7 +1,7 @@
 //! Bank Test - LWW Balance Invariant Testing
 //!
 //! Ported from Limbo's Antithesis bank-test pattern.
-//! 
+//!
 //! The Bank Test is a classic distributed systems correctness test.
 //! Invariant: Total money in the system NEVER changes.
 //!
@@ -10,13 +10,13 @@
 //! - LWW (Last-Write-Wins) conflict resolution
 //! - Data integrity during transfers
 
-use std::time::Instant;
+use async_graphql::Value;
 use rand::prelude::*;
 use rand_chacha::ChaCha8Rng;
-use async_graphql::Value;
+use std::time::Instant;
 
 use crate::harness::TestHarness;
-use crate::{TestRunner, TestResult};
+use crate::{TestResult, TestRunner};
 
 /// Bank test configuration
 pub struct BankTestConfig {
@@ -50,34 +50,38 @@ pub async fn run_bank_test(runner: &mut TestRunner, seed: u64) {
 
     let start = Instant::now();
     let result = execute_bank_test(&mut rng, &config).await;
-    
+
     runner.add_result(match result {
         Ok((transfers, violations)) => {
             if violations == 0 {
                 TestResult::pass(
-                    &format!("BankTest ({} accounts, {} transfers)", config.num_accounts, transfers),
+                    &format!(
+                        "BankTest ({} accounts, {} transfers)",
+                        config.num_accounts, transfers
+                    ),
                     "bank",
                     start.elapsed(),
                 )
             } else {
                 TestResult::fail(
-                    &format!("BankTest ({} accounts, {} transfers)", config.num_accounts, transfers),
+                    &format!(
+                        "BankTest ({} accounts, {} transfers)",
+                        config.num_accounts, transfers
+                    ),
                     "bank",
                     start.elapsed(),
                     &format!("{} invariant violations detected", violations),
                 )
             }
         }
-        Err(e) => TestResult::fail(
-            "BankTest",
-            "bank",
-            start.elapsed(),
-            &e,
-        ),
+        Err(e) => TestResult::fail("BankTest", "bank", start.elapsed(), &e),
     });
 }
 
-async fn execute_bank_test(rng: &mut ChaCha8Rng, config: &BankTestConfig) -> Result<(usize, usize), String> {
+async fn execute_bank_test(
+    rng: &mut ChaCha8Rng,
+    config: &BankTestConfig,
+) -> Result<(usize, usize), String> {
     // 1. Setup: Create schema and accounts
     let sdl = r#"
         type Account {
@@ -140,8 +144,12 @@ async fn setup_bank(
 
         let response = harness.execute_ok(&mutation).await?;
         if let Value::Object(obj) = &response {
-            if let Some(Value::Object(create_account)) = obj.get(&async_graphql::Name::new("createAccount")) {
-                if let Some(Value::String(uid)) = create_account.get(&async_graphql::Name::new("uid")) {
+            if let Some(Value::Object(create_account)) =
+                obj.get(&async_graphql::Name::new("createAccount"))
+            {
+                if let Some(Value::String(uid)) =
+                    create_account.get(&async_graphql::Name::new("uid"))
+                {
                     account_ids.push(uid.clone());
                 }
             }
@@ -192,10 +200,11 @@ async fn get_account_balance(harness: &TestHarness, account_uid: &str) -> Result
     );
 
     let response = harness.execute_ok(&query).await?;
-    
+
     if let Value::Object(obj) = &response {
         if let Some(Value::Object(account)) = obj.get(&async_graphql::Name::new("getAccount")) {
-            if let Some(Value::Number(balance)) = account.get(&async_graphql::Name::new("balance")) {
+            if let Some(Value::Number(balance)) = account.get(&async_graphql::Name::new("balance"))
+            {
                 if let Some(b) = balance.as_i64() {
                     return Ok(b);
                 }
@@ -212,12 +221,14 @@ async fn validate_invariant(harness: &TestHarness, expected_total: i64) -> Resul
     let response = harness.execute_ok(query).await?;
 
     let mut actual_total: i64 = 0;
-    
+
     if let Value::Object(obj) = &response {
         if let Some(Value::List(accounts)) = obj.get(&async_graphql::Name::new("queryAccount")) {
             for account in accounts {
                 if let Value::Object(acc_obj) = account {
-                    if let Some(Value::Number(balance)) = acc_obj.get(&async_graphql::Name::new("balance")) {
+                    if let Some(Value::Number(balance)) =
+                        acc_obj.get(&async_graphql::Name::new("balance"))
+                    {
                         if let Some(b) = balance.as_i64() {
                             actual_total += b;
                         }

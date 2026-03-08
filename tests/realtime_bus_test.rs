@@ -1,4 +1,4 @@
-use vardadb::realtime::bus::{EventBus, MutationEvent, MutationType, MutationSource};
+use vardadb::realtime::bus::{EventBus, MutationEvent, MutationSource, MutationType};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_bus_publish_subscribe() {

@@ -1,15 +1,15 @@
-use vardadb::engine::schema::Schema;
-use vardadb::storage::backend::Storage;
-use vardadb::bridge::sqlite_resolver::SqliteResolver;
+use serde_json::Value;
 use std::sync::Arc;
 use tempfile::tempdir;
-use serde_json::Value;
+use vardadb::bridge::sqlite_resolver::SqliteResolver;
+use vardadb::engine::schema::Schema;
+use vardadb::storage::backend::Storage;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_relationship_flow() {
     let dir = tempdir().unwrap();
     let storage = Arc::new(Storage::new(dir.path(), None).unwrap());
-    
+
     // 1. Define Schema with Relationships
     let sdl = "
         type User {
@@ -23,12 +23,15 @@ async fn test_relationship_flow() {
     ";
     let schema = Schema::load_from_sdl(sdl).expect("Failed to load schema");
     let resolver = Box::new(SqliteResolver::new(storage.clone(), "default"));
-    
+
     // 2. Create User "Alice"
     let m1 = "mutation { createUser(input: {name: \"Alice\"}) { uid } }";
     let r1 = schema.execute_with_resolver(m1, resolver.clone()).await;
     let v1: Value = serde_json::from_str(&r1).unwrap();
-    let user_id = v1["data"]["createUser"]["uid"].as_str().unwrap().to_string();
+    let user_id = v1["data"]["createUser"]["uid"]
+        .as_str()
+        .unwrap()
+        .to_string();
     println!("Created User: {}", user_id);
 
     // 3. Create Post 1 linked to Alice
@@ -40,7 +43,10 @@ async fn test_relationship_flow() {
     let r2 = schema.execute_with_resolver(&m2, resolver.clone()).await;
     let v2: Value = serde_json::from_str(&r2).unwrap();
     assert!(v2["errors"].is_null());
-    let post1_id = v2["data"]["createPost"]["uid"].as_str().unwrap().to_string();
+    let post1_id = v2["data"]["createPost"]["uid"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // 4. Create Post 2 linked to Alice
     let m3 = format!(
@@ -49,7 +55,10 @@ async fn test_relationship_flow() {
     );
     let r3 = schema.execute_with_resolver(&m3, resolver.clone()).await;
     let v3: Value = serde_json::from_str(&r3).unwrap();
-    let post2_id = v3["data"]["createPost"]["uid"].as_str().unwrap().to_string();
+    let post2_id = v3["data"]["createPost"]["uid"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // 5. Update Alice to have these posts?
     // Currently we don't have @hasInverse, so we must manually link if we want 2-way.
@@ -64,7 +73,10 @@ async fn test_relationship_flow() {
     let r4 = schema.execute_with_resolver(&m4, resolver.clone()).await;
     let v4: Value = serde_json::from_str(&r4).unwrap();
     assert!(v4["errors"].is_null());
-    let bob_id = v4["data"]["createUser"]["uid"].as_str().unwrap().to_string();
+    let bob_id = v4["data"]["createUser"]["uid"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // 6. Verify Post -> Author (1-to-1)
     let q1 = format!(

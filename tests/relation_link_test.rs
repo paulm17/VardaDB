@@ -1,11 +1,10 @@
-
 #[tokio::test(flavor = "multi_thread")]
 async fn test_relation_linking() {
     use serde_json::Value as JsonValue;
-    use vardadb::engine::schema::Schema;
-    use vardadb::bridge::sqlite_resolver::SqliteResolver;
-    use vardadb::storage::backend::Storage;
     use std::sync::Arc;
+    use vardadb::bridge::sqlite_resolver::SqliteResolver;
+    use vardadb::engine::schema::Schema;
+    use vardadb::storage::backend::Storage;
 
     let tmp_dir = tempfile::tempdir().unwrap();
     let storage = Storage::new(tmp_dir.path(), None).unwrap();
@@ -45,12 +44,18 @@ async fn test_relation_linking() {
             }
         }
     ";
-    let res = schema.execute_with_resolver(mut_lang, resolver.clone()).await;
+    let res = schema
+        .execute_with_resolver(mut_lang, resolver.clone())
+        .await;
     let json: JsonValue = serde_json::from_str(&res).unwrap();
-    let lang_id = json["data"]["createLanguage"]["uid"].as_str().unwrap().to_string();
+    let lang_id = json["data"]["createLanguage"]["uid"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // 2. Create Translation linked to Language (ID Link)
-    let mut_trans = format!("
+    let mut_trans = format!(
+        "
         mutation {{
             createTranslation(input: {{
                 code: \"WEB\",
@@ -63,20 +68,32 @@ async fn test_relation_linking() {
                 }}
             }}
         }}
-    ", lang_id);
+    ",
+        lang_id
+    );
 
-    let res = schema.execute_with_resolver(&mut_trans, resolver.clone()).await;
+    let res = schema
+        .execute_with_resolver(&mut_trans, resolver.clone())
+        .await;
     println!("Create Trans Res: {}", res);
     let json: JsonValue = serde_json::from_str(&res).unwrap();
-    
+
     // Check immediate return
     let lang_code = json["data"]["createTranslation"]["language"]["code"].as_str();
-    assert_eq!(lang_code, Some("EN"), "Language should be linked and resolved immediately");
+    assert_eq!(
+        lang_code,
+        Some("EN"),
+        "Language should be linked and resolved immediately"
+    );
 
-    let trans_id = json["data"]["createTranslation"]["uid"].as_str().unwrap().to_string();
+    let trans_id = json["data"]["createTranslation"]["uid"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // 3. Query again to verify persistence
-    let query = format!("
+    let query = format!(
+        "
         query {{
             getTranslation(uid: \"{}\") {{
                 code
@@ -85,7 +102,9 @@ async fn test_relation_linking() {
                 }}
             }}
         }}
-    ", trans_id);
+    ",
+        trans_id
+    );
     let res = schema.execute_with_resolver(&query, resolver.clone()).await;
     let json: JsonValue = serde_json::from_str(&res).unwrap();
     assert_eq!(json["data"]["getTranslation"]["language"]["code"], "EN");
@@ -93,14 +112,17 @@ async fn test_relation_linking() {
     // 4. Test Nested Creation (BookTranslation -> Book)
     // Create Book first
     let mut_book = "mutation { createBook(input: { code: \"GEN\", name: \"Genesis\" }) { uid } }";
-    let res = schema.execute_with_resolver(mut_book, resolver.clone()).await;
+    let res = schema
+        .execute_with_resolver(mut_book, resolver.clone())
+        .await;
     let book_json: JsonValue = serde_json::from_str(&res).unwrap();
     let book_id = book_json["data"]["createBook"]["uid"].as_str().unwrap();
 
     // Create Translation with BookTranslations (List of Objects)
     // Update Translation to add bookTranslations? Or create new?
     // Let's create a new Translation with nested BookTranslation
-    let mut_trans_nested = format!("
+    let mut_trans_nested = format!(
+        "
         mutation {{
             createTranslation(input: {{
                 code: \"KJV\",
@@ -122,13 +144,19 @@ async fn test_relation_linking() {
                 }}
             }}
         }}
-    ", lang_id, book_id);
+    ",
+        lang_id, book_id
+    );
 
-    let res = schema.execute_with_resolver(&mut_trans_nested, resolver.clone()).await;
+    let res = schema
+        .execute_with_resolver(&mut_trans_nested, resolver.clone())
+        .await;
     println!("Nested Create Res: {}", res);
     let json: JsonValue = serde_json::from_str(&res).unwrap();
-    
-    let bts = json["data"]["createTranslation"]["bookTranslations"].as_array().unwrap();
+
+    let bts = json["data"]["createTranslation"]["bookTranslations"]
+        .as_array()
+        .unwrap();
     assert_eq!(bts.len(), 1);
     assert_eq!(bts[0]["name"], "Genesis Translation");
     assert_eq!(bts[0]["book"]["code"], "GEN");

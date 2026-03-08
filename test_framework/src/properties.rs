@@ -3,12 +3,12 @@
 //! Inspired by Limbo's property-based testing approach.
 //! Properties define invariants that must hold across many random inputs.
 
-use std::time::Instant;
 use rand::prelude::*;
 use rand_chacha::ChaCha8Rng;
+use std::time::Instant;
 
 use crate::harness::TestHarness;
-use crate::{TestRunner, TestResult};
+use crate::{TestResult, TestRunner};
 
 /// Property types that can be tested
 #[derive(Debug, Clone)]
@@ -16,19 +16,19 @@ use crate::{TestRunner, TestResult};
 pub enum Property {
     /// After insert, select should find the record
     InsertThenSelect,
-    
+
     /// After delete, select should not find the record
     DeleteThenSelect,
-    
+
     /// Read-your-writes: written value can be read back
     ReadYourWrites,
-    
+
     /// Unique constraint prevents duplicates
     UniqueConstraintViolation,
-    
+
     /// Vector search returns the inserted vector
     VectorInsertThenSearch,
-    
+
     /// LWW: Last write wins based on timestamp
     LWWConvergence,
 }
@@ -170,15 +170,15 @@ async fn test_insert_then_select(rng: &mut ChaCha8Rng, iterations: usize) -> Res
         );
 
         let response = harness.execute_ok(&create_mutation).await?;
-        
-        // Verify the response contains the data we inserted
-        let response_name = crate::harness::get_path(&response, "createItem.name")
-            .map_err(|e| e.to_string())?;
-        let response_value = crate::harness::get_path(&response, "createItem.value")
-            .map_err(|e| e.to_string())?;
 
-        if response_name == &async_graphql::Value::String(name.clone()) 
-            && response_value == &async_graphql::Value::Number(value.into()) 
+        // Verify the response contains the data we inserted
+        let response_name =
+            crate::harness::get_path(&response, "createItem.name").map_err(|e| e.to_string())?;
+        let response_value =
+            crate::harness::get_path(&response, "createItem.value").map_err(|e| e.to_string())?;
+
+        if response_name == &async_graphql::Value::String(name.clone())
+            && response_value == &async_graphql::Value::Number(value.into())
         {
             passed += 1;
         }
@@ -215,17 +215,11 @@ async fn test_delete_then_select(rng: &mut ChaCha8Rng, iterations: usize) -> Res
         };
 
         // Delete
-        let delete_mutation = format!(
-            r#"mutation {{ deleteItem(uid: "{}") }}"#,
-            uid
-        );
+        let delete_mutation = format!(r#"mutation {{ deleteItem(uid: "{}") }}"#, uid);
         harness.execute_ok(&delete_mutation).await?;
 
         // Query - should return null
-        let query = format!(
-            r#"query {{ getItem(uid: "{}") {{ uid }} }}"#,
-            uid
-        );
+        let query = format!(r#"query {{ getItem(uid: "{}") {{ uid }} }}"#, uid);
         let response = harness.execute_ok(&query).await?;
         let item = crate::harness::get_path(&response, "getItem")?;
 
@@ -267,17 +261,14 @@ async fn test_read_your_writes(rng: &mut ChaCha8Rng, iterations: usize) -> Resul
         };
 
         // Read back
-        let query = format!(
-            r#"query {{ getRecord(uid: "{}") {{ data count }} }}"#,
-            uid
-        );
+        let query = format!(r#"query {{ getRecord(uid: "{}") {{ data count }} }}"#, uid);
         let response = harness.execute_ok(&query).await?;
-        
+
         let read_data = crate::harness::get_path(&response, "getRecord.data")?;
         let read_count = crate::harness::get_path(&response, "getRecord.count")?;
 
-        if read_data == &async_graphql::Value::String(data) 
-            && read_count == &async_graphql::Value::Number(count.into()) 
+        if read_data == &async_graphql::Value::String(data)
+            && read_count == &async_graphql::Value::Number(count.into())
         {
             passed += 1;
         }

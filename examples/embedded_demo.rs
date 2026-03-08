@@ -1,8 +1,8 @@
+use async_graphql::Request;
 use std::sync::Arc;
-use vardadb::storage::backend::Storage;
 use vardadb::bridge::sqlite_resolver::SqliteResolver;
 use vardadb::engine::schema::Schema;
-use async_graphql::Request;
+use vardadb::storage::backend::Storage;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -13,7 +13,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let storage_path = "varda_embedded_data";
     // Cleaning up previous run if exists
     let _ = std::fs::remove_dir_all(storage_path);
-    
+
     println!("Initializing storage at ./{}", storage_path);
     let storage = Arc::new(Storage::new(storage_path, None).expect("Failed to initialize storage"));
 
@@ -51,7 +51,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     "#;
-    
+
     let response = schema_arc.execute(Request::new(mutation)).await;
     if !response.errors.is_empty() {
         eprintln!("Mutation Errors: {:?}", response.errors);

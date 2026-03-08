@@ -16,6 +16,7 @@ Designed for local-first applications, edge computing, and high-throughput local
 *   **Full-Text Search**: Built-in term indexing and search capabilities.
 *   **SQLite KV Storage**: High-performance, embedded storage via **rusqlite** with WAL mode for instant recovery.
 *   **Query Caching**: Integrated LRU cache for high-speed read comparisons.
+*   **Native MLX-RS Inference**: Built-in local LLM support via **MLX-RS**, the Rust counterpart to Python's `mlx-lm`.
 *   **Secure Auth Stack**: Integrated PASETO identity service and **Zanzibar-style ReBAC** authorization engine.
 
 ---
@@ -199,6 +200,17 @@ vardadb(default)> create database sales
 vardadb(default)> use sales
 vardadb(sales)> { queryUser { name } }
 ```
+
+### 10. Local LLM Inference with MLX-RS
+VardaDB includes native local LLM support through **MLX-RS**, the Rust equivalent of Python's `mlx-lm`. This powers the built-in `mlx` provider so models can run directly inside the Rust runtime without relying on a separate Python service.
+
+By default, the LLM configuration uses:
+```toml
+[llm]
+provider = "mlx"
+```
+
+This makes `MLX-RS` the default path for local model execution when LLM features are enabled.
 
 ---
 

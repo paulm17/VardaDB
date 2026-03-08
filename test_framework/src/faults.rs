@@ -15,16 +15,16 @@ use rand_chacha::ChaCha8Rng;
 pub struct FaultConfig {
     /// Probability of storage failure (0.0 - 1.0)
     pub storage_fail_rate: f32,
-    
+
     /// Probability of network partition (0.0 - 1.0)
     pub network_partition_rate: f32,
-    
+
     /// Range of message delay in milliseconds
     pub message_delay_range: (u64, u64),
-    
+
     /// Probability of message drop (0.0 - 1.0)
     pub message_drop_rate: f32,
-    
+
     /// Probability of clock skew injection (0.0 - 1.0)
     pub clock_skew_rate: f32,
 }
@@ -32,7 +32,7 @@ pub struct FaultConfig {
 impl Default for FaultConfig {
     fn default() -> Self {
         Self {
-            storage_fail_rate: 0.01,      // 1% chance
+            storage_fail_rate: 0.01,       // 1% chance
             network_partition_rate: 0.005, // 0.5% chance
             message_delay_range: (0, 100), // 0-100ms delay
             message_drop_rate: 0.02,       // 2% chance
@@ -58,10 +58,10 @@ impl FaultConfig {
     pub fn stress() -> Self {
         Self {
             storage_fail_rate: 0.05,       // 5% chance
-            network_partition_rate: 0.02,   // 2% chance
-            message_delay_range: (0, 500),  // 0-500ms delay
-            message_drop_rate: 0.1,         // 10% chance
-            clock_skew_rate: 0.05,          // 5% chance
+            network_partition_rate: 0.02,  // 2% chance
+            message_delay_range: (0, 500), // 0-500ms delay
+            message_drop_rate: 0.1,        // 10% chance
+            clock_skew_rate: 0.05,         // 5% chance
         }
     }
 }
@@ -71,7 +71,7 @@ impl FaultConfig {
 pub struct FaultInjector {
     config: FaultConfig,
     rng: ChaCha8Rng,
-    
+
     /// Current fault state
     in_partition: bool,
     partition_end_tick: u64,
@@ -183,7 +183,9 @@ pub struct FaultLog {
 #[allow(dead_code)]
 impl FaultLog {
     pub fn new() -> Self {
-        Self { records: Vec::new() }
+        Self {
+            records: Vec::new(),
+        }
     }
 
     pub fn record(&mut self, tick: u64, fault_type: FaultType, description: &str) {
@@ -203,7 +205,8 @@ impl FaultLog {
     }
 
     pub fn count_by_type(&self, fault_type: &FaultType) -> usize {
-        self.records.iter()
+        self.records
+            .iter()
             .filter(|r| std::mem::discriminant(&r.fault_type) == std::mem::discriminant(fault_type))
             .count()
     }
@@ -244,7 +247,7 @@ mod tests {
     #[test]
     fn test_fault_log() {
         let mut log = FaultLog::new();
-        
+
         log.record(1, FaultType::StorageFailure, "Test failure");
         log.record(2, FaultType::MessageDrop, "Dropped message");
         log.record(3, FaultType::StorageFailure, "Another failure");

@@ -1,6 +1,6 @@
+use std::io::Write;
 use std::process::Command;
 use tempfile::NamedTempFile;
-use std::io::Write;
 
 #[test]
 fn test_export_schema() {
@@ -24,13 +24,13 @@ fn test_export_schema() {
 
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
-    
+
     // 3. Verify Output contains generated SDL
     // async-graphql generated SDL might have directives/scalars we didn't explicitly add, or reformatting.
     // It should definitely contain "type User"
     assert!(stdout.contains("type User"));
     assert!(stdout.contains("name: String"));
-    
+
     // It should also contain our generated inputs
     assert!(stdout.contains("input UserInput"));
     assert!(stdout.contains("input UserFilter"));

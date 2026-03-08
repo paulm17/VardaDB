@@ -8,8 +8,8 @@ use axum::{
 use axum_extra::extract::cookie::CookieJar;
 use serde::Serialize;
 
-use crate::token::{self, TokenKind};
 use crate::state::UserRecord;
+use crate::token::{self, TokenKind};
 
 #[derive(Debug, Serialize)]
 pub struct ErrorResponse {
@@ -29,8 +29,6 @@ pub async fn auth_middleware(
     mut req: Request,
     next: Next,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-
-
     let access_token = cookie_jar
         .get("access_token")
         .map(|cookie| cookie.value().to_string())
@@ -55,44 +53,66 @@ pub async fn auth_middleware(
         (StatusCode::UNAUTHORIZED, Json(err))
     })?;
 
-    let token_details = match token::verify_paseto_token(&access_token, TokenKind::Access, &auth_state) {
-        Ok(details) => details,
-        Err(e) => {
-            tracing::warn!("Token verification failed: {:?}", e);
-            let err = ErrorResponse {
-                status: "fail",
-                message: "Invalid or expired token".to_string(), // Spec Fix 4: No internal info in body
-            };
-            return Err((StatusCode::UNAUTHORIZED, Json(err)));
-        }
-    };
+    let token_details =
+        match token::verify_paseto_token(&access_token, TokenKind::Access, &auth_state) {
+            Ok(details) => details,
+            Err(e) => {
+                tracing::warn!("Token verification failed: {:?}", e);
+                let err = ErrorResponse {
+                    status: "fail",
+                    message: "Invalid or expired token".to_string(), // Spec Fix 4: No internal info in body
+                };
+                return Err((StatusCode::UNAUTHORIZED, Json(err)));
+            }
+        };
 
     // Bug Fix 2: Token blacklist check in middleware
     let token_key = format!("token:{}", token_details.token_uuid);
-    let token_exists = auth_state.store.tokens.kv_get(token_key.as_bytes())
+    let token_exists = auth_state
+        .store
+        .tokens
+        .kv_get(token_key.as_bytes())
         .map_err(|e| {
             tracing::error!("Auth store error: {:?}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { status: "fail", message: "Internal error".to_string() }))
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    status: "fail",
+                    message: "Internal error".to_string(),
+                }),
+            )
         })?
         .is_some();
 
     if !token_exists {
-         let err = ErrorResponse {
-             status: "fail",
-             message: "Token has been revoked".to_string(),
-         };
-         return Err((StatusCode::UNAUTHORIZED, Json(err)));
+        let err = ErrorResponse {
+            status: "fail",
+            message: "Token has been revoked".to_string(),
+        };
+        return Err((StatusCode::UNAUTHORIZED, Json(err)));
     }
 
     // Fetch user from store
     let user_key = format!("user:{}", token_details.user_id);
-    let user_bytes = auth_state.store.users.kv_get(user_key.as_bytes())
+    let user_bytes = auth_state
+        .store
+        .users
+        .kv_get(user_key.as_bytes())
         .map_err(|e| {
             tracing::error!("Auth store error: {:?}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { status: "fail", message: "Internal error".to_string() }))
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    status: "fail",
+                    message: "Internal error".to_string(),
+                }),
+            )
         })?
         .ok_or_else(|| {
-            let err = ErrorResponse { status: "fail", message: "User not found".to_string() };
+            let err = ErrorResponse {
+                status: "fail",
+                message: "User not found".to_string(),
+            };
             (StatusCode::UNAUTHORIZED, Json(err)) // Unauthorized since user was deleted
         })?;
 
@@ -101,8 +121,14 @@ pub async fn auth_middleware(
         Ok(u) => u,
         Err(_) => bincode::deserialize(&user_bytes).map_err(|e| {
             tracing::error!("Auth store deserialization error: {:?}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { status: "fail", message: "Internal error".to_string() }))
-        })?
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    status: "fail",
+                    message: "Internal error".to_string(),
+                }),
+            )
+        })?,
     };
 
     req.extensions_mut().insert(JWTAuthMiddleware {

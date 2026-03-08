@@ -5,17 +5,17 @@
 //! - Custom assertions for GraphQL responses
 //! - CRUD test implementations
 
+use async_graphql::Value;
 use std::sync::Arc;
 use std::time::Instant;
 use tempfile::TempDir;
-use async_graphql::Value;
 
-use vardadb::storage::backend::Storage;
 use vardadb::bridge::sqlite_resolver::SqliteResolver;
 use vardadb::engine::schema::Schema;
 use vardadb::realtime::bus::EventBus;
+use vardadb::storage::backend::Storage;
 
-use crate::{TestRunner, TestResult};
+use crate::{TestResult, TestRunner};
 
 /// A reusable test harness that provides storage, schema, and resolver.
 #[allow(dead_code)]
@@ -32,10 +32,9 @@ impl TestHarness {
     pub fn new(sdl: &str) -> Result<Self, String> {
         let temp_dir = TempDir::new().map_err(|e| e.to_string())?;
         let storage = Arc::new(
-            Storage::new(temp_dir.path().to_str().unwrap(), Some(1))
-                .map_err(|e| e.to_string())?
+            Storage::new(temp_dir.path().to_str().unwrap(), Some(1)).map_err(|e| e.to_string())?,
         );
-        
+
         let event_bus = EventBus::new();
         let resolver = SqliteResolver::with_bus(storage.clone(), event_bus.clone());
         let schema = Schema::load_with_resolver(sdl, resolver.clone())?;
@@ -52,11 +51,13 @@ impl TestHarness {
     /// Execute a GraphQL query/mutation and return the response as JSON Value.
     pub async fn execute(&self, query: &str) -> Value {
         let response = self.schema.execute(query).await;
-        
+
         // Convert response to Value
         if !response.errors.is_empty() {
             // Return errors as a Value
-            let errors: Vec<Value> = response.errors.iter()
+            let errors: Vec<Value> = response
+                .errors
+                .iter()
                 .map(|e| Value::String(e.message.clone()))
                 .collect();
             return Value::Object({
@@ -69,7 +70,9 @@ impl TestHarness {
             });
         }
 
-        response.data.into_json()
+        response
+            .data
+            .into_json()
             .map(serde_json_to_value)
             .unwrap_or(Value::Null)
     }
@@ -77,28 +80,38 @@ impl TestHarness {
     /// Execute a query and expect no errors.
     pub async fn execute_ok(&self, query: &str) -> Result<Value, String> {
         let response = self.schema.execute(query).await;
-        
+
         if !response.errors.is_empty() {
-            return Err(response.errors.iter()
+            return Err(response
+                .errors
+                .iter()
                 .map(|e| e.message.clone())
                 .collect::<Vec<_>>()
                 .join(", "));
         }
 
-        response.data.into_json()
+        response
+            .data
+            .into_json()
             .map(serde_json_to_value)
             .map_err(|e| e.to_string())
     }
 
     /// Execute a query and expect an error containing the given message.
-    pub async fn execute_expect_error(&self, query: &str, expected_msg: &str) -> Result<(), String> {
+    pub async fn execute_expect_error(
+        &self,
+        query: &str,
+        expected_msg: &str,
+    ) -> Result<(), String> {
         let response = self.schema.execute(query).await;
-        
+
         if response.errors.is_empty() {
             return Err("Expected error but got success".to_string());
         }
 
-        let has_expected = response.errors.iter()
+        let has_expected = response
+            .errors
+            .iter()
             .any(|e| e.message.contains(expected_msg));
 
         if has_expected {
@@ -107,7 +120,11 @@ impl TestHarness {
             Err(format!(
                 "Expected error containing '{}', got: {:?}",
                 expected_msg,
-                response.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+                response
+                    .errors
+                    .iter()
+                    .map(|e| &e.message)
+                    .collect::<Vec<_>>()
             ))
         }
     }
@@ -122,7 +139,9 @@ fn serde_json_to_value(json: serde_json::Value) -> Value {
             if let Some(i) = n.as_i64() {
                 Value::Number(i.into())
             } else if let Some(f) = n.as_f64() {
-                Value::Number(async_graphql::Number::from_f64(f).unwrap_or(async_graphql::Number::from(0)))
+                Value::Number(
+                    async_graphql::Number::from_f64(f).unwrap_or(async_graphql::Number::from(0)),
+                )
             } else {
                 Value::Null
             }
@@ -165,7 +184,10 @@ pub fn assert_data_equals(response: &Value, path: &str, expected: &Value) -> Res
     if actual == expected {
         Ok(())
     } else {
-        Err(format!("At path '{}': expected {:?}, got {:?}", path, expected, actual))
+        Err(format!(
+            "At path '{}': expected {:?}, got {:?}",
+            path, expected, actual
+        ))
     }
 }
 
@@ -175,10 +197,16 @@ pub fn get_path<'a>(value: &'a Value, path: &str) -> Result<&'a Value, String> {
     for key in path.split('.') {
         match current {
             Value::Object(obj) => {
-                current = obj.get(&async_graphql::Name::new(key))
+                current = obj
+                    .get(&async_graphql::Name::new(key))
                     .ok_or_else(|| format!("Path '{}' not found", key))?;
             }
-            _ => return Err(format!("Cannot index into {:?} with key '{}'", current, key)),
+            _ => {
+                return Err(format!(
+                    "Cannot index into {:?} with key '{}'",
+                    current, key
+                ))
+            }
         }
     }
     Ok(current)
@@ -239,10 +267,12 @@ async fn test_create_user() -> Result<(), String> {
             email: String! @unique
         }
     "#;
-    
+
     let harness = TestHarness::new(sdl)?;
-    
-    let response = harness.execute_ok(r#"
+
+    let response = harness
+        .execute_ok(
+            r#"
         mutation {
             createUser(input: { name: "Alice", email: "alice@example.com" }) {
                 uid
@@ -250,7 +280,9 @@ async fn test_create_user() -> Result<(), String> {
                 email
             }
         }
-    "#).await?;
+    "#,
+        )
+        .await?;
 
     // Verify created user has a UID
     get_path(&response, "createUser.uid")?;
@@ -264,17 +296,21 @@ async fn test_read_by_id() -> Result<(), String> {
             name: String!
         }
     "#;
-    
+
     let harness = TestHarness::new(sdl)?;
-    
+
     // Create user
-    let create_response = harness.execute_ok(r#"
+    let create_response = harness
+        .execute_ok(
+            r#"
         mutation {
             createUser(input: { name: "Bob" }) {
                 uid
             }
         }
-    "#).await?;
+    "#,
+        )
+        .await?;
 
     let uid = match get_path(&create_response, "createUser.uid")? {
         Value::String(s) => s.clone(),
@@ -282,18 +318,21 @@ async fn test_read_by_id() -> Result<(), String> {
     };
 
     // Read user by UID
-    let query = format!(r#"
+    let query = format!(
+        r#"
         query {{
             getUser(uid: "{}") {{
                 uid
                 name
             }}
         }}
-    "#, uid);
+    "#,
+        uid
+    );
 
     let read_response = harness.execute_ok(&query).await?;
     let name = get_path(&read_response, "getUser.name")?;
-    
+
     if name != &Value::String("Bob".to_string()) {
         return Err(format!("Expected name 'Bob', got {:?}", name));
     }
@@ -309,17 +348,21 @@ async fn test_update_partial() -> Result<(), String> {
             age: Int
         }
     "#;
-    
+
     let harness = TestHarness::new(sdl)?;
-    
+
     // Create user
-    let create_response = harness.execute_ok(r#"
+    let create_response = harness
+        .execute_ok(
+            r#"
         mutation {
             createUser(input: { name: "Charlie", age: 25 }) {
                 uid
             }
         }
-    "#).await?;
+    "#,
+        )
+        .await?;
 
     let uid = match get_path(&create_response, "createUser.uid")? {
         Value::String(s) => s.clone(),
@@ -327,34 +370,40 @@ async fn test_update_partial() -> Result<(), String> {
     };
 
     // Update only age (VardaDB returns Boolean for update mutations)
-    let mutation = format!(r#"
+    let mutation = format!(
+        r#"
         mutation {{
             updateUser(uid: "{}", input: {{ age: 30 }})
         }}
-    "#, uid);
+    "#,
+        uid
+    );
 
     harness.execute_ok(&mutation).await?;
-    
+
     // Query to verify the update worked
-    let query = format!(r#"
+    let query = format!(
+        r#"
         query {{
             getUser(uid: "{}") {{
                 name
                 age
             }}
         }}
-    "#, uid);
-    
+    "#,
+        uid
+    );
+
     let read_response = harness.execute_ok(&query).await?;
-    
+
     // Verify name unchanged, age updated
     let name = get_path(&read_response, "getUser.name")?;
     let age = get_path(&read_response, "getUser.age")?;
-    
+
     if name != &Value::String("Charlie".to_string()) {
         return Err(format!("Name should be unchanged, got {:?}", name));
     }
-    
+
     if age != &Value::Number(30.into()) {
         return Err(format!("Age should be 30, got {:?}", age));
     }
@@ -369,17 +418,21 @@ async fn test_delete() -> Result<(), String> {
             name: String!
         }
     "#;
-    
+
     let harness = TestHarness::new(sdl)?;
-    
+
     // Create user
-    let create_response = harness.execute_ok(r#"
+    let create_response = harness
+        .execute_ok(
+            r#"
         mutation {
             createUser(input: { name: "Dave" }) {
                 uid
             }
         }
-    "#).await?;
+    "#,
+        )
+        .await?;
 
     let uid = match get_path(&create_response, "createUser.uid")? {
         Value::String(s) => s.clone(),
@@ -387,26 +440,32 @@ async fn test_delete() -> Result<(), String> {
     };
 
     // Delete user
-    let mutation = format!(r#"
+    let mutation = format!(
+        r#"
         mutation {{
             deleteUser(uid: "{}")
         }}
-    "#, uid);
+    "#,
+        uid
+    );
 
     harness.execute_ok(&mutation).await?;
 
     // Verify user is gone
-    let query = format!(r#"
+    let query = format!(
+        r#"
         query {{
             getUser(uid: "{}") {{
                 uid
             }}
         }}
-    "#, uid);
+    "#,
+        uid
+    );
 
     let read_response = harness.execute_ok(&query).await?;
     let user = get_path(&read_response, "getUser")?;
-    
+
     if user != &Value::Null {
         return Err(format!("Expected null after delete, got {:?}", user));
     }
@@ -421,29 +480,35 @@ async fn test_unique_constraint() -> Result<(), String> {
             email: String! @unique
         }
     "#;
-    
+
     let harness = TestHarness::new(sdl)?;
-    
+
     // Create first user
-    harness.execute_ok(r#"
+    harness
+        .execute_ok(
+            r#"
         mutation {
             createUser(input: { email: "unique@example.com" }) {
                 uid
             }
         }
-    "#).await?;
+    "#,
+        )
+        .await?;
 
     // Try to create second user with same email - should fail
-    harness.execute_expect_error(
-        r#"
+    harness
+        .execute_expect_error(
+            r#"
             mutation {
                 createUser(input: { email: "unique@example.com" }) {
                     uid
                 }
             }
         "#,
-        "unique" // Error message should contain "unique"
-    ).await?;
+            "unique", // Error message should contain "unique"
+        )
+        .await?;
 
     Ok(())
 }

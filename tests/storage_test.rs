@@ -1,5 +1,5 @@
-use vardadb::storage::backend::Storage;
 use tempfile::tempdir;
+use vardadb::storage::backend::Storage;
 
 #[test]
 fn test_backend_persistence() {

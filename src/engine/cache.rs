@@ -1,20 +1,20 @@
-use std::sync::Mutex;
 use lru::LruCache;
-use std::num::NonZeroUsize;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::num::NonZeroUsize;
+use std::sync::Mutex;
 
 /// A thread-safe Bounded LRU Cache for GraphQL Query Results.
-/// 
+///
 /// Principles:
 /// 1. Bounded: Fixed capacity (e.g. 100) to prevent OOM.
 /// 2. LRU: Evicts least accessed items effectively.
 /// 3. Invalidation: Clears entries based on tags (Type names).
 pub struct QueryCache {
     inner: Mutex<LruCache<u64, String>>, // Key: Hash(Query+Vars), Value: JSON Response
-    // For invalidation, we might need a secondary index: TypeName -> Vec<Key>
-    // Or simplified: Global clear on mutation / Type-based clear by iterating (slow?).
-    // Given the LRU size is small (100), iteration is fine.
+                                         // For invalidation, we might need a secondary index: TypeName -> Vec<Key>
+                                         // Or simplified: Global clear on mutation / Type-based clear by iterating (slow?).
+                                         // Given the LRU size is small (100), iteration is fine.
 }
 
 impl QueryCache {

@@ -1,11 +1,11 @@
-use std::sync::Arc;
-use std::path::PathBuf;
-use tokio::time::{sleep, Duration};
-use crate::storage::backend::Storage;
 use crate::config::VardaConfig;
-use tracing::{info, error, debug};
+use crate::storage::backend::Storage;
+use std::path::PathBuf;
+use std::sync::Arc;
+use tokio::time::{sleep, Duration};
+use tracing::{debug, error, info};
 use vardaclaw::agent::{Agent, AgentConfig as ClawAgentConfig};
-use vardaclaw::config::{Config as ClawConfig};
+use vardaclaw::config::Config as ClawConfig;
 use vardaclaw::memory::MemoryManager;
 // use vardaclaw::agent::LLMProvider;
 
@@ -32,18 +32,18 @@ impl VardaClawRunner {
         let storage_path = PathBuf::from(&self.config.server.storage_path);
         let claw_workspace = storage_path.join("vardaclaw_workspace");
         std::fs::create_dir_all(&claw_workspace).ok();
-        
+
         // 1. Setup VardaClaw Config
         let mut claw_config = ClawConfig::default();
         claw_config.memory.workspace = claw_workspace.to_string_lossy().to_string();
         claw_config.agent.default_model = self.config.llm.model.clone();
-        
+
         // Inject API Key from VardaDB config if present
         if let Some(key) = &self.config.llm.openai_api_key {
-             claw_config.providers.openai = Some(vardaclaw::config::OpenAIConfig { 
-                 api_key: key.clone(), 
-                 base_url: "https://api.openai.com/v1".to_string() 
-             });
+            claw_config.providers.openai = Some(vardaclaw::config::OpenAIConfig {
+                api_key: key.clone(),
+                base_url: "https://api.openai.com/v1".to_string(),
+            });
         }
 
         // 2. Initialize MemoryManager
@@ -69,16 +69,16 @@ impl VardaClawRunner {
                 return;
             }
         };
-        
+
         debug!("VardaClaw Agent initialized successfully.");
 
         loop {
             info!("VardaClaw Runner: Heartbeat tick.");
-            
+
             // TODO: Implement actual background logic here.
             // For now, we just prove the loop runs and Agent is alive.
             // Example: Check for scheduled tasks in a specific queue, or maintain agent autonomy.
-            
+
             sleep(Duration::from_secs(10)).await;
         }
     }

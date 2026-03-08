@@ -3,10 +3,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct AuthConfig {
     pub server_url: String,
-    pub access_token_ttl_minutes: i64,   // default: 15
-    pub refresh_token_ttl_days: i64,     // default: 30
+    pub access_token_ttl_minutes: i64, // default: 15
+    pub refresh_token_ttl_days: i64,   // default: 30
     pub allowed_redirect_origins: Vec<String>,
-    
+
     pub smtp: Option<SmtpConfig>,
     pub social: Option<SocialConfig>,
 }

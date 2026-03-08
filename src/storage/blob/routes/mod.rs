@@ -1,15 +1,15 @@
 // src/storage/blob/routes/mod.rs
-pub mod headers;
 pub mod handlers;
 pub mod hashes;
+pub mod headers;
 
 use axum::{
     routing::{delete, get, head, patch, post},
     Router,
 };
+use dashmap::DashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use dashmap::DashMap;
 
 use crate::storage::blob::{
     data::{DataStorage, VardaDataStorage},
@@ -24,14 +24,17 @@ pub struct BlobState {
 }
 
 impl BlobState {
-    pub async fn new(config: &crate::config::VardaConfig, server_state: Arc<crate::ServerState>) -> Result<Self, super::errors::VardaStorageError> {
+    pub async fn new(
+        config: &crate::config::VardaConfig,
+        server_state: Arc<crate::ServerState>,
+    ) -> Result<Self, super::errors::VardaStorageError> {
         let storage = server_state.storage.clone();
         let info = VardaInfoStorage::new(storage.clone());
         info.prepare().await?;
-        
+
         let data = VardaDataStorage::new(config);
         data.prepare().await?;
-        
+
         Ok(Self {
             info_storage: Arc::new(info),
             data_storage: Arc::new(data),

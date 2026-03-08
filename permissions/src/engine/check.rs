@@ -1,10 +1,8 @@
-
-use crate::schema::registry::SchemaRegistry;
-use crate::storage::auth_store::AuthStore;
 use crate::engine::context::Context;
 use crate::engine::evaluator::evaluate_permission;
+use crate::schema::registry::SchemaRegistry;
+use crate::storage::auth_store::AuthStore;
 use crate::storage::tuple::Subject;
-
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CheckResult {
@@ -22,7 +20,6 @@ pub fn check(
     subject: &Subject,
     context: &Context,
 ) -> CheckResult {
-
     let ns_schema = match schema.get_namespace(namespace) {
         Some(s) => s,
         None => return CheckResult::Deny,
@@ -56,7 +53,6 @@ pub fn bulk_check(
     subject: &Subject,
     context: &Context,
 ) -> Vec<CheckResult> {
-    
     let mut results = Vec::new();
 
     for (entity_type, entity_id, permission) in checks {
@@ -72,6 +68,6 @@ pub fn bulk_check(
         );
         results.push(result);
     }
-    
+
     results
 }

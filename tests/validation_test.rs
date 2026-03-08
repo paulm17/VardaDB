@@ -1,11 +1,10 @@
-
 #[tokio::test(flavor = "multi_thread")]
 async fn test_validation() {
-    use vardadb::engine::schema::Schema;
-    use vardadb::bridge::sqlite_resolver::SqliteResolver;
-    use vardadb::storage::backend::Storage;
-    use std::sync::Arc;
     use serde_json::Value as JsonValue;
+    use std::sync::Arc;
+    use vardadb::bridge::sqlite_resolver::SqliteResolver;
+    use vardadb::engine::schema::Schema;
+    use vardadb::storage::backend::Storage;
 
     let tmp_dir = tempfile::tempdir().unwrap();
     let storage = Storage::new(tmp_dir.path(), None).unwrap();
@@ -35,7 +34,9 @@ async fn test_validation() {
             }
         }
     ";
-    let res = schema.execute_with_resolver(mut_valid, resolver.clone()).await;
+    let res = schema
+        .execute_with_resolver(mut_valid, resolver.clone())
+        .await;
     let json: JsonValue = serde_json::from_str(&res).unwrap();
     if json["errors"].is_array() {
         panic!("Valid mutation failed: {:?}", json);
@@ -48,7 +49,9 @@ async fn test_validation() {
             createUser(input: { username: \"Al\" }) { uid }
         }
     ";
-    let res = schema.execute_with_resolver(mut_length_fail, resolver.clone()).await;
+    let res = schema
+        .execute_with_resolver(mut_length_fail, resolver.clone())
+        .await;
     let json: JsonValue = serde_json::from_str(&res).unwrap();
     assert!(json["errors"].is_array());
     let msg = json["errors"][0]["message"].as_str().unwrap();
@@ -60,7 +63,9 @@ async fn test_validation() {
             createUser(input: { email: \"not-an-email\" }) { uid }
         }
     ";
-    let res = schema.execute_with_resolver(mut_regex_fail, resolver.clone()).await;
+    let res = schema
+        .execute_with_resolver(mut_regex_fail, resolver.clone())
+        .await;
     let json: JsonValue = serde_json::from_str(&res).unwrap();
     assert!(json["errors"].is_array());
     let msg = json["errors"][0]["message"].as_str().unwrap();
@@ -72,19 +77,23 @@ async fn test_validation() {
             createUser(input: { age: 10 }) { uid }
         }
     ";
-    let res = schema.execute_with_resolver(mut_range_fail, resolver.clone()).await;
+    let res = schema
+        .execute_with_resolver(mut_range_fail, resolver.clone())
+        .await;
     let json: JsonValue = serde_json::from_str(&res).unwrap();
     assert!(json["errors"].is_array());
     let msg = json["errors"][0]["message"].as_str().unwrap();
     assert!(msg.contains("must be at least 18"));
-    
+
     // 5. Test Invalid Range (Score too high)
     let mut_range_fail_2 = "
         mutation {
             createUser(input: { score: 100.0 }) { uid }
         }
     ";
-    let res = schema.execute_with_resolver(mut_range_fail_2, resolver.clone()).await;
+    let res = schema
+        .execute_with_resolver(mut_range_fail_2, resolver.clone())
+        .await;
     let json: JsonValue = serde_json::from_str(&res).unwrap();
     assert!(json["errors"].is_array());
     let msg = json["errors"][0]["message"].as_str().unwrap();

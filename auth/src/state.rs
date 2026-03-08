@@ -1,7 +1,7 @@
-use jobs::KvStore;
-use serde::{Deserialize, Serialize};
-use rand::rngs::OsRng;
 use ed25519_dalek::SigningKey;
+use jobs::KvStore;
+use rand::rngs::OsRng;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -24,7 +24,11 @@ pub struct TokenRecord {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-pub enum ConfirmationFlow { Created, Seen, Completed }
+pub enum ConfirmationFlow {
+    Created,
+    Seen,
+    Completed,
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ConfirmationRecord {
@@ -55,7 +59,14 @@ impl AuthStore {
         social_state: Arc<dyn KvStore>,
         keys: Arc<dyn KvStore>,
     ) -> Self {
-        Self { users, tokens, confirmations, identities, social_state, keys }
+        Self {
+            users,
+            tokens,
+            confirmations,
+            identities,
+            social_state,
+            keys,
+        }
     }
 }
 
@@ -74,18 +85,30 @@ impl AuthState {
         email_queue: Option<Arc<dyn jobs::JobEnqueuer>>,
     ) -> anyhow::Result<Self> {
         let access_key = if let Ok(Some(key_bytes)) = store.keys.kv_get(b"access_key") {
-            key_bytes.as_slice().try_into().unwrap_or_else(|_| Self::generate_and_save_key(&*store.keys, "access_key"))
+            key_bytes
+                .as_slice()
+                .try_into()
+                .unwrap_or_else(|_| Self::generate_and_save_key(&*store.keys, "access_key"))
         } else {
             Self::generate_and_save_key(&*store.keys, "access_key")
         };
 
         let refresh_key = if let Ok(Some(key_bytes)) = store.keys.kv_get(b"refresh_key") {
-            key_bytes.as_slice().try_into().unwrap_or_else(|_| Self::generate_and_save_key(&*store.keys, "refresh_key"))
+            key_bytes
+                .as_slice()
+                .try_into()
+                .unwrap_or_else(|_| Self::generate_and_save_key(&*store.keys, "refresh_key"))
         } else {
             Self::generate_and_save_key(&*store.keys, "refresh_key")
         };
 
-        Ok(Self { config, store, access_key, refresh_key, email_queue })
+        Ok(Self {
+            config,
+            store,
+            access_key,
+            refresh_key,
+            email_queue,
+        })
     }
 
     fn generate_and_save_key(kv: &dyn KvStore, key_name: &str) -> [u8; 64] {
@@ -98,10 +121,10 @@ impl AuthState {
 
 pub async fn start_pruning_task(auth_state: Arc<AuthState>) {
     tracing::info!("Auth State Pruning Task Started");
-    
+
     loop {
         tokio::time::sleep(tokio::time::Duration::from_secs(3600)).await;
-        
+
         let now = chrono::Utc::now().timestamp();
         tracing::debug!("Running pruning job for Auth Store");
 

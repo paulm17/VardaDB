@@ -1,7 +1,6 @@
 use tokio::sync::broadcast;
 
-
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum MutationType {

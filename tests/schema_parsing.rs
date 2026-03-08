@@ -11,7 +11,7 @@ fn test_schema_parsing() {
             users: [User]
         }
     ";
-    
+
     let schema = Schema::load_from_sdl(sdl);
     assert!(schema.is_ok(), "Schema should parse correctly");
 }

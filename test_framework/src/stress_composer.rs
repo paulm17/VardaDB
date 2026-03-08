@@ -5,13 +5,13 @@
 //! Generates random GraphQL schemas and hammers them with concurrent operations
 //! to find edge cases and race conditions.
 
-use std::time::Instant;
+use async_graphql::Value;
 use rand::prelude::*;
 use rand_chacha::ChaCha8Rng;
-use async_graphql::Value;
+use std::time::Instant;
 
 use crate::harness::TestHarness;
-use crate::{TestRunner, TestResult};
+use crate::{TestResult, TestRunner};
 
 /// Stress test configuration
 pub struct StressConfig {
@@ -81,32 +81,36 @@ pub async fn run_stress_test(runner: &mut TestRunner, seed: u64) {
         Ok((operations, errors)) => {
             if errors == 0 {
                 TestResult::pass(
-                    &format!("StressComposer ({} types, {} ops)", config.num_types, operations),
+                    &format!(
+                        "StressComposer ({} types, {} ops)",
+                        config.num_types, operations
+                    ),
                     "stress",
                     start.elapsed(),
                 )
             } else {
                 TestResult::fail(
-                    &format!("StressComposer ({} types, {} ops)", config.num_types, operations),
+                    &format!(
+                        "StressComposer ({} types, {} ops)",
+                        config.num_types, operations
+                    ),
                     "stress",
                     start.elapsed(),
                     &format!("{} unexpected errors", errors),
                 )
             }
         }
-        Err(e) => TestResult::fail(
-            "StressComposer",
-            "stress",
-            start.elapsed(),
-            &e,
-        ),
+        Err(e) => TestResult::fail("StressComposer", "stress", start.elapsed(), &e),
     });
 }
 
-async fn execute_stress_test(rng: &mut ChaCha8Rng, config: &StressConfig) -> Result<(usize, usize), String> {
+async fn execute_stress_test(
+    rng: &mut ChaCha8Rng,
+    config: &StressConfig,
+) -> Result<(usize, usize), String> {
     // 1. Generate random schema
     let schema_info = generate_random_schema(rng, config);
-    
+
     // 2. Create harness with generated schema
     let harness = TestHarness::new(&schema_info.sdl)?;
 
@@ -117,7 +121,7 @@ async fn execute_stress_test(rng: &mut ChaCha8Rng, config: &StressConfig) -> Res
 
     for _ in 0..config.num_operations {
         let operation = rng.gen_range(0..4);
-        
+
         match operation {
             0 => {
                 // INSERT
@@ -137,7 +141,8 @@ async fn execute_stress_test(rng: &mut ChaCha8Rng, config: &StressConfig) -> Res
             1 => {
                 // UPDATE (if we have created records)
                 if let Some((type_name, id)) = created_ids.choose(rng).cloned() {
-                    if let Some(type_info) = schema_info.types.iter().find(|t| t.name == type_name) {
+                    if let Some(type_info) = schema_info.types.iter().find(|t| t.name == type_name)
+                    {
                         match execute_update(&harness, rng, type_info, &id).await {
                             Ok(_) => successful_ops += 1,
                             Err(e) => {
@@ -163,7 +168,8 @@ async fn execute_stress_test(rng: &mut ChaCha8Rng, config: &StressConfig) -> Res
             3 => {
                 // DELETE (if we have created records)
                 if let Some((type_name, id)) = created_ids.pop() {
-                    if let Some(type_info) = schema_info.types.iter().find(|t| t.name == type_name) {
+                    if let Some(type_info) = schema_info.types.iter().find(|t| t.name == type_name)
+                    {
                         match execute_delete(&harness, type_info, &id).await {
                             Ok(_) => successful_ops += 1,
                             Err(e) => {
@@ -200,7 +206,7 @@ fn generate_random_schema(_rng: &mut ChaCha8Rng, config: &StressConfig) -> Schem
 
     for i in 0..config.num_types {
         let type_name = format!("Type{}", i);
-        
+
         // Fixed schema: id, name (string), value (int), active (bool)
         let fields = vec![
             FieldInfo {
@@ -244,7 +250,11 @@ fn generate_random_schema(_rng: &mut ChaCha8Rng, config: &StressConfig) -> Schem
 }
 
 /// Execute an insert operation
-async fn execute_insert(harness: &TestHarness, rng: &mut ChaCha8Rng, type_info: &TypeInfo) -> Result<String, String> {
+async fn execute_insert(
+    harness: &TestHarness,
+    rng: &mut ChaCha8Rng,
+    type_info: &TypeInfo,
+) -> Result<String, String> {
     let mut field_inputs = Vec::new();
 
     for field in &type_info.fields {
@@ -268,7 +278,7 @@ async fn execute_insert(harness: &TestHarness, rng: &mut ChaCha8Rng, type_info: 
     );
 
     let response = harness.execute_ok(&mutation).await?;
-    
+
     // Extract UID
     let create_key = format!("create{}", type_info.name);
     if let Value::Object(obj) = &response {
@@ -283,11 +293,14 @@ async fn execute_insert(harness: &TestHarness, rng: &mut ChaCha8Rng, type_info: 
 }
 
 /// Execute an update operation
-async fn execute_update(harness: &TestHarness, rng: &mut ChaCha8Rng, type_info: &TypeInfo, uid: &str) -> Result<(), String> {
+async fn execute_update(
+    harness: &TestHarness,
+    rng: &mut ChaCha8Rng,
+    type_info: &TypeInfo,
+    uid: &str,
+) -> Result<(), String> {
     // Pick a random field to update (not id)
-    let updatable_fields: Vec<_> = type_info.fields.iter()
-        .filter(|f| f.name != "id")
-        .collect();
+    let updatable_fields: Vec<_> = type_info.fields.iter().filter(|f| f.name != "id").collect();
 
     if updatable_fields.is_empty() {
         return Ok(());
@@ -307,8 +320,16 @@ async fn execute_update(harness: &TestHarness, rng: &mut ChaCha8Rng, type_info: 
 
 /// Execute a query operation
 async fn execute_query(harness: &TestHarness, type_info: &TypeInfo) -> Result<(), String> {
-    let field_names: Vec<_> = type_info.fields.iter()
-        .map(|f| if f.name == "id" { "uid" } else { f.name.as_str() })
+    let field_names: Vec<_> = type_info
+        .fields
+        .iter()
+        .map(|f| {
+            if f.name == "id" {
+                "uid"
+            } else {
+                f.name.as_str()
+            }
+        })
         .collect();
 
     let query = format!(
@@ -322,11 +343,12 @@ async fn execute_query(harness: &TestHarness, type_info: &TypeInfo) -> Result<()
 }
 
 /// Execute a delete operation
-async fn execute_delete(harness: &TestHarness, type_info: &TypeInfo, uid: &str) -> Result<(), String> {
-    let mutation = format!(
-        r#"mutation {{ delete{}(uid: "{}") }}"#,
-        type_info.name, uid
-    );
+async fn execute_delete(
+    harness: &TestHarness,
+    type_info: &TypeInfo,
+    uid: &str,
+) -> Result<(), String> {
+    let mutation = format!(r#"mutation {{ delete{}(uid: "{}") }}"#, type_info.name, uid);
 
     harness.execute_ok(&mutation).await?;
     Ok(())

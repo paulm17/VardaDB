@@ -1,11 +1,10 @@
-
 #[tokio::test(flavor = "multi_thread")]
 async fn test_specific_schema_implicit_linking() {
     use serde_json::Value as JsonValue;
-    use vardadb::engine::schema::Schema;
-    use vardadb::bridge::sqlite_resolver::SqliteResolver;
-    use vardadb::storage::backend::Storage;
     use std::sync::Arc;
+    use vardadb::bridge::sqlite_resolver::SqliteResolver;
+    use vardadb::engine::schema::Schema;
+    use vardadb::storage::backend::Storage;
 
     let tmp_dir = tempfile::tempdir().unwrap();
     let storage = Storage::new(tmp_dir.path(), None).unwrap();
@@ -65,16 +64,19 @@ async fn test_specific_schema_implicit_linking() {
             }
         }
     ";
-    let res = schema.execute_with_resolver(setup_mut, resolver.clone()).await;
+    let res = schema
+        .execute_with_resolver(setup_mut, resolver.clone())
+        .await;
     let json: JsonValue = serde_json::from_str(&res).unwrap();
     let _lang_id = json["data"]["createLanguage"]["uid"].as_str().unwrap();
     let trans_id = json["data"]["createTranslations"]["uid"].as_str().unwrap();
     let book_id = json["data"]["createBook"]["uid"].as_str().unwrap();
 
     // 2. Create BookTranslation linking to Translation and Book
-    // This node has NO @hasInverse on its fields 'translation' and 'book'. 
+    // This node has NO @hasInverse on its fields 'translation' and 'book'.
     // It relies on implicit linking to update Translations.bookTranslations and Book.bookTranslations.
-    let create_bt = format!("
+    let create_bt = format!(
+        "
         mutation {{
             createBookTranslation(input: {{
                 translation: {{ id: \"{}\" }},
@@ -83,14 +85,22 @@ async fn test_specific_schema_implicit_linking() {
                 uid
             }}
         }}
-    ", trans_id, book_id);
+    ",
+        trans_id, book_id
+    );
 
-    let res = schema.execute_with_resolver(&create_bt, resolver.clone()).await;
+    let res = schema
+        .execute_with_resolver(&create_bt, resolver.clone())
+        .await;
     let json: JsonValue = serde_json::from_str(&res).unwrap();
-    let bt_id = json["data"]["createBookTranslation"]["uid"].as_str().unwrap().to_string();
+    let bt_id = json["data"]["createBookTranslation"]["uid"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // 3. Verify Links (The failure point)
-    let query = format!("
+    let query = format!(
+        "
         query {{
             queryTranslations(filter: {{ code: {{ eq: \"WEB\" }} }}) {{
                 bookTranslations {{
@@ -103,18 +113,38 @@ async fn test_specific_schema_implicit_linking() {
                 }}
             }}
         }}
-    ");
+    "
+    );
     let res = schema.execute_with_resolver(&query, resolver.clone()).await;
     let json: JsonValue = serde_json::from_str(&res).unwrap();
-    
-    println!("DEBUG RESULT: {}", serde_json::to_string_pretty(&json).unwrap());
+
+    println!(
+        "DEBUG RESULT: {}",
+        serde_json::to_string_pretty(&json).unwrap()
+    );
 
     // Check Translation link
-    let trans_bts = json["data"]["queryTranslations"][0]["bookTranslations"].as_array().unwrap();
-    assert_eq!(trans_bts.len(), 1, "Translations should have 1 BookTranslation linked implicitly");
-    assert_eq!(trans_bts[0]["uid"].as_str().unwrap(), bt_id, "Linked BookTranslation ID mismatch");
+    let trans_bts = json["data"]["queryTranslations"][0]["bookTranslations"]
+        .as_array()
+        .unwrap();
+    assert_eq!(
+        trans_bts.len(),
+        1,
+        "Translations should have 1 BookTranslation linked implicitly"
+    );
+    assert_eq!(
+        trans_bts[0]["uid"].as_str().unwrap(),
+        bt_id,
+        "Linked BookTranslation ID mismatch"
+    );
 
     // Check Book link
-    let book_bts = json["data"]["queryBook"][0]["bookTranslations"].as_array().unwrap();
-    assert_eq!(book_bts.len(), 1, "Book should have 1 BookTranslation linked implicitly");
+    let book_bts = json["data"]["queryBook"][0]["bookTranslations"]
+        .as_array()
+        .unwrap();
+    assert_eq!(
+        book_bts.len(),
+        1,
+        "Book should have 1 BookTranslation linked implicitly"
+    );
 }

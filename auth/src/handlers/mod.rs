@@ -1,10 +1,10 @@
-pub mod register;
+pub mod check_code;
+pub mod forgot_password;
+pub mod generate_magiclink;
+pub mod get_me;
 pub mod login;
 pub mod logout;
-pub mod get_me;
-pub mod forgot_password;
+pub mod register;
 pub mod reset_password;
-pub mod generate_magiclink;
-pub mod check_code;
 pub mod verify_code;
 pub mod verify_magiclink;

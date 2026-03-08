@@ -1,7 +1,7 @@
 // src/storage/blob/routes/hashes.rs
 use base64::{engine::general_purpose, Engine};
-use sha2::{Sha256, Sha512};
 use sha1::Sha1;
+use sha2::{Sha256, Sha512};
 
 pub fn verify_chunk_checksum(checksum_header: &str, chunk: &[u8]) -> bool {
     let parts: Vec<&str> = checksum_header.split(' ').collect();

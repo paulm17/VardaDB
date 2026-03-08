@@ -1,8 +1,7 @@
-
-use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 use anyhow::Result;
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum LLMRole {
@@ -66,7 +65,12 @@ pub struct ToolDefinition {
 
 #[async_trait]
 pub trait LLMProvider: Send + Sync {
-    async fn chat_complete(&self, model: &str, messages: &[LLMMessage], tools: &[ToolDefinition]) -> Result<LLMResponse>;
+    async fn chat_complete(
+        &self,
+        model: &str,
+        messages: &[LLMMessage],
+        tools: &[ToolDefinition],
+    ) -> Result<LLMResponse>;
 }
 
 pub struct LLMGateway {
@@ -78,7 +82,12 @@ impl LLMGateway {
         Self { provider }
     }
 
-    pub async fn chat(&self, model: &str, messages: &[LLMMessage], tools: &[ToolDefinition]) -> Result<LLMResponse> {
+    pub async fn chat(
+        &self,
+        model: &str,
+        messages: &[LLMMessage],
+        tools: &[ToolDefinition],
+    ) -> Result<LLMResponse> {
         self.provider.chat_complete(model, messages, tools).await
     }
 }
@@ -158,7 +167,12 @@ struct OpenAIUsage {
 
 #[async_trait]
 impl LLMProvider for OpenAIProvider {
-    async fn chat_complete(&self, model: &str, messages: &[LLMMessage], tools: &[ToolDefinition]) -> Result<LLMResponse> {
+    async fn chat_complete(
+        &self,
+        model: &str,
+        messages: &[LLMMessage],
+        tools: &[ToolDefinition],
+    ) -> Result<LLMResponse> {
         let req_messages: Vec<OpenAIMessage> = messages
             .iter()
             .map(|m| OpenAIMessage {
@@ -169,14 +183,17 @@ impl LLMProvider for OpenAIProvider {
             })
             .collect();
 
-        let req_tools: Vec<OpenAITool> = tools.iter().map(|t| OpenAITool {
-            tool_type: "function".to_string(),
-            function: OpenAIFunction {
-                name: t.name.clone(),
-                description: t.description.clone(),
-                parameters: t.parameters.clone(),
-            }
-        }).collect();
+        let req_tools: Vec<OpenAITool> = tools
+            .iter()
+            .map(|t| OpenAITool {
+                tool_type: "function".to_string(),
+                function: OpenAIFunction {
+                    name: t.name.clone(),
+                    description: t.description.clone(),
+                    parameters: t.parameters.clone(),
+                },
+            })
+            .collect();
 
         let req_body = OpenAIRequest {
             model,
@@ -184,7 +201,8 @@ impl LLMProvider for OpenAIProvider {
             tools: req_tools,
         };
 
-        let res = self.client
+        let res = self
+            .client
             .post("https://api.openai.com/v1/chat/completions")
             .header("Authorization", format!("Bearer {}", self.api_key))
             .json(&req_body)
@@ -198,8 +216,11 @@ impl LLMProvider for OpenAIProvider {
 
         let response: OpenAIResponse = res.json().await?;
 
-        let choice = response.choices.first().ok_or_else(|| anyhow::anyhow!("No choices returned"))?;
-        
+        let choice = response
+            .choices
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("No choices returned"))?;
+
         let usage = response.usage.unwrap_or(OpenAIUsage {
             prompt_tokens: 0,
             completion_tokens: 0,

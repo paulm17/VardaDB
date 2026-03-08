@@ -1,11 +1,10 @@
-
 #[tokio::test(flavor = "multi_thread")]
 async fn test_polymorphism() {
     use serde_json::Value as JsonValue;
-    use vardadb::engine::schema::Schema;
-    use vardadb::bridge::sqlite_resolver::SqliteResolver;
-    use vardadb::storage::backend::Storage;
     use std::sync::Arc;
+    use vardadb::bridge::sqlite_resolver::SqliteResolver;
+    use vardadb::engine::schema::Schema;
+    use vardadb::storage::backend::Storage;
 
     let tmp_dir = tempfile::tempdir().unwrap();
     let storage = Storage::new(tmp_dir.path(), None).unwrap();
@@ -43,9 +42,14 @@ async fn test_polymorphism() {
             }
         }
     ";
-    let res = schema.execute_with_resolver(mut_user, resolver.clone()).await;
+    let res = schema
+        .execute_with_resolver(mut_user, resolver.clone())
+        .await;
     let json: JsonValue = serde_json::from_str(&res).unwrap();
-    let user_id = json["data"]["createUser"]["uid"].as_str().unwrap().to_string();
+    let user_id = json["data"]["createUser"]["uid"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // 2. Create Organization
     let mut_org = "
@@ -55,9 +59,14 @@ async fn test_polymorphism() {
             }
         }
     ";
-    let res = schema.execute_with_resolver(mut_org, resolver.clone()).await;
+    let res = schema
+        .execute_with_resolver(mut_org, resolver.clone())
+        .await;
     let json: JsonValue = serde_json::from_str(&res).unwrap();
-    let org_id = json["data"]["createOrganization"]["uid"].as_str().unwrap().to_string();
+    let org_id = json["data"]["createOrganization"]["uid"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // 3. Create Container linked to User (content) and [User, Org] (contents)
     // Note: Input handling for Polymorphic Types in `create` might be tricky.
@@ -67,8 +76,9 @@ async fn test_polymorphism() {
     // My schema generation for inputs:
     // `content: String` (ID reference) if relation.
     // So passing ID strings should work.
-    
-    let mut_container = format!("
+
+    let mut_container = format!(
+        "
         mutation {{
             createContainer(input: {{ 
                 content: {{ uid: \"{}\" }},
@@ -77,17 +87,25 @@ async fn test_polymorphism() {
                 uid
             }}
         }}
-    ", user_id, user_id, org_id);
+    ",
+        user_id, user_id, org_id
+    );
 
-    let res = schema.execute_with_resolver(&mut_container, resolver.clone()).await;
+    let res = schema
+        .execute_with_resolver(&mut_container, resolver.clone())
+        .await;
     let json: JsonValue = serde_json::from_str(&res).unwrap();
     if json["errors"].is_array() {
         panic!("Container creation failed: {:?}", json);
     }
-    let container_id = json["data"]["createContainer"]["uid"].as_str().unwrap().to_string();
+    let container_id = json["data"]["createContainer"]["uid"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // 4. Query Polymorphically
-    let query = format!("
+    let query = format!(
+        "
         query {{
             getContainer(uid: \"{}\") {{
                 content {{
@@ -113,12 +131,14 @@ async fn test_polymorphism() {
                 }}
             }}
         }}
-    ", container_id);
+    ",
+        container_id
+    );
 
     let res = schema.execute_with_resolver(&query, resolver.clone()).await;
     println!("Query Res: {}", res);
     let json: JsonValue = serde_json::from_str(&res).unwrap();
-    
+
     let content = &json["data"]["getContainer"]["content"];
     assert_eq!(content["name"], "Alice");
     assert_eq!(content["email"], "alice@example.com"); // Should have resolved User fragment
@@ -126,11 +146,11 @@ async fn test_polymorphism() {
 
     let contents = json["data"]["getContainer"]["contents"].as_array().unwrap();
     assert_eq!(contents.len(), 2);
-    
+
     // Check item 0 (User)
-    let _item0 = &contents[0]; // Assuming order preserved, but standard doesn't guarantee? 
-    // Usually insertion order preserved in List value in my resolver.
-    
+    let _item0 = &contents[0]; // Assuming order preserved, but standard doesn't guarantee?
+                               // Usually insertion order preserved in List value in my resolver.
+
     // Find Alice
     let alice = contents.iter().find(|x| x["name"] == "Alice").unwrap();
     assert_eq!(alice["__typename"], "User");

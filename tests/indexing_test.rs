@@ -1,15 +1,15 @@
-use vardadb::engine::schema::Schema;
-use vardadb::storage::backend::Storage;
-use vardadb::bridge::sqlite_resolver::SqliteResolver;
+use serde_json::Value;
 use std::sync::Arc;
 use tempfile::tempdir;
-use serde_json::Value;
+use vardadb::bridge::sqlite_resolver::SqliteResolver;
+use vardadb::engine::schema::Schema;
+use vardadb::storage::backend::Storage;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_unique_indexing() {
     let dir = tempdir().unwrap();
     let storage = Arc::new(Storage::new(dir.path(), None).unwrap());
-    
+
     // 1. Define Schema with @unique
     let sdl = "
         type User {
@@ -18,10 +18,10 @@ async fn test_unique_indexing() {
         }
     ";
     let schema = Schema::load_from_sdl(sdl).expect("Failed to load schema");
-    
+
     // 2. Create Resolver
     let resolver = Box::new(SqliteResolver::new(storage.clone(), "default"));
-    
+
     // 3. Create User "Alice"
     let mutation = "
         mutation {
@@ -29,8 +29,10 @@ async fn test_unique_indexing() {
                 name
             } 
         }
-    "; 
-    let res_json = schema.execute_with_resolver(mutation, resolver.clone()).await;
+    ";
+    let res_json = schema
+        .execute_with_resolver(mutation, resolver.clone())
+        .await;
     println!("Mutation 1: {}", res_json);
     assert!(!res_json.contains("errors"));
 
@@ -45,7 +47,7 @@ async fn test_unique_indexing() {
     ";
     let res_json = schema.execute_with_resolver(query, resolver.clone()).await;
     println!("Query 1: {}", res_json);
-    
+
     let res: Value = serde_json::from_str(&res_json).unwrap();
     let data = res.get("data").expect("No data");
     let user = data.get("getUser").expect("No getUser");
@@ -59,9 +61,14 @@ async fn test_unique_indexing() {
                 name
             } 
         }
-    "; 
-    let res_json = schema.execute_with_resolver(mutation_dup, resolver.clone()).await;
+    ";
+    let res_json = schema
+        .execute_with_resolver(mutation_dup, resolver.clone())
+        .await;
     println!("Mutation Dup: {}", res_json);
-    
-    assert!(res_json.contains("Duplicate value"), "Should fail with duplicate error");
+
+    assert!(
+        res_json.contains("Duplicate value"),
+        "Should fail with duplicate error"
+    );
 }

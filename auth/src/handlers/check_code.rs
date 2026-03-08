@@ -1,17 +1,18 @@
-use axum::{
-    extract::State, http::{header, HeaderMap, Response, StatusCode}, response::IntoResponse, Json
-};
 use anyhow::Result;
-
+use axum::{
+    extract::State,
+    http::{header, HeaderMap, Response, StatusCode},
+    response::IntoResponse,
+    Json,
+};
 
 use crate::models::CheckCodeSchema;
-use crate::state::{ConfirmationRecord, ConfirmationFlow};
+use crate::state::{ConfirmationFlow, ConfirmationRecord};
 
 pub async fn check_code_handler(
     State(auth_state): State<std::sync::Arc<crate::state::AuthState>>,
     Json(body): Json<CheckCodeSchema>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
-
     let code = body.code.trim();
     let confirmation_key = format!("confirm:{}", code);
 
@@ -24,25 +25,24 @@ pub async fn check_code_handler(
               (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "status": "fail", "message": "Code is invalid or has expired" })))
         })?;
 
-    let confirmation: ConfirmationRecord = serde_json::from_slice(&confirmation_bytes).unwrap_or_else(|_| {
-        bincode::deserialize(&confirmation_bytes).expect("Failed to deserialize confirmation")
-    });
+    let confirmation: ConfirmationRecord = serde_json::from_slice(&confirmation_bytes)
+        .unwrap_or_else(|_| {
+            bincode::deserialize(&confirmation_bytes).expect("Failed to deserialize confirmation")
+        });
 
     if confirmation.flow != ConfirmationFlow::Seen {
-        return Err((StatusCode::UNAUTHORIZED, Json(serde_json::json!({
-            "is_valid": false
-        }))));
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({
+                "is_valid": false
+            })),
+        ));
     }
 
-    let mut response = Response::new(
-        serde_json::json!({"is_valid": true}).to_string(),
-    );
+    let mut response = Response::new(serde_json::json!({"is_valid": true}).to_string());
 
     let mut headers = HeaderMap::new();
-    headers.append(
-        header::CONTENT_TYPE,
-        "application/json".parse().unwrap(),
-    );
+    headers.append(header::CONTENT_TYPE, "application/json".parse().unwrap());
 
     response.headers_mut().extend(headers);
 

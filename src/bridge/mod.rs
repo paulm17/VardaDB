@@ -1,2 +1,2 @@
-pub mod sqlite_resolver;
 pub mod mcp;
+pub mod sqlite_resolver;

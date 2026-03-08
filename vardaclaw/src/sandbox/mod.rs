@@ -1,10 +1,9 @@
-
-use std::process::Command;
-use std::io::Write;
-use tempfile::NamedTempFile;
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use std::fs::Permissions;
+use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
+use std::process::Command;
+use tempfile::NamedTempFile;
 
 // Simplified structure mirroring the DB Skill node
 pub struct Skill {
@@ -27,7 +26,7 @@ impl SkillExecutor {
             // Write script to temp file
             let mut temp_file = NamedTempFile::new()?;
             write!(temp_file, "{}", content)?;
-            
+
             // Make executable
             let path = temp_file.path().to_path_buf();
             std::fs::set_permissions(&path, Permissions::from_mode(0o755))?;
@@ -50,7 +49,9 @@ impl SkillExecutor {
             cmd.arg(arg);
         }
 
-        let output = cmd.output().map_err(|e| anyhow!("Failed to execute skill '{}': {}", skill.name, e))?;
+        let output = cmd
+            .output()
+            .map_err(|e| anyhow!("Failed to execute skill '{}': {}", skill.name, e))?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -58,7 +59,11 @@ impl SkillExecutor {
         if output.status.success() {
             Ok(stdout.to_string())
         } else {
-             Err(anyhow!("Skill execution failed: {}\nStderr: {}", stdout, stderr))
+            Err(anyhow!(
+                "Skill execution failed: {}\nStderr: {}",
+                stdout,
+                stderr
+            ))
         }
     }
 }

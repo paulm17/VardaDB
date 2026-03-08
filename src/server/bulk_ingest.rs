@@ -30,10 +30,10 @@ pub async fn start_tcp_listener(state: Arc<ServerState>, port: u16) {
             Ok((mut socket, peer)) => {
                 info!("Bulk ingest connection from {}", peer);
                 let state_clone = state.clone();
-                
+
                 tokio::spawn(async move {
                     let mut batch_count = 0;
-                    
+
                     // --- Database Name Handshake ---
                     // Read the first frame as a database name selector.
                     // If it parses as a BulkRecord array, treat it as data for the default db.
@@ -49,11 +49,13 @@ pub async fn start_tcp_listener(state: Arc<ServerState>, port: u16) {
                         error!("Failed reading initial payload from {}: {}", peer, e);
                         return;
                     }
-                    
+
                     // Try to parse as database name (simple string, not JSON array)
                     let (db_name, first_batch) = if buf.starts_with(b"[") || buf.starts_with(b"{") {
                         // It's JSON data, not a db name — use default
-                        let default_db = state_clone.schemas.iter()
+                        let default_db = state_clone
+                            .schemas
+                            .iter()
                             .find(|entry| entry.key() != "default")
                             .map(|entry| entry.key().clone())
                             .unwrap_or_else(|| "default".to_string());
@@ -68,29 +70,43 @@ pub async fn start_tcp_listener(state: Arc<ServerState>, port: u16) {
                             error!("Failed to send db selection ACK: {}", e);
                             return;
                         }
-                        (if name.is_empty() { "default".to_string() } else { name }, None)
+                        (
+                            if name.is_empty() {
+                                "default".to_string()
+                            } else {
+                                name
+                            },
+                            None,
+                        )
                     };
-                    
+
                     // Create resolver targeting the correct database
                     let resolver = SqliteResolver::with_db(
-                        state_clone.storage.clone(), 
+                        state_clone.storage.clone(),
                         state_clone.event_bus.clone(),
-                        db_name.clone()
+                        db_name.clone(),
                     );
-                    
+
                     // Pre-fetch schema — try db-specific first, fall back to default
-                    let schema_wrapper = state_clone.schemas.get(&db_name)
+                    let schema_wrapper = state_clone
+                        .schemas
+                        .get(&db_name)
                         .or_else(|| state_clone.schemas.get("default"))
                         .expect("Missing schema");
                     let schema = schema_wrapper.read().await.clone();
-                    
-                    info!("Bulk ingest: using schema for db '{}' (types: {})", db_name, 
-                          schema.type_metadata.len());
+
+                    info!(
+                        "Bulk ingest: using schema for db '{}' (types: {})",
+                        db_name,
+                        schema.type_metadata.len()
+                    );
 
                     // Process first batch if the handshake frame was actually data
                     if let Some(first_buf) = first_batch {
                         if let Ok(records) = serde_json::from_slice::<Vec<BulkRecord>>(&first_buf) {
-                            if let Err(e) = resolver.batch_create_nodes(&records, &schema.type_metadata) {
+                            if let Err(e) =
+                                resolver.batch_create_nodes(&records, &schema.type_metadata)
+                            {
                                 error!("Bulk ingest batch_create_nodes error: {}", e);
                             }
                             use tokio::io::AsyncWriteExt;
@@ -104,7 +120,10 @@ pub async fn start_tcp_listener(state: Arc<ServerState>, port: u16) {
                         let mut len_bytes = [0u8; 4];
                         if let Err(e) = socket.read_exact(&mut len_bytes).await {
                             if e.kind() == std::io::ErrorKind::UnexpectedEof {
-                                info!("Client {} disconnected cleanly. Inserted {} batches.", peer, batch_count);
+                                info!(
+                                    "Client {} disconnected cleanly. Inserted {} batches.",
+                                    peer, batch_count
+                                );
                             } else {
                                 error!("Failed reading frame length from {}: {}", peer, e);
                             }
@@ -112,7 +131,8 @@ pub async fn start_tcp_listener(state: Arc<ServerState>, port: u16) {
                         }
 
                         let payload_len = u32::from_le_bytes(len_bytes) as usize;
-                        if payload_len > 1024 * 1024 * 50 { // 50 MB max batch size guard
+                        if payload_len > 1024 * 1024 * 50 {
+                            // 50 MB max batch size guard
                             error!("Payload too large from {}: {} bytes", peer, payload_len);
                             break;
                         }
@@ -128,7 +148,10 @@ pub async fn start_tcp_listener(state: Arc<ServerState>, port: u16) {
                         let records: Vec<BulkRecord> = match serde_json::from_slice(&buf) {
                             Ok(r) => r,
                             Err(e) => {
-                                error!("Failed to deserialize JSON bulk batch from {}: {}", peer, e);
+                                error!(
+                                    "Failed to deserialize JSON bulk batch from {}: {}",
+                                    peer, e
+                                );
                                 break;
                             }
                         };
@@ -136,7 +159,8 @@ pub async fn start_tcp_listener(state: Arc<ServerState>, port: u16) {
                         // 4. Batch-insert entire slice in ONE SQLite transaction.
                         //    batch_create_nodes is 100× faster than per-record create_node_internal
                         //    for large bulk imports (one BEGIN/COMMIT vs N auto-commits).
-                        if let Err(e) = resolver.batch_create_nodes(&records, &schema.type_metadata) {
+                        if let Err(e) = resolver.batch_create_nodes(&records, &schema.type_metadata)
+                        {
                             error!("Bulk ingest batch_create_nodes error: {}", e);
                         }
 
@@ -146,7 +170,7 @@ pub async fn start_tcp_listener(state: Arc<ServerState>, port: u16) {
                             error!("Failed to send ACK to client: {}", e);
                             break;
                         }
-                        
+
                         batch_count += 1;
                     }
                 });

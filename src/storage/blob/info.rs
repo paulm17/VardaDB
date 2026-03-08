@@ -1,7 +1,7 @@
 // src/storage/blob/info.rs
-use std::sync::Arc;
-use crate::storage::backend::Storage;
 use super::{errors::VardaStorageError, file_info::FileInfo};
+use crate::storage::backend::Storage;
+use std::sync::Arc;
 
 #[async_trait::async_trait]
 pub trait InfoStorage: Send + Sync {
@@ -19,7 +19,7 @@ impl VardaInfoStorage {
     pub fn new(storage: Arc<Storage>) -> Self {
         Self { storage }
     }
-    
+
     fn key(&self, file_id: &str) -> String {
         format!("tus:info:{}", file_id)
     }
@@ -35,17 +35,24 @@ impl InfoStorage for VardaInfoStorage {
         let key = self.key(&file_info.id);
         let bytes = bincode::serialize(file_info)
             .map_err(|e| VardaStorageError::StorageError(e.to_string()))?;
-            
-        self.storage.sys_table.insert(key.as_bytes(), bytes)
+
+        self.storage
+            .sys_table
+            .insert(key.as_bytes(), bytes)
             .map_err(|e| VardaStorageError::StorageError(e.to_string()))?;
-            
+
         Ok(())
     }
 
     async fn get_info(&self, file_id: &str) -> Result<FileInfo, VardaStorageError> {
         let key = self.key(file_id);
-            
-        if let Some(bytes) = self.storage.sys_table.get(key.as_bytes()).map_err(|e| VardaStorageError::StorageError(e.to_string()))? {
+
+        if let Some(bytes) = self
+            .storage
+            .sys_table
+            .get(key.as_bytes())
+            .map_err(|e| VardaStorageError::StorageError(e.to_string()))?
+        {
             let file_info: FileInfo = bincode::deserialize(&bytes)
                 .map_err(|e| VardaStorageError::StorageError(e.to_string()))?;
             Ok(file_info)
@@ -56,10 +63,12 @@ impl InfoStorage for VardaInfoStorage {
 
     async fn remove_info(&self, file_id: &str) -> Result<(), VardaStorageError> {
         let key = self.key(file_id);
-            
-        self.storage.sys_table.remove(key.as_bytes())
+
+        self.storage
+            .sys_table
+            .remove(key.as_bytes())
             .map_err(|e| VardaStorageError::StorageError(e.to_string()))?;
-            
+
         Ok(())
     }
 }

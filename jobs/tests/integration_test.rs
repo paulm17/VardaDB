@@ -1,8 +1,8 @@
 mod common;
 
+use common::MemoryKvStore;
 use jobs::{Job, JobStore, Queue};
 use std::sync::Arc;
-use common::MemoryKvStore;
 
 #[test]
 fn test_priority_ordering() {
@@ -48,20 +48,20 @@ fn test_persistence_in_memory() {
     // This test validates the store retains data correctly.
     let kv = MemoryKvStore::new();
     let kv_clone = kv.clone(); // Clone shares the same Arc<Mutex<HashMap>>
-    
+
     {
         let store = Arc::new(JobStore::new(Arc::new(kv)));
         let queue = Queue::new("persist".into(), store.clone());
-        
+
         let j = Job::new(100, "persist".into(), b"data".to_vec());
         queue.push(j).unwrap();
     }
-    
+
     // Reopen with same underlying store (simulates persistence)
     {
         let store = Arc::new(JobStore::new(Arc::new(kv_clone)));
         let queue = Queue::new("persist".into(), store.clone());
-        
+
         // Should find job
         let pop = queue.pop().unwrap();
         assert!(pop.is_some());

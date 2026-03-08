@@ -1,8 +1,8 @@
 use async_graphql::Request;
+use serde_json::Value;
 use std::sync::Arc;
 use vardadb::bridge::sqlite_resolver::SqliteResolver;
 use vardadb::storage::backend::Storage;
-use serde_json::Value;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_query_parity() {
@@ -13,8 +13,9 @@ async fn test_query_parity() {
             price: Int
             category: String
         }
-        "
-    ).unwrap();
+        ",
+    )
+    .unwrap();
 
     let tmp_dir = tempfile::tempdir().unwrap();
     let storage = Arc::new(Storage::new(tmp_dir.path(), None).unwrap());
@@ -29,7 +30,9 @@ async fn test_query_parity() {
     ];
 
     for m in mutations {
-        let req = Request::new(format!("mutation {{ {} {{ uid }} }}", m)).data(Box::new(resolver.clone()) as Box<dyn vardadb::engine::resolver::Resolver + Send + Sync>);
+        let req = Request::new(format!("mutation {{ {} {{ uid }} }}", m))
+            .data(Box::new(resolver.clone())
+                as Box<dyn vardadb::engine::resolver::Resolver + Send + Sync>);
         schema.execute(req).await;
     }
 
@@ -41,7 +44,9 @@ async fn test_query_parity() {
             }
         }
     "#;
-    let res_in = schema.execute_with_resolver(query_in, Box::new(resolver.clone())).await;
+    let res_in = schema
+        .execute_with_resolver(query_in, Box::new(resolver.clone()))
+        .await;
     let val_in: Value = serde_json::from_str(&res_in).unwrap();
     let products = val_in["data"]["queryProduct"].as_array().unwrap();
     assert_eq!(products.len(), 3); // Apple, Banana, Dog Food
@@ -60,14 +65,16 @@ async fn test_query_parity() {
             }
         }
     "#;
-    let res_complex = schema.execute_with_resolver(query_complex, Box::new(resolver.clone())).await;
+    let res_complex = schema
+        .execute_with_resolver(query_complex, Box::new(resolver.clone()))
+        .await;
     let val_complex: Value = serde_json::from_str(&res_complex).unwrap();
     let products_c = val_complex["data"]["queryProduct"].as_array().unwrap();
     // Apple (Fruit, 10) -> Fail (<10)
     // Banana (Fruit, 5) -> Pass
     // Carrot (Veg, 3) -> Pass
     assert_eq!(products_c.len(), 2);
-    
+
     // 4. Test NOT
     // NOT category = Fruit
     let query_not = r#"
@@ -79,7 +86,9 @@ async fn test_query_parity() {
             }
         }
     "#;
-    let res_not = schema.execute_with_resolver(query_not, Box::new(resolver.clone())).await;
+    let res_not = schema
+        .execute_with_resolver(query_not, Box::new(resolver.clone()))
+        .await;
     let val_not: Value = serde_json::from_str(&res_not).unwrap();
     let products_n = val_not["data"]["queryProduct"].as_array().unwrap();
     assert_eq!(products_n.len(), 2); // Carrot, Dog Food
@@ -95,7 +104,9 @@ async fn test_query_parity() {
             }
         }
     "#;
-    let res_str = schema.execute_with_resolver(query_str, Box::new(resolver.clone())).await;
+    let res_str = schema
+        .execute_with_resolver(query_str, Box::new(resolver.clone()))
+        .await;
     let val_str: Value = serde_json::from_str(&res_str).unwrap();
     let products_s = val_str["data"]["queryProduct"].as_array().unwrap();
     // "Banana" > "B"? Yes. "Carrot" > "B"? Yes. "Dog Food" > "B"? Yes.

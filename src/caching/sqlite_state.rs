@@ -1,5 +1,5 @@
-use std::sync::Arc;
 use crate::storage::backend::Storage;
+use std::sync::Arc;
 
 pub struct SqliteState {
     storage: Arc<Storage>,
@@ -19,10 +19,11 @@ impl SqliteState {
     pub fn process_update(&self, key: &str, value: &str) -> anyhow::Result<()> {
         let view_key = format!("view:{}:{}", self.view_name, key);
         // TODO: Make DB configurable for Views?
-        self.storage.insert("default", view_key.as_bytes(), value.as_bytes())?;
+        self.storage
+            .insert("default", view_key.as_bytes(), value.as_bytes())?;
         Ok(())
     }
-    
+
     pub fn get(&self, key: &str) -> anyhow::Result<Option<String>> {
         let view_key = format!("view:{}:{}", self.view_name, key);
         let val = self.storage.get("default", view_key.as_bytes())?;

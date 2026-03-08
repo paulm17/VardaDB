@@ -21,8 +21,12 @@ impl From<crate::state::UserRecord> for FilteredUser {
             name: record.name,
             email: record.email,
             verified: record.verified,
-            created_at: Some(DateTime::<Utc>::from_timestamp(record.created_at, 0).unwrap_or_default()),
-            updated_at: record.updated_at.map(|ts| DateTime::<Utc>::from_timestamp(ts, 0).unwrap_or_default()),
+            created_at: Some(
+                DateTime::<Utc>::from_timestamp(record.created_at, 0).unwrap_or_default(),
+            ),
+            updated_at: record
+                .updated_at
+                .map(|ts| DateTime::<Utc>::from_timestamp(ts, 0).unwrap_or_default()),
         }
     }
 }
@@ -76,7 +80,7 @@ pub struct ResetPasswordSchema {
 
 #[derive(Debug, Deserialize)]
 pub struct MagicLinkSchema {
-    pub email: String,  
+    pub email: String,
     #[serde(rename = "redirectTo")]
     pub redirect_to: String,
 }

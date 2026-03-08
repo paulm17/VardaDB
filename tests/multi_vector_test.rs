@@ -1,11 +1,9 @@
-
-use vardadb::engine::schema::Schema;
-use vardadb::storage::backend::Storage;
-use vardadb::bridge::sqlite_resolver::SqliteResolver;
+use serde_json::Value as JsonValue;
 use std::sync::Arc;
 use tempfile::TempDir;
-use serde_json::Value as JsonValue;
-
+use vardadb::bridge::sqlite_resolver::SqliteResolver;
+use vardadb::engine::schema::Schema;
+use vardadb::storage::backend::Storage;
 
 #[tokio::test(flavor = "multi_thread")]
 // #[ignore = "ignore for now"]
@@ -37,19 +35,20 @@ async fn test_multi_vector_satellite_pattern() {
 
     // 2. Insert Data
     // We need to create the Document first, then the Vectors pointing to it.
-    // Or create Vectors then Document? 
+    // Or create Vectors then Document?
     // VardaDB supports nested creation if we use the input structure correctly.
     // Let's try deep mutation: createDocument including title_vec and content_vec.
-    
+
     // Note: To create TitleVec with a vector, we need to pass embedding data.
     // And for `content_vec` too.
-    
+
     let mut title_vec_input = vec![0.0; 384];
     title_vec_input[0] = 1.0;
     let mut content_vec_input = vec![0.0; 384];
     content_vec_input[1] = 1.0;
 
-    let mut_create = format!("
+    let mut_create = format!(
+        "
         mutation {{
             createDocument(input: {{
                 title: \"Multi-Vector Guide\",
@@ -70,23 +69,29 @@ async fn test_multi_vector_satellite_pattern() {
                 }}
             }}
         }}
-    ", title_vec_input, content_vec_input);
-    
-    let res = schema.execute_with_resolver(&mut_create, resolver.clone()).await;
+    ",
+        title_vec_input, content_vec_input
+    );
+
+    let res = schema
+        .execute_with_resolver(&mut_create, resolver.clone())
+        .await;
     println!("Creation Res: {}", res);
     let json: JsonValue = serde_json::from_str(&res).unwrap();
     if !json["errors"].is_null() {
         panic!("Creation failed: {:?}", json["errors"]);
     }
-    
+
     let doc_id = json["data"]["createDocument"]["uid"].as_str().unwrap();
-    let title_vec_id = json["data"]["createDocument"]["title_vec"]["uid"].as_str().unwrap();
-    
+    let title_vec_id = json["data"]["createDocument"]["title_vec"]["uid"]
+        .as_str()
+        .unwrap();
+
     println!("Created Doc: {}, TitleVec: {}", doc_id, title_vec_id);
-    
+
     // Give background vector writer time to flush
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-    
+
     // 3. Search by Title Vector ([1.0, 0.0, 0.0]) -> Should find TitleVec -> Resolve Doc
     // Note: `search` query is generated for Types with @vector.
     // So distinct queries: `searchTitleVec` vs `searchContentVec`?
@@ -96,12 +101,12 @@ async fn test_multi_vector_satellite_pattern() {
     // It generates `search(vector: ..., k: ...): [SearchResult!]!`
     // Is it polymorphic? Or does it Search ALL types?
     // Or does it generate `search<Type>(...)`?
-    
+
     // Let's check `schema.rs`.
     // Step 984 viewed schema.rs but didn't focus on Query generation for search.
     // Step 985 viewed SqliteResolver.
     // I need to confirm the Query field name.
-    
+
     // Assuming generic `search` returns `[SearchResult]`. `SearchResult` has `uid` and `distance`.
     // It returns *any* node that matches?
     // In `schema.rs`, `search` query uses `resolver.search_vectors(query, k)`.
@@ -114,7 +119,7 @@ async fn test_multi_vector_satellite_pattern() {
     // `SearchResult` usually returns `uid` and `distance`.
     // The client needs to know what to query?
     // `search` return type is usually a Union or Interface? Or just generic object?
-    
+
     // Let's check how `search` is defined in `schema.rs`.
     // I entered `schema.rs` in Step 984.
     // I suspect `search` is SINGLE global query.
@@ -124,37 +129,43 @@ async fn test_multi_vector_satellite_pattern() {
     // `type SearchResult { uid: ID, distance: Float }`.
     // To get the actual object, I need to query `node(id: uid) { ... }` or similar?
     // Or does `SearchResult` have a `node` field?
-    
+
     // If `SearchResult` just has UID, I need to know the type to query further?
     // Or use `get<Type>(id: ...)`?
-    
+
     // This test will verify exactly that behavior.
-    
+
     let mut title_search_query = vec![0.0; 384];
     title_search_query[0] = 0.99;
     title_search_query[1] = 0.01;
 
-    let query_title = format!("
+    let query_title = format!(
+        "
         query {{
             search(vector: {:?}, k: 1) {{
                 uid
                 distance
             }}
         }}
-    ", title_search_query);
-    
-    let res = schema.execute_with_resolver(&query_title, resolver.clone()).await;
+    ",
+        title_search_query
+    );
+
+    let res = schema
+        .execute_with_resolver(&query_title, resolver.clone())
+        .await;
     println!("Search Title Res: {}", res);
     let json: JsonValue = serde_json::from_str(&res).unwrap();
     let hits = json["data"]["search"].as_array().unwrap();
     assert_eq!(hits.len(), 1);
-    
+
     let hit_uid = hits[0]["uid"].as_str().unwrap();
     assert_eq!(hit_uid, title_vec_id);
-    
+
     // Now verify we can resolve the Doc from this UID.
     // We know it is a TitleVec.
-    let query_resolve = format!("
+    let query_resolve = format!(
+        "
         query {{
             getTitleVec(uid: \"{}\") {{
                 doc {{
@@ -162,34 +173,45 @@ async fn test_multi_vector_satellite_pattern() {
                 }}
             }}
         }}
-    ", hit_uid);
-    
-    let res = schema.execute_with_resolver(&query_resolve, resolver.clone()).await;
+    ",
+        hit_uid
+    );
+
+    let res = schema
+        .execute_with_resolver(&query_resolve, resolver.clone())
+        .await;
     println!("Resolve Res: {}", res);
     let json: JsonValue = serde_json::from_str(&res).unwrap();
-    let title = json["data"]["getTitleVec"]["doc"]["title"].as_str().unwrap();
+    let title = json["data"]["getTitleVec"]["doc"]["title"]
+        .as_str()
+        .unwrap();
     assert_eq!(title, "Multi-Vector Guide");
-    
-    
+
     // 4. Search by Content Vector ([0.0, 1.0, 0.0])
     let mut content_search_query = vec![0.0; 384];
     content_search_query[0] = 0.01;
     content_search_query[1] = 0.99;
 
-    let query_content = format!("
+    let query_content = format!(
+        "
         query {{
             search(vector: {:?}, k: 1) {{
                 uid
             }}
         }}
-    ", content_search_query);
-    let res = schema.execute_with_resolver(&query_content, resolver.clone()).await;
+    ",
+        content_search_query
+    );
+    let res = schema
+        .execute_with_resolver(&query_content, resolver.clone())
+        .await;
     let json: JsonValue = serde_json::from_str(&res).unwrap();
     let hits = json["data"]["search"].as_array().unwrap();
     let hit_uid_content = hits[0]["uid"].as_str().unwrap();
-    
+
     // Resolve via ContentVec
-    let query_resolve_content = format!("
+    let query_resolve_content = format!(
+        "
         query {{
             getContentVec(uid: \"{}\") {{
                 doc {{
@@ -197,9 +219,15 @@ async fn test_multi_vector_satellite_pattern() {
                 }}
             }}
         }}
-    ", hit_uid_content);
-     let res = schema.execute_with_resolver(&query_resolve_content, resolver.clone()).await;
-     let json: JsonValue = serde_json::from_str(&res).unwrap();
-     let title = json["data"]["getContentVec"]["doc"]["title"].as_str().unwrap();
-     assert_eq!(title, "Multi-Vector Guide");
+    ",
+        hit_uid_content
+    );
+    let res = schema
+        .execute_with_resolver(&query_resolve_content, resolver.clone())
+        .await;
+    let json: JsonValue = serde_json::from_str(&res).unwrap();
+    let title = json["data"]["getContentVec"]["doc"]["title"]
+        .as_str()
+        .unwrap();
+    assert_eq!(title, "Multi-Vector Guide");
 }

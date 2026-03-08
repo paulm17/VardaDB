@@ -7,11 +7,11 @@
 //! - `eventually`: Must be true at SOME point (liveness)
 //! - `finally`: Must be true at the END of the test (final state)
 
-use std::time::Instant;
 use async_graphql::Value;
+use std::time::Instant;
 
 use crate::harness::TestHarness;
-use crate::{TestRunner, TestResult};
+use crate::{TestResult, TestRunner};
 
 /// Assertion result with details
 #[derive(Debug)]
@@ -95,7 +95,11 @@ pub async fn run_assertion_tests(runner: &mut TestRunner, _seed: u64) {
     runner.add_result(match result {
         Ok(r) => {
             if r.passed {
-                TestResult::pass("[Always] NoDuplicateUniqueValues", "assertions", start.elapsed())
+                TestResult::pass(
+                    "[Always] NoDuplicateUniqueValues",
+                    "assertions",
+                    start.elapsed(),
+                )
             } else {
                 TestResult::fail(
                     "[Always] NoDuplicateUniqueValues",
@@ -105,7 +109,12 @@ pub async fn run_assertion_tests(runner: &mut TestRunner, _seed: u64) {
                 )
             }
         }
-        Err(e) => TestResult::fail("[Always] NoDuplicateUniqueValues", "assertions", start.elapsed(), &e),
+        Err(e) => TestResult::fail(
+            "[Always] NoDuplicateUniqueValues",
+            "assertions",
+            start.elapsed(),
+            &e,
+        ),
     });
 
     // Test 2: ALWAYS - Vector dimensions consistent
@@ -114,7 +123,11 @@ pub async fn run_assertion_tests(runner: &mut TestRunner, _seed: u64) {
     runner.add_result(match result {
         Ok(r) => {
             if r.passed {
-                TestResult::pass("[Always] VectorDimensionsConsistent", "assertions", start.elapsed())
+                TestResult::pass(
+                    "[Always] VectorDimensionsConsistent",
+                    "assertions",
+                    start.elapsed(),
+                )
             } else {
                 TestResult::fail(
                     "[Always] VectorDimensionsConsistent",
@@ -124,7 +137,12 @@ pub async fn run_assertion_tests(runner: &mut TestRunner, _seed: u64) {
                 )
             }
         }
-        Err(e) => TestResult::fail("[Always] VectorDimensionsConsistent", "assertions", start.elapsed(), &e),
+        Err(e) => TestResult::fail(
+            "[Always] VectorDimensionsConsistent",
+            "assertions",
+            start.elapsed(),
+            &e,
+        ),
     });
 
     // Test 3: EVENTUALLY - Query returns results
@@ -133,7 +151,11 @@ pub async fn run_assertion_tests(runner: &mut TestRunner, _seed: u64) {
     runner.add_result(match result {
         Ok(r) => {
             if r.passed {
-                TestResult::pass("[Eventually] QueryReturnsResults", "assertions", start.elapsed())
+                TestResult::pass(
+                    "[Eventually] QueryReturnsResults",
+                    "assertions",
+                    start.elapsed(),
+                )
             } else {
                 TestResult::fail(
                     "[Eventually] QueryReturnsResults",
@@ -143,7 +165,12 @@ pub async fn run_assertion_tests(runner: &mut TestRunner, _seed: u64) {
                 )
             }
         }
-        Err(e) => TestResult::fail("[Eventually] QueryReturnsResults", "assertions", start.elapsed(), &e),
+        Err(e) => TestResult::fail(
+            "[Eventually] QueryReturnsResults",
+            "assertions",
+            start.elapsed(),
+            &e,
+        ),
     });
 
     // Test 4: FINALLY - Database consistent
@@ -152,7 +179,11 @@ pub async fn run_assertion_tests(runner: &mut TestRunner, _seed: u64) {
     runner.add_result(match result {
         Ok(r) => {
             if r.passed {
-                TestResult::pass("[Finally] DatabaseConsistent", "assertions", start.elapsed())
+                TestResult::pass(
+                    "[Finally] DatabaseConsistent",
+                    "assertions",
+                    start.elapsed(),
+                )
             } else {
                 TestResult::fail(
                     "[Finally] DatabaseConsistent",
@@ -162,7 +193,12 @@ pub async fn run_assertion_tests(runner: &mut TestRunner, _seed: u64) {
                 )
             }
         }
-        Err(e) => TestResult::fail("[Finally] DatabaseConsistent", "assertions", start.elapsed(), &e),
+        Err(e) => TestResult::fail(
+            "[Finally] DatabaseConsistent",
+            "assertions",
+            start.elapsed(),
+            &e,
+        ),
     });
 }
 
@@ -178,14 +214,22 @@ async fn test_always_no_duplicates() -> Result<AssertionResult, String> {
     let harness = TestHarness::new(sdl)?;
 
     // Insert first user
-    harness.execute_ok(r#"
+    harness
+        .execute_ok(
+            r#"
         mutation { createUser(input: { email: "test@example.com" }) { id } }
-    "#).await?;
+    "#,
+        )
+        .await?;
 
     // Try to insert duplicate
-    let response = harness.execute(r#"
+    let response = harness
+        .execute(
+            r#"
         mutation { createUser(input: { email: "test@example.com" }) { id } }
-    "#).await;
+    "#,
+        )
+        .await;
 
     // Check that it failed (has errors)
     let has_error = match &response {
@@ -204,7 +248,7 @@ async fn test_always_no_duplicates() -> Result<AssertionResult, String> {
 async fn test_always_vector_dimensions() -> Result<AssertionResult, String> {
     // In VardaDB, vector dimensions are enforced at the storage level
     // This test verifies that the system rejects mismatched dimensions
-    
+
     // For now, we'll test a simpler invariant: vector storage doesn't corrupt data
     let sdl = r#"
         type Item {
@@ -216,27 +260,37 @@ async fn test_always_vector_dimensions() -> Result<AssertionResult, String> {
     let harness = TestHarness::new(sdl)?;
 
     // Create items
-    harness.execute_ok(r#"
+    harness
+        .execute_ok(
+            r#"
         mutation { createItem(input: { name: "Test1" }) { id } }
-    "#).await?;
+    "#,
+        )
+        .await?;
 
-    harness.execute_ok(r#"
+    harness
+        .execute_ok(
+            r#"
         mutation { createItem(input: { name: "Test2" }) { id } }
-    "#).await?;
+    "#,
+        )
+        .await?;
 
     // Query all items
-    let response = harness.execute_ok(r#"
+    let response = harness
+        .execute_ok(
+            r#"
         query { queryItem { id name } }
-    "#).await?;
+    "#,
+        )
+        .await?;
 
     // Verify we got 2 items
     let count = match &response {
-        Value::Object(obj) => {
-            match obj.get(&async_graphql::Name::new("queryItem")) {
-                Some(Value::List(items)) => items.len(),
-                _ => 0,
-            }
-        }
+        Value::Object(obj) => match obj.get(&async_graphql::Name::new("queryItem")) {
+            Some(Value::List(items)) => items.len(),
+            _ => 0,
+        },
         _ => 0,
     };
 
@@ -261,38 +315,46 @@ async fn test_eventually_query_returns() -> Result<AssertionResult, String> {
     let mut checker = EventuallyAssertion::new("QueryReturnsResults");
 
     // Initially no results
-    let response = harness.execute_ok(r#"
+    let response = harness
+        .execute_ok(
+            r#"
         query { queryTodo { id } }
-    "#).await?;
+    "#,
+        )
+        .await?;
 
     let has_results = match &response {
-        Value::Object(obj) => {
-            match obj.get(&async_graphql::Name::new("queryTodo")) {
-                Some(Value::List(items)) => !items.is_empty(),
-                _ => false,
-            }
-        }
+        Value::Object(obj) => match obj.get(&async_graphql::Name::new("queryTodo")) {
+            Some(Value::List(items)) => !items.is_empty(),
+            _ => false,
+        },
         _ => false,
     };
     checker.check(has_results);
 
     // Add a todo
-    harness.execute_ok(r#"
+    harness
+        .execute_ok(
+            r#"
         mutation { createTodo(input: { title: "Test Todo" }) { id } }
-    "#).await?;
+    "#,
+        )
+        .await?;
 
     // Now query should return results
-    let response = harness.execute_ok(r#"
+    let response = harness
+        .execute_ok(
+            r#"
         query { queryTodo { id } }
-    "#).await?;
+    "#,
+        )
+        .await?;
 
     let has_results = match &response {
-        Value::Object(obj) => {
-            match obj.get(&async_graphql::Name::new("queryTodo")) {
-                Some(Value::List(items)) => !items.is_empty(),
-                _ => false,
-            }
-        }
+        Value::Object(obj) => match obj.get(&async_graphql::Name::new("queryTodo")) {
+            Some(Value::List(items)) => !items.is_empty(),
+            _ => false,
+        },
         _ => false,
     };
     checker.check(has_results);
@@ -312,9 +374,13 @@ async fn test_finally_database_consistent() -> Result<AssertionResult, String> {
     let harness = TestHarness::new(sdl)?;
 
     // Create a counter
-    let response = harness.execute_ok(r#"
+    let response = harness
+        .execute_ok(
+            r#"
         mutation { createCounter(input: { value: 0 }) { uid } }
-    "#).await?;
+    "#,
+        )
+        .await?;
 
     let uid = match crate::harness::get_path(&response, "createCounter.uid")? {
         Value::String(s) => s.clone(),
@@ -331,10 +397,7 @@ async fn test_finally_database_consistent() -> Result<AssertionResult, String> {
     }
 
     // Final check: value should be 5
-    let query = format!(
-        r#"query {{ getCounter(uid: "{}") {{ value }} }}"#,
-        uid
-    );
+    let query = format!(r#"query {{ getCounter(uid: "{}") {{ value }} }}"#, uid);
     let response = harness.execute_ok(&query).await?;
 
     let final_value = match crate::harness::get_path(&response, "getCounter.value")? {

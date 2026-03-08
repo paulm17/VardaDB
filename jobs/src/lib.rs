@@ -1,7 +1,7 @@
-pub mod types;
-pub mod storage;
 pub mod queue;
+pub mod storage;
+pub mod types;
 
-pub use types::{Job, JobId, JobLocation, RetryConfig};
+pub use queue::{JobEnqueuer, Queue};
 pub use storage::{JobStore, KvStore};
-pub use queue::{Queue, JobEnqueuer};
+pub use types::{Job, JobId, JobLocation, RetryConfig};

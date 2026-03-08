@@ -33,9 +33,13 @@ impl MemoryIndex {
     pub fn new_with_db_path(workspace: &Path, _db_path: &Path) -> Result<Self> {
         // We ignore db_path as we don't use local SQLite anymore.
         // We default to localhost:8080, or read from env
-        let base_url = std::env::var("VARDADB_URL").unwrap_or_else(|_| "http://localhost:8080/graphql".to_string());
-        
-        info!("Initializing VardaClaw MemoryIndex connected to {}", base_url);
+        let base_url = std::env::var("VARDADB_URL")
+            .unwrap_or_else(|_| "http://localhost:8080/graphql".to_string());
+
+        info!(
+            "Initializing VardaClaw MemoryIndex connected to {}",
+            base_url
+        );
 
         Ok(Self {
             client: Client::new(),
@@ -62,7 +66,7 @@ impl MemoryIndex {
     /// Index a file by sending chunks to VardaDB
     pub fn index_file(&self, path: &Path, _force: bool) -> Result<bool> {
         let content = fs::read_to_string(path)?;
-        
+
         let relative_path = path
             .strip_prefix(&self.workspace)
             .unwrap_or(path)
@@ -85,18 +89,18 @@ impl MemoryIndex {
         // Currently we don't have a bulk API in the default schema, so we send one by one.
         // Or we could check if file changed hash, but VardaDB doesn't expose file hash check easily yet.
         // For 'force' logic, we assume we overwrite.
-        
+
         // First, delete existing chunks for this file to avoid duplicates?
-        // Our schema doesn't have deleteByFile... 
+        // Our schema doesn't have deleteByFile...
         // But `createMemoryChunk` just adds nodes.
         // Ideally we should verify if we need to clean up.
-        // For now, let's just append (v0.1 limitation). 
+        // For now, let's just append (v0.1 limitation).
         // Future improvement: Add `deleteMemoryChunks(filter: {sourceFile: $file})` to schema.
-        
+
         // Actually, we can check if we should index by hash... but let's implement the core logic first.
-        
+
         let mut updated = false;
-        
+
         for chunk in chunks {
             let variables = json!({
                 "content": chunk.content,
@@ -114,7 +118,8 @@ impl MemoryIndex {
             // Wait, this method is synchronous in signature. We need to block.
             let res = tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current().block_on(async {
-                    self.client.post(&self.base_url)
+                    self.client
+                        .post(&self.base_url)
                         .json(&body)
                         .send()
                         .await?
@@ -125,7 +130,9 @@ impl MemoryIndex {
             });
 
             match res {
-                Ok(_) => { updated = true; },
+                Ok(_) => {
+                    updated = true;
+                }
                 Err(e) => {
                     warn!("Failed to index chunk for {}: {}", relative_path, e);
                 }
@@ -147,7 +154,7 @@ impl MemoryIndex {
         // Return empty or query server for distinct sourceFiles
         // For now, return empty to trigger reindexing?
         // Or maybe just return empty means "nothing indexed" so reindex will run.
-        Ok(Vec::new()) 
+        Ok(Vec::new())
     }
 
     /// Search using VardaDB
@@ -156,20 +163,20 @@ impl MemoryIndex {
         // If query is just text, we treat it as FTS if we have a way.
         // But getMemoryChunk usually expects nearVector for semantic search.
         // Or we can use `content ~ query`.
-        
+
         // Let's assume we want to use the vector search if possible, but search() signature is text.
         // MemoryManager::search calls search_hybrid which calls search_vector.
         // MemoryManager::search_fts calls this.
-        
+
         // Let's implement a simple FTS-like query if possible, or matches regex.
         // Schema: getMemoryChunk(nearVector: ..., limit: ...)
-        // We don't have text search in schema yet? 
+        // We don't have text search in schema yet?
         // We have `getMemoryChunk`. If we pass no args, it returns all.
         // We probably need to implement text search support in VardaDB or just use vector search here if we can.
-        
+
         // But `search` is strictly text-based in LocalGPT interface.
         // Let's return empty for now and rely on `search_vector`.
-        Ok(Vec::new()) 
+        Ok(Vec::new())
     }
 
     /// Get total chunk count
@@ -182,12 +189,13 @@ impl MemoryIndex {
                 }
             }
         "#;
-        
+
         let body = json!({ "query": query });
-        
+
         let res = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
-                self.client.post(&self.base_url)
+                self.client
+                    .post(&self.base_url)
                     .json(&body)
                     .send()
                     .await?
@@ -195,8 +203,10 @@ impl MemoryIndex {
                     .await
             })
         })?;
-        
-        let count = res["data"]["aggregateMemoryChunk"]["count"].as_u64().unwrap_or(0);
+
+        let count = res["data"]["aggregateMemoryChunk"]["count"]
+            .as_u64()
+            .unwrap_or(0);
         Ok(count as usize)
     }
 
@@ -230,11 +240,23 @@ impl MemoryIndex {
         Ok(())
     }
 
-    pub fn get_cached_embedding(&self, _provider: &str, _model: &str, _text_hash: &str) -> Result<Option<Vec<f32>>> {
+    pub fn get_cached_embedding(
+        &self,
+        _provider: &str,
+        _model: &str,
+        _text_hash: &str,
+    ) -> Result<Option<Vec<f32>>> {
         Ok(None)
     }
 
-    pub fn cache_embedding(&self, _provider: &str, _model: &str, _key: &str, _hash: &str, _embedding: &[f32]) -> Result<()> {
+    pub fn cache_embedding(
+        &self,
+        _provider: &str,
+        _model: &str,
+        _key: &str,
+        _hash: &str,
+        _embedding: &[f32],
+    ) -> Result<()> {
         Ok(())
     }
 
@@ -245,7 +267,7 @@ impl MemoryIndex {
     pub fn embedded_chunk_count(&self, _model: &str) -> Result<usize> {
         self.chunk_count()
     }
-    
+
     // Legacy support
     pub fn search_hybrid(
         &self,
@@ -286,7 +308,7 @@ impl MemoryIndex {
             "vec": query_embedding,
             "limit": limit
         });
-        
+
         let body = json!({
             "query": query,
             "variables": variables
@@ -294,7 +316,8 @@ impl MemoryIndex {
 
         let res = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
-                self.client.post(&self.base_url)
+                self.client
+                    .post(&self.base_url)
                     .json(&body)
                     .send()
                     .await?
@@ -302,9 +325,9 @@ impl MemoryIndex {
                     .await
             })
         })?;
-        
+
         let chunks = res["data"]["getMemoryChunk"].as_array();
-        
+
         let mut results = Vec::new();
         if let Some(chunks) = chunks {
             for c in chunks {
@@ -317,7 +340,7 @@ impl MemoryIndex {
                 });
             }
         }
-        
+
         Ok(results)
     }
 }
@@ -383,5 +406,3 @@ fn chunk_text(text: &str, target_tokens: usize, overlap_tokens: usize) -> Vec<Ch
 
     chunks
 }
-
-

@@ -9,27 +9,15 @@ pub type JobId = u64;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum JobLocation {
     /// In the priority queue, ready for execution.
-    Ready {
-        queue: String,
-    },
+    Ready { queue: String },
     /// Scheduled for future execution.
-    Scheduled {
-        queue: String,
-    },
+    Scheduled { queue: String },
     /// Currently being processed by a worker.
-    Active {
-        started_at: u64,
-        worker_id: u64,
-    },
+    Active { started_at: u64, worker_id: u64 },
     /// Finished processing (successfully or failed).
-    Completed {
-        at: u64,
-        success: bool,
-    },
+    Completed { at: u64, success: bool },
     /// Dead Letter Queue (failed max retries).
-    Dlq {
-        failed_at: u64,
-    },
+    Dlq { failed_at: u64 },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -56,22 +44,22 @@ impl Default for RetryConfig {
 pub struct Job {
     pub id: JobId,
     pub queue: String,
-    
+
     /// Execution priority (higher is better).
     pub priority: i32,
-    
+
     /// Scheduled run time (unix timestamp ms).
     pub run_at: u64,
-    
+
     /// Payload data (JSON-like).
     pub payload: Vec<u8>,
-    
+
     /// Current attempt number (1-indexed).
     pub attempt: u32,
-    
+
     /// Configuration for retries.
     pub retry: RetryConfig,
-    
+
     /// Job headers / Metadata.
     pub meta: std::collections::HashMap<String, String>,
 
@@ -107,4 +95,3 @@ pub struct CronSchedule {
     pub last_run: Option<u64>,
     pub enabled: bool,
 }
-

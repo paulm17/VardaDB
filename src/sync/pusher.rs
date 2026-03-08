@@ -13,7 +13,7 @@ impl Pusher {
         // simplified loop
         // In real impl, this listens to Fjall events
         println!("Pusher: Started. (Stub)");
-        
+
         // Simulate one upload
         let _ = self.remote.upload_sst(1, b"sst-data").await;
     }

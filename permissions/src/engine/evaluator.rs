@@ -1,11 +1,11 @@
+use rhai::{Dynamic, Engine, Scope};
 use std::collections::HashMap;
-use rhai::{Engine, Dynamic, Scope};
 
+use crate::engine::context::Context;
 use crate::schema::ast::Entity;
+use crate::storage::attribute::AttrValue;
 use crate::storage::auth_store::AuthStore;
 use crate::storage::tuple::Subject;
-use crate::storage::attribute::AttrValue;
-use crate::engine::context::Context;
 
 const MAX_DEPTH: usize = 100;
 
@@ -83,12 +83,7 @@ fn remove_outer_parens(expr: &str) -> String {
     expr
 }
 
-fn get_attr_as_double(
-    store: &AuthStore,
-    entity: &str,
-    id: &str,
-    attr: &str,
-) -> f64 {
+fn get_attr_as_double(store: &AuthStore, entity: &str, id: &str, attr: &str) -> f64 {
     if let Some(val) = store.get_attribute(entity, id, attr) {
         match val {
             AttrValue::Int(i) => i as f64,
@@ -173,33 +168,59 @@ pub fn evaluate_expr(
     if depth > MAX_DEPTH {
         return false;
     }
-    
+
     let expr = remove_outer_parens(expr);
     let or_tokens = split_top_level(&expr, " or ");
-    
+
     if or_tokens.len() > 1 {
         for token in or_tokens {
-            if evaluate_expr(token, schema, entity_name, instance_id, user, store, context, depth + 1) {
+            if evaluate_expr(
+                token,
+                schema,
+                entity_name,
+                instance_id,
+                user,
+                store,
+                context,
+                depth + 1,
+            ) {
                 return true;
             }
         }
         return false;
     }
-    
+
     let and_tokens = split_top_level(&expr, " and ");
-    
+
     if and_tokens.len() > 1 {
         for token in and_tokens {
-            if !evaluate_expr(token, schema, entity_name, instance_id, user, store, context, depth + 1) {
+            if !evaluate_expr(
+                token,
+                schema,
+                entity_name,
+                instance_id,
+                user,
+                store,
+                context,
+                depth + 1,
+            ) {
                 return false;
             }
         }
         return true;
     }
-    
-    evaluate_token(&expr, schema, entity_name, instance_id, user, store, context, depth + 1)
-}
 
+    evaluate_token(
+        &expr,
+        schema,
+        entity_name,
+        instance_id,
+        user,
+        store,
+        context,
+        depth + 1,
+    )
+}
 
 fn evaluate_token(
     token: &str,
@@ -278,10 +299,9 @@ fn evaluate_token(
         if parts.len() == 2 {
             let rel_name = parts[0].trim();
             let nested_perm = parts[1].trim();
-            
-            let subjects =
-                get_relation_subjects(store, schema, entity_name, instance_id, rel_name);
-            
+
+            let subjects = get_relation_subjects(store, schema, entity_name, instance_id, rel_name);
+
             for subj in subjects {
                 let res = evaluate_permission(
                     schema,
@@ -300,16 +320,19 @@ fn evaluate_token(
             return false;
         }
     }
-    
+
     let subjects = get_relation_subjects(store, schema, entity_name, instance_id, token);
-    
+
     if !subjects.is_empty() {
-        if subjects.iter().any(|s| format!("{}:{}", s.entity, s.id) == user) {
+        if subjects
+            .iter()
+            .any(|s| format!("{}:{}", s.entity, s.id) == user)
+        {
             return true;
         }
         return false;
     }
-    
+
     if let Some(val) = store.get_attribute(entity_name, instance_id, token) {
         return match val {
             AttrValue::Int(i) => i != 0,
@@ -317,7 +340,7 @@ fn evaluate_token(
             AttrValue::Bool(b) => b,
         };
     }
-    
+
     false
 }
 
@@ -365,10 +388,10 @@ fn evaluate_function(
             scope.push_dynamic(param.to_string(), Dynamic::from_float(val));
         }
         // Minimal rhai context simulation, need mapping Context -> Map
-        // scope.push("context", Dynamic::from(Map::new())); 
+        // scope.push("context", Dynamic::from(Map::new()));
         match engine.eval_with_scope::<bool>(&mut scope, &rule_body) {
             Ok(result) => result,
-            Err(_) => false
+            Err(_) => false,
         }
     } else {
         false
@@ -389,9 +412,10 @@ fn evaluate_tuple_to_userset(
     if depth > MAX_DEPTH {
         return false;
     }
-    
-    let subjects = get_relation_subjects(store, schema, entity_name, instance_id, tupleset_relation);
-    
+
+    let subjects =
+        get_relation_subjects(store, schema, entity_name, instance_id, tupleset_relation);
+
     for subj in subjects {
         let res = evaluate_permission(
             schema,
@@ -410,7 +434,10 @@ fn evaluate_tuple_to_userset(
     false
 }
 
-fn get_rule_body(schema: &HashMap<String, Entity>, rule_name: &str) -> Option<(Vec<String>, String)> {
+fn get_rule_body(
+    schema: &HashMap<String, Entity>,
+    rule_name: &str,
+) -> Option<(Vec<String>, String)> {
     for entity in schema.values() {
         if let Some((params, body)) = entity.rules.get(rule_name) {
             return Some((params.clone(), body.clone()));
@@ -432,16 +459,26 @@ pub fn evaluate_permission(
     if depth > MAX_DEPTH {
         return false;
     }
-    
+
     if let Some(entity) = schema.get(entity_name) {
         if let Some(expr) = entity.permissions.get(perm_name) {
-            return evaluate_expr(expr, schema, entity_name, instance_id, user, store, context, depth + 1);
+            return evaluate_expr(
+                expr,
+                schema,
+                entity_name,
+                instance_id,
+                user,
+                store,
+                context,
+                depth + 1,
+            );
         }
     }
-    
+
     let direct_subjects = store.get_subjects(entity_name, instance_id, perm_name);
-    let resolved_subjects = get_relation_subjects(store, schema, entity_name, instance_id, perm_name);
-    
+    let resolved_subjects =
+        get_relation_subjects(store, schema, entity_name, instance_id, perm_name);
+
     direct_subjects
         .into_iter()
         .chain(resolved_subjects.into_iter())

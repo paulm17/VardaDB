@@ -1,6 +1,6 @@
-use std::collections::HashMap;
-use regex::Regex;
 use crate::schema::ast::Entity;
+use regex::Regex;
+use std::collections::HashMap;
 
 pub fn parse_schema(schema_str: &str) -> HashMap<String, Entity> {
     let rule_re = Regex::new(r"rule\s+(\w+)\s*\(([^)]*)\)\s*\{([^}]*)\}").unwrap();
@@ -12,7 +12,8 @@ pub fn parse_schema(schema_str: &str) -> HashMap<String, Entity> {
         let params: Vec<String> = if params_str.is_empty() {
             Vec::new()
         } else {
-            params_str.split(',')
+            params_str
+                .split(',')
                 .map(|s| s.trim().split_whitespace().next().unwrap_or("").to_string())
                 .collect()
         };
@@ -62,7 +63,8 @@ pub fn parse_schema(schema_str: &str) -> HashMap<String, Entity> {
                     let params: Vec<String> = if params_str.is_empty() {
                         Vec::new()
                     } else {
-                        params_str.split(',')
+                        params_str
+                            .split(',')
                             .map(|s| s.trim().split_whitespace().next().unwrap_or("").to_string())
                             .collect()
                     };

@@ -1,316 +1,311 @@
-use mlx_lm::{load_model, GenerationPipeline, Sampler, CausalLM, ChatTemplate, ChatTemplateOptions, Message as LmMessage};
+use std::fs;
+use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
-use tokio::sync::{mpsc, oneshot};
+use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::{Duration, Instant};
+
+use anyhow::Result;
+use axum::{
+    body::{Body, Bytes},
+    extract::State,
+    http::{HeaderMap, Method, StatusCode},
+    response::Response,
+};
+use futures_util::TryStreamExt;
+use tokio::time::sleep;
+use tracing::info;
+
 use crate::config::LLMConfig;
-use std::sync::Arc;
-use axum::{extract::State, Json};
-use serde::Deserialize;
+
+const MLX_SERVER_START_TIMEOUT: Duration = Duration::from_secs(10);
+const MLX_SERVER_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const EMBEDDINGS_BATCH_SIZE: usize = 256;
 
 pub struct MlxEngine {
     pub base_url: String,
     pub model: String,
-    request_tx: mpsc::Sender<EngineRequest>,
-}
-
-pub enum EngineRequest {
-    Chat {
-        messages: Vec<serde_json::Value>,
-        max_tokens: Option<usize>,
-        temperature: f32,
-        thinking: bool,
-        stream: bool,
-        respond_to: oneshot::Sender<Result<String, String>>,
-    },
-    Load {
-        model_path: String,
-        respond_to: oneshot::Sender<Result<(), String>>,
-    },
-    Unload {
-        respond_to: oneshot::Sender<Result<(), String>>,
-    }
+    client: reqwest::Client,
+    child: Mutex<Child>,
+    config_path: PathBuf,
 }
 
 impl MlxEngine {
     pub fn start(config: LLMConfig) -> Result<Arc<Self>, Box<dyn std::error::Error>> {
-        let port = config.port;
-        let model_from_config = config.model.clone();
+        let server_path = resolve_mlx_server_path(&config);
+        let bind = format!("127.0.0.1:{}", config.port);
+        let base_url = format!("http://{}", bind);
+        let config_path = write_mlx_server_config(&config, &bind)?;
 
-        let (tx, mut rx) = mpsc::channel::<EngineRequest>(32);
+        let mut command = Command::new(&server_path);
+        command
+            .arg("--config")
+            .arg(&config_path)
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit());
 
-        // Spawn blocking thread to handle MLX generations synchronously without blocking tokio 
-        std::thread::spawn(move || {
-            let mut current_model: Option<(Box<dyn CausalLM>, mlx_lm::Tokenizer, PathBuf)> = None;
+        let mut child = command.spawn().map_err(|e| {
+            format!(
+                "failed to start mlx-server at {}: {}",
+                server_path.display(),
+                e
+            )
+        })?;
 
-            let release_model = |model_opt: &mut Option<(Box<dyn CausalLM>, mlx_lm::Tokenizer, PathBuf)>| {
-                let _ = mlx_core::Stream::new_gpu_default().synchronize();
-                let _ = mlx_core::Stream::new_cpu_default().synchronize();
-                if let Some((mut model, _tokenizer, _path)) = model_opt.take() {
-                    model.clear_cache();
-                    drop(model);
-                }
-                mlx_core::metal::set_cache_limit(0);
-                mlx_core::metal::clear_cache();
-                mlx_core::metal::clear_compile_cache();
-                let _ = mlx_core::Stream::new_gpu_default().synchronize();
-                let _ = mlx_core::Stream::new_cpu_default().synchronize();
-            };
+        if let Err(e) = wait_for_mlx_server(config.port) {
+            cleanup_process(&mut child, &config_path);
+            return Err(e.into());
+        }
 
-            // Optional startup load
-            if !model_from_config.is_empty() &&  model_from_config != "llama3" {
-                let path = PathBuf::from(&model_from_config);
-                if path.exists() {
-                     println!("Starting native mlx-lm engine with startup model {}...", model_from_config);
-                     match load_model(&path) {
-                        Ok(r) => {
-                             current_model = Some((r.0, r.1, path));
-                             println!("Native mlx-lm engine ready.");
-                        },
-                        Err(e) => {
-                            eprintln!("Failed to load startup MLX model: {}", e);
-                        }
-                    };
-                }
-            } else {
-                 println!("Native mlx-lm engine started (No model loaded yet).");
-            }
+        info!(
+            target: "vardadb::llm::proxy",
+            base_url = base_url.as_str(),
+            server_path = server_path.display().to_string(),
+            "started managed mlx-server"
+        );
 
-            while let Some(req) = rx.blocking_recv() {
-                match req {
-                    EngineRequest::Chat { messages, max_tokens, temperature, thinking, respond_to, .. } => {
-                        if let Some((ref mut model, ref tokenizer, ref model_dir)) = current_model {
-                            // Convert JSON messages to LmMessage
-                            let mut msgs = Vec::with_capacity(messages.len());
-                            for msg in &messages {
-                                if let (Some(role), Some(content)) = (msg.get("role").and_then(|v| v.as_str()), msg.get("content").and_then(|v| v.as_str())) {
-                                    match role {
-                                        "system" => msgs.push(LmMessage::system(content)),
-                                        "assistant" => msgs.push(LmMessage::assistant(content)),
-                                        _ => msgs.push(LmMessage::user(content)),
-                                    }
-                                }
-                            }
-                            
-                            let options = ChatTemplateOptions {
-                                add_generation_prompt: true,
-                                continue_final_message: false,
-                                enable_thinking: thinking,
-                            };
-                            
-                            let prompt = if let Ok(template) = ChatTemplate::from_model_dir(model_dir) {
-                                template.apply(&msgs, &options).unwrap_or_else(|_| ChatTemplate::chatml().apply(&msgs, &options).unwrap_or_default())
-                            } else {
-                                ChatTemplate::chatml().apply(&msgs, &options).unwrap_or_else(|_| ChatTemplate::qwen35().apply(&msgs, &options).unwrap_or_default())
-                            };
-            
-                            let sampler = Sampler::new(temperature, 1.0);
-                            let mut pipeline = GenerationPipeline::new(model.as_mut(), tokenizer.clone(), sampler);
-                            
-                            match pipeline.generate_with_metrics(&prompt, max_tokens, |_token, _piece| {}) {
-                                Ok((mut text, _metrics)) => {
-                                    if !thinking {
-                                        if let Some(start) = text.find("<think>") {
-                                            if let Some(end) = text.find("</think>") {
-                                                let end_tag_len = "</think>".len();
-                                                let mut new_text = String::with_capacity(text.len());
-                                                new_text.push_str(&text[..start]);
-                                                let mut rest = &text[end + end_tag_len..];
-                                                
-                                                // remove trailing blank lines immediately following the tag
-                                                while rest.starts_with('\n') {
-                                                    rest = &rest[1..];
-                                                }
-                                                new_text.push_str(rest);
-                                                text = new_text;
-                                            }
-                                        }
-                                    }
-                                    let _ = respond_to.send(Ok(text));
-                                }
-                                Err(e) => {
-                                    let _ = respond_to.send(Err(e.to_string()));
-                                }
-                            }
-                        } else {
-                            let _ = respond_to.send(Err("No MLX model is currently loaded.".to_string()));
-                        }
-                    },
-                    EngineRequest::Load { model_path, respond_to } => {
-                       let path = PathBuf::from(&model_path);
-                       if !path.exists() {
-                            let _ = respond_to.send(Err(format!("Model path does not exist: {}", model_path)));
-                            continue;
-                       }
-                       println!("Loading new MLX model from {}...", model_path);
-                       match load_model(&path) {
-                            Ok(r) => {
-                                 release_model(&mut current_model);
-                                 current_model = Some((r.0, r.1, path));
-                                 println!("Model loaded successfully.");
-                                 let _ = respond_to.send(Ok(()));
-                            },
-                            Err(e) => {
-                                let err_msg = format!("Failed to load MLX model {}: {}", model_path, e);
-                                eprintln!("{}", err_msg);
-                                let _ = respond_to.send(Err(err_msg));
-                            }
-                        };
-                    },
-                    EngineRequest::Unload { respond_to } => {
-                        release_model(&mut current_model);
-                        println!("MLX model unloaded successfully.");
-                        let _ = respond_to.send(Ok(()));
-                    }
-                }
-            }
-        });
-
-        let server = Arc::new(Self {
-            base_url: format!("http://localhost:{}", port),
-            model: config.model.clone(),
-            request_tx: tx,
-        });
-
-        Ok(server)
+        Ok(Arc::new(Self {
+            base_url,
+            model: config.model,
+            client: reqwest::Client::builder().build()?,
+            child: Mutex::new(child),
+            config_path,
+        }))
     }
 }
 
-#[derive(Deserialize)]
-pub struct ChatRequest {
-    pub messages: Vec<serde_json::Value>,
-    pub max_tokens: Option<usize>,
-    #[serde(default = "default_temperature")]
-    pub temperature: f32,
-    #[serde(default)]
-    pub thinking: bool,
-    #[serde(default)]
-    pub stream: bool,
-    #[serde(default)]
-    pub model: Option<String>,
+impl Drop for MlxEngine {
+    fn drop(&mut self) {
+        if let Ok(child) = self.child.get_mut() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        let _ = fs::remove_file(&self.config_path);
+    }
 }
 
-fn default_temperature() -> f32 { 0.7 }
+fn cleanup_process(child: &mut Child, config_path: &PathBuf) {
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = fs::remove_file(config_path);
+}
 
-#[derive(Deserialize)]
-pub struct LoadRequest {
-    pub model_path: String,
+fn resolve_mlx_server_path(config: &LLMConfig) -> PathBuf {
+    if let Some(path) = &config.llama_server_path {
+        return PathBuf::from(path);
+    }
+
+    let release = PathBuf::from("../mlx-rs/target/release/mlx-server");
+    if release.exists() {
+        return release;
+    }
+
+    let debug = PathBuf::from("../mlx-rs/target/debug/mlx-server");
+    if debug.exists() {
+        return debug;
+    }
+
+    PathBuf::from("mlx-server")
+}
+
+fn write_mlx_server_config(config: &LLMConfig, bind: &str) -> Result<PathBuf> {
+    let mut content = format!(
+        "[server]\nbind = \"{}\"\nembeddings_batch_size = {}\n",
+        bind, EMBEDDINGS_BATCH_SIZE
+    );
+
+    if !config.model.is_empty() && config.model != "llama3" {
+        content.push_str(&format!(
+            "model_path = \"{}\"\n",
+            config.model.replace('"', "\\\"")
+        ));
+    }
+
+    let path = std::env::temp_dir().join(format!(
+        "vardadb-mlx-server-{}-{}.toml",
+        std::process::id(),
+        config.port
+    ));
+    fs::write(&path, content)?;
+    Ok(path)
+}
+
+fn wait_for_mlx_server(port: u16) -> Result<()> {
+    let addr: SocketAddr = format!("127.0.0.1:{port}").parse()?;
+    let started = Instant::now();
+    loop {
+        if TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok() {
+            return Ok(());
+        }
+        if started.elapsed() >= MLX_SERVER_START_TIMEOUT {
+            anyhow::bail!("mlx-server on port {port} did not become ready within 10 seconds");
+        }
+        thread::sleep(MLX_SERVER_POLL_INTERVAL);
+    }
+}
+
+fn filter_request_headers(headers: &HeaderMap) -> HeaderMap {
+    let mut filtered = HeaderMap::new();
+    for (name, value) in headers {
+        if matches!(
+            name.as_str(),
+            "host" | "content-length" | "connection" | "transfer-encoding"
+        ) {
+            continue;
+        }
+        filtered.append(name.clone(), value.clone());
+    }
+    filtered
+}
+
+fn copy_response_headers(from: &HeaderMap, to: &mut HeaderMap) {
+    for (name, value) in from {
+        if matches!(
+            name.as_str(),
+            "connection"
+                | "keep-alive"
+                | "proxy-authenticate"
+                | "proxy-authorization"
+                | "te"
+                | "trailer"
+                | "transfer-encoding"
+                | "upgrade"
+                | "content-length"
+        ) {
+            continue;
+        }
+        to.append(name.clone(), value.clone());
+    }
+}
+
+async fn proxy_request(
+    state: crate::ServerState,
+    method: Method,
+    path: &str,
+    headers: HeaderMap,
+    body: Option<Bytes>,
+) -> Result<Response, (StatusCode, String)> {
+    let engine = state.llama_server.clone().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "MLX service not started".to_string(),
+        )
+    })?;
+
+    let url = format!("{}{}", engine.base_url, path);
+    let started = Instant::now();
+    let mut request = engine
+        .client
+        .request(
+            reqwest::Method::from_bytes(method.as_str().as_bytes()).map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("invalid proxy method: {}", e),
+                )
+            })?,
+            &url,
+        )
+        .headers(filter_request_headers(&headers));
+
+    if let Some(body) = body {
+        request = request.body(body);
+    }
+
+    let upstream = request.send().await.map_err(|e| {
+        (
+            StatusCode::BAD_GATEWAY,
+            format!("mlx-server request failed: {}", e),
+        )
+    })?;
+
+    let status =
+        StatusCode::from_u16(upstream.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    let upstream_headers = upstream.headers().clone();
+    let stream = upstream.bytes_stream().map_err(std::io::Error::other);
+
+    let mut response = Response::builder()
+        .status(status)
+        .body(Body::from_stream(stream))
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to build proxy response: {}", e),
+            )
+        })?;
+    copy_response_headers(&upstream_headers, response.headers_mut());
+
+    info!(
+        target: "vardadb::llm::proxy",
+        method = method.as_str(),
+        path,
+        status = status.as_u16(),
+        elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+        "proxied mlx request"
+    );
+
+    Ok(response)
+}
+
+pub async fn models_handler(
+    State(state): State<crate::ServerState>,
+    headers: HeaderMap,
+) -> Result<Response, (StatusCode, String)> {
+    proxy_request(state, Method::GET, "/v1/models", headers, None).await
 }
 
 pub async fn load_handler(
-    state: State<crate::ServerState>,
-    Json(payload): Json<LoadRequest>,
-) -> Result<axum::response::Response, (axum::http::StatusCode, String)> {
-    let mlx_engine = state.llama_server.clone();
-    
-    if mlx_engine.is_none() {
-        return Err((axum::http::StatusCode::SERVICE_UNAVAILABLE, "LLM engine not started".to_string()));
-    }
-    let engine = mlx_engine.unwrap();
-
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    
-    let req = EngineRequest::Load {
-        model_path: payload.model_path,
-        respond_to: tx,
-    };
-
-    if let Err(e) = engine.request_tx.send(req).await {
-         return Err((axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to send request to MLX engine: {}", e)));
-    }
-
-    match rx.await {
-        Ok(Ok(_)) => {
-            let response_json = serde_json::json!({ "ok": true });
-            Ok(axum::response::Response::builder()
-                .status(axum::http::StatusCode::OK)
-                .header("Content-Type", "application/json")
-                .body(axum::body::Body::from(response_json.to_string()))
-                .unwrap())
-        }
-        Ok(Err(text)) => Err((axum::http::StatusCode::BAD_REQUEST, format!("MLX Load Error: {}", text))),
-        Err(e) => Err((axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("Channel error waiting for MLX engine: {}", e)))
-    }
+    State(state): State<crate::ServerState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, (StatusCode, String)> {
+    proxy_request(state, Method::POST, "/llm/load", headers, Some(body)).await
 }
 
 pub async fn unload_handler(
-    state: State<crate::ServerState>,
-) -> Result<axum::response::Response, (axum::http::StatusCode, String)> {
-    let mlx_engine = state.llama_server.clone();
-    
-    if mlx_engine.is_none() {
-        return Err((axum::http::StatusCode::SERVICE_UNAVAILABLE, "LLM engine not started".to_string()));
-    }
-    let engine = mlx_engine.unwrap();
+    State(state): State<crate::ServerState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, (StatusCode, String)> {
+    proxy_request(state, Method::POST, "/llm/unload", headers, Some(body)).await
+}
 
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    
-    let req = EngineRequest::Unload { respond_to: tx };
-
-    if let Err(e) = engine.request_tx.send(req).await {
-         return Err((axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to send request to MLX engine: {}", e)));
-    }
-
-    match rx.await {
-        Ok(Ok(_)) => {
-            let response_json = serde_json::json!({ "ok": true });
-            Ok(axum::response::Response::builder()
-                .status(axum::http::StatusCode::OK)
-                .header("Content-Type", "application/json")
-                .body(axum::body::Body::from(response_json.to_string()))
-                .unwrap())
-        }
-        Ok(Err(text)) => Err((axum::http::StatusCode::BAD_REQUEST, format!("MLX Unload Error: {}", text))),
-        Err(e) => Err((axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("Channel error waiting for MLX engine: {}", e)))
-    }
+pub async fn embeddings_handler(
+    State(state): State<crate::ServerState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, (StatusCode, String)> {
+    proxy_request(state, Method::POST, "/v1/embeddings", headers, Some(body)).await
 }
 
 pub async fn chat_handler(
-    state: State<crate::ServerState>,
-    Json(payload): Json<ChatRequest>,
-) -> Result<axum::response::Response, (axum::http::StatusCode, String)> {
-    let mlx_engine = state.llama_server.clone();
-    
-    if mlx_engine.is_none() {
-        return Err((axum::http::StatusCode::SERVICE_UNAVAILABLE, "LLM engine not started".to_string()));
-    }
-    let engine = mlx_engine.unwrap();
+    State(state): State<crate::ServerState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, (StatusCode, String)> {
+    proxy_request(
+        state,
+        Method::POST,
+        "/v1/chat/completions",
+        headers,
+        Some(body),
+    )
+    .await
+}
 
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    
-    let req = EngineRequest::Chat {
-        messages: payload.messages,
-        max_tokens: payload.max_tokens,
-        temperature: payload.temperature,
-        thinking: payload.thinking,
-        stream: false, // Stream handling needs a stream channel, simple oneshot for now
-        respond_to: tx,
-    };
-
-    if let Err(e) = engine.request_tx.send(req).await {
-         return Err((axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to send request to MLX engine: {}", e)));
-    }
-
-    match rx.await {
-        Ok(Ok(text)) => {
-            let response_json = serde_json::json!({
-                "id": "chatcmpl-local",
-                "object": "chat.completion",
-                "choices": [{
-                    "index": 0,
-                    "message": {
-                        "role": "assistant",
-                        "content": text
-                    },
-                    "finish_reason": "stop"
-                }]
-            });
-            
-            Ok(axum::response::Response::builder()
-                .status(axum::http::StatusCode::OK)
-                .header("Content-Type", "application/json")
-                .body(axum::body::Body::from(response_json.to_string()))
-                .unwrap())
+pub async fn wait_for_proxy_ready(state: Arc<MlxEngine>) -> bool {
+    let started = Instant::now();
+    while started.elapsed() < MLX_SERVER_START_TIMEOUT {
+        if state
+            .client
+            .get(format!("{}/v1/models", state.base_url))
+            .send()
+            .await
+            .is_ok()
+        {
+            return true;
         }
-        Ok(Err(text)) => Err((axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("MLX Generation Error: {}", text))),
-        Err(e) => Err((axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("Channel error waiting for MLX engine: {}", e)))
+        sleep(MLX_SERVER_POLL_INTERVAL).await;
     }
+    false
 }

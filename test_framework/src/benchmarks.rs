@@ -6,7 +6,7 @@
 use std::time::{Duration, Instant};
 
 use crate::harness::TestHarness;
-use crate::{TestRunner, TestResult};
+use crate::{TestResult, TestRunner};
 
 /// Benchmark configuration
 pub struct BenchmarkConfig {
@@ -255,8 +255,12 @@ async fn benchmark_read_by_id(config: &BenchmarkConfig) -> Result<BenchmarkResul
         );
         let response = harness.execute_ok(&mutation).await?;
         if let async_graphql::Value::Object(obj) = &response {
-            if let Some(async_graphql::Value::Object(create_item)) = obj.get(&async_graphql::Name::new("createItem")) {
-                if let Some(async_graphql::Value::String(uid)) = create_item.get(&async_graphql::Name::new("uid")) {
+            if let Some(async_graphql::Value::Object(create_item)) =
+                obj.get(&async_graphql::Name::new("createItem"))
+            {
+                if let Some(async_graphql::Value::String(uid)) =
+                    create_item.get(&async_graphql::Name::new("uid"))
+                {
                     uids.push(uid.clone());
                 }
             }
@@ -266,10 +270,7 @@ async fn benchmark_read_by_id(config: &BenchmarkConfig) -> Result<BenchmarkResul
     // Measure reads
     let mut samples = Vec::new();
     for uid in &uids {
-        let query = format!(
-            r#"query {{ getItem(uid: "{}") {{ uid name }} }}"#,
-            uid
-        );
+        let query = format!(r#"query {{ getItem(uid: "{}") {{ uid name }} }}"#, uid);
 
         let start = Instant::now();
         harness.execute_ok(&query).await?;
@@ -291,9 +292,13 @@ async fn benchmark_update(config: &BenchmarkConfig) -> Result<BenchmarkResult, S
     let harness = TestHarness::new(sdl)?;
 
     // Create an item to update
-    let response = harness.execute_ok(r#"
+    let response = harness
+        .execute_ok(
+            r#"
         mutation { createItem(input: { name: "UpdateTest", value: 0 }) { uid } }
-    "#).await?;
+    "#,
+        )
+        .await?;
 
     let uid = match &response {
         async_graphql::Value::Object(obj) => {
@@ -345,8 +350,12 @@ async fn benchmark_delete(config: &BenchmarkConfig) -> Result<BenchmarkResult, S
         );
         let response = harness.execute_ok(&mutation).await?;
         if let async_graphql::Value::Object(obj) = &response {
-            if let Some(async_graphql::Value::Object(create_item)) = obj.get(&async_graphql::Name::new("createItem")) {
-                if let Some(async_graphql::Value::String(uid)) = create_item.get(&async_graphql::Name::new("uid")) {
+            if let Some(async_graphql::Value::Object(create_item)) =
+                obj.get(&async_graphql::Name::new("createItem"))
+            {
+                if let Some(async_graphql::Value::String(uid)) =
+                    create_item.get(&async_graphql::Name::new("uid"))
+                {
                     uids.push(uid.clone());
                 }
             }
@@ -356,10 +365,7 @@ async fn benchmark_delete(config: &BenchmarkConfig) -> Result<BenchmarkResult, S
     // Measure deletes
     let mut samples = Vec::new();
     for uid in &uids {
-        let mutation = format!(
-            r#"mutation {{ deleteItem(uid: "{}") }}"#,
-            uid
-        );
+        let mutation = format!(r#"mutation {{ deleteItem(uid: "{}") }}"#, uid);
 
         let start = Instant::now();
         harness.execute_ok(&mutation).await?;
@@ -381,7 +387,7 @@ async fn benchmark_bulk_insert(batch_size: usize) -> Result<BenchmarkResult, Str
     let harness = TestHarness::new(sdl)?;
 
     let start = Instant::now();
-    
+
     for i in 0..batch_size {
         let mutation = format!(
             r#"mutation {{ createItem(input: {{ name: "Bulk{}", value: {} }}) {{ uid }} }}"#,

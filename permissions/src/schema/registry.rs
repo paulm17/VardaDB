@@ -1,6 +1,6 @@
-use std::collections::HashMap;
 use crate::schema::ast::Entity;
 use crate::schema::parser::parse_schema;
+use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
 pub struct SchemaRegistry {

@@ -1,11 +1,10 @@
-
 #[tokio::test(flavor = "multi_thread")]
 async fn test_implicit_inverse_linking_failure() {
     use serde_json::Value as JsonValue;
-    use vardadb::engine::schema::Schema;
-    use vardadb::bridge::sqlite_resolver::SqliteResolver;
-    use vardadb::storage::backend::Storage;
     use std::sync::Arc;
+    use vardadb::bridge::sqlite_resolver::SqliteResolver;
+    use vardadb::engine::schema::Schema;
+    use vardadb::storage::backend::Storage;
 
     let tmp_dir = tempfile::tempdir().unwrap();
     let storage = Storage::new(tmp_dir.path(), None).unwrap();
@@ -43,12 +42,18 @@ async fn test_implicit_inverse_linking_failure() {
             }
         }
     ";
-    let res = schema.execute_with_resolver(mut_child, resolver.clone()).await;
+    let res = schema
+        .execute_with_resolver(mut_child, resolver.clone())
+        .await;
     let json: JsonValue = serde_json::from_str(&res).unwrap();
-    let parent_id = json["data"]["createChild"]["parent"]["uid"].as_str().unwrap().to_string();
+    let parent_id = json["data"]["createChild"]["parent"]["uid"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // 2. Query Parent to see if Child is linked
-    let query = format!("
+    let query = format!(
+        "
         query {{
             getParent(uid: \"{}\") {{
                 children {{
@@ -56,11 +61,17 @@ async fn test_implicit_inverse_linking_failure() {
                 }}
             }}
         }}
-    ", parent_id);
+    ",
+        parent_id
+    );
     let res = schema.execute_with_resolver(&query, resolver.clone()).await;
     let json: JsonValue = serde_json::from_str(&res).unwrap();
-    
+
     // Expectation: Implicit linking should now SUCCEED, yielding 1 child.
     let children = json["data"]["getParent"]["children"].as_array().unwrap();
-    assert_eq!(children.len(), 1, "Implicit linking should succeed and link the child");
+    assert_eq!(
+        children.len(),
+        1,
+        "Implicit linking should succeed and link the child"
+    );
 }

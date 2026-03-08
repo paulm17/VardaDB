@@ -1,19 +1,19 @@
+use anyhow::Result;
 use axum::{
-    extract::State, http::{header, HeaderMap, Response, StatusCode}, response::IntoResponse, Json
+    extract::State,
+    http::{header, HeaderMap, Response, StatusCode},
+    response::IntoResponse,
+    Json,
 };
 use axum_extra::extract::{
     cookie::{Cookie, SameSite},
     CookieJar,
 };
-use anyhow::Result;
-
-
 
 pub async fn logout_handler(
     cookie_jar: CookieJar,
     State(auth_state): State<std::sync::Arc<crate::state::AuthState>>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
-
     let mut access_cookie = Cookie::new("access_token", "");
     access_cookie.set_path("/");
     access_cookie.set_secure(true);
@@ -41,7 +41,7 @@ pub async fn logout_handler(
     // Wait, the TokenRecord in Fjall doesn't store the raw string token, it stores the token_uuid as the key (`token:{token_uuid}`).
     // Let's implement an inline verify to get the UUID, then delete the key.
     use crate::token::{verify_paseto_token, TokenKind};
-    
+
     if let Some(token) = access_token {
         if let Ok(details) = verify_paseto_token(&token, TokenKind::Access, &auth_state) {
             let key = format!("token:{}", details.token_uuid);

@@ -1,13 +1,13 @@
 use axum::{
+    http::{header, StatusCode},
     response::{IntoResponse, Response},
     routing::get,
-    Router, http::{StatusCode, header},
-
+    Router,
 };
 use rust_embed::RustEmbed;
 
 #[derive(RustEmbed)]
-#[folder = "ui/dist/"] 
+#[folder = "ui/dist/"]
 struct UiAssets;
 
 pub fn ui_router() -> Router {
@@ -32,25 +32,27 @@ fn serve_asset(path: &str) -> Response {
             (
                 [(header::CONTENT_TYPE, mime.as_ref())],
                 content.data.to_vec(),
-            ).into_response()
+            )
+                .into_response()
         }
         None => {
             // SPA Fallback: If not found, serve index.html (unless it's an asset like .js/.css)
             // Simple heuristic: if it has an extension, return 404, else index.html
             if path.contains('.') {
-                 (StatusCode::NOT_FOUND, "Not Found").into_response()
+                (StatusCode::NOT_FOUND, "Not Found").into_response()
             } else {
-                 // Try index.html for client-side routing
-                 match UiAssets::get("index.html") {
-                     Some(content) => {
+                // Try index.html for client-side routing
+                match UiAssets::get("index.html") {
+                    Some(content) => {
                         let mime = mime_guess::from_path("index.html").first_or_octet_stream();
                         (
                             [(header::CONTENT_TYPE, mime.as_ref())],
                             content.data.to_vec(),
-                        ).into_response()
-                     }
-                     None => (StatusCode::NOT_FOUND, "Index not found").into_response(),
-                 }
+                        )
+                            .into_response()
+                    }
+                    None => (StatusCode::NOT_FOUND, "Index not found").into_response(),
+                }
             }
         }
     }

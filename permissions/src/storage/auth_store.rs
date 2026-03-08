@@ -1,5 +1,5 @@
-use crate::storage::tuple::{RelationTuple, Subject};
 use crate::storage::attribute::AttrValue;
+use crate::storage::tuple::{RelationTuple, Subject};
 use std::sync::Arc;
 
 /// A key-value store trait that abstracts the underlying storage engine.
@@ -24,34 +24,48 @@ impl AuthStore {
 
     pub fn build_tuple_key(tuple: &RelationTuple) -> Vec<u8> {
         let mut key = String::new();
-        key.push_str(&tuple.entity_type); key.push('\x00');
-        key.push_str(&tuple.entity_id); key.push('\x00');
-        key.push_str(&tuple.relation); key.push('\x00');
-        key.push_str(&tuple.subject_type); key.push('\x00');
-        key.push_str(&tuple.subject_id); key.push('\x00');
-        if let Some(ref sr) = tuple.subject_relation { key.push_str(sr); }
+        key.push_str(&tuple.entity_type);
+        key.push('\x00');
+        key.push_str(&tuple.entity_id);
+        key.push('\x00');
+        key.push_str(&tuple.relation);
+        key.push('\x00');
+        key.push_str(&tuple.subject_type);
+        key.push('\x00');
+        key.push_str(&tuple.subject_id);
+        key.push('\x00');
+        if let Some(ref sr) = tuple.subject_relation {
+            key.push_str(sr);
+        }
         key.into_bytes()
     }
 
     pub fn build_tuple_prefix(entity_type: &str, entity_id: &str, relation: &str) -> Vec<u8> {
         let mut key = String::new();
-        key.push_str(entity_type); key.push('\x00');
-        key.push_str(entity_id); key.push('\x00');
-        key.push_str(relation); key.push('\x00');
+        key.push_str(entity_type);
+        key.push('\x00');
+        key.push_str(entity_id);
+        key.push('\x00');
+        key.push_str(relation);
+        key.push('\x00');
         key.into_bytes()
     }
 
     pub fn build_entity_prefix(entity_type: &str, entity_id: &str) -> Vec<u8> {
         let mut key = String::new();
-        key.push_str(entity_type); key.push('\x00');
-        key.push_str(entity_id); key.push('\x00');
+        key.push_str(entity_type);
+        key.push('\x00');
+        key.push_str(entity_id);
+        key.push('\x00');
         key.into_bytes()
     }
 
     pub fn build_attr_key(entity_type: &str, entity_id: &str, attribute: &str) -> Vec<u8> {
         let mut key = String::new();
-        key.push_str(entity_type); key.push('\x00');
-        key.push_str(entity_id); key.push('\x00');
+        key.push_str(entity_type);
+        key.push('\x00');
+        key.push_str(entity_id);
+        key.push('\x00');
         key.push_str(attribute);
         key.into_bytes()
     }
@@ -61,7 +75,13 @@ impl AuthStore {
         self.tuples.kv_insert(&key, b"")
     }
 
-    pub fn insert_attribute(&self, entity_type: &str, entity_id: &str, attribute: &str, value: &AttrValue) -> Result<(), String> {
+    pub fn insert_attribute(
+        &self,
+        entity_type: &str,
+        entity_id: &str,
+        attribute: &str,
+        value: &AttrValue,
+    ) -> Result<(), String> {
         let key = Self::build_attr_key(entity_type, entity_id, attribute);
         let val = serde_json::to_vec(value).map_err(|e| e.to_string())?;
         self.attributes.kv_insert(&key, &val)
@@ -87,14 +107,19 @@ impl AuthStore {
                         format!("{}#{}", subject_id, sr)
                     } else {
                         subject_id.to_string()
-                    }
+                    },
                 });
             }
         }
         subjects
     }
 
-    pub fn get_attribute(&self, entity_type: &str, entity_id: &str, attribute: &str) -> Option<AttrValue> {
+    pub fn get_attribute(
+        &self,
+        entity_type: &str,
+        entity_id: &str,
+        attribute: &str,
+    ) -> Option<AttrValue> {
         let key = Self::build_attr_key(entity_type, entity_id, attribute);
         if let Ok(Some(item)) = self.attributes.kv_get(&key) {
             serde_json::from_slice(&item).ok()
@@ -103,7 +128,11 @@ impl AuthStore {
         }
     }
 
-    pub fn get_all_tuples_for_entity(&self, entity_type: &str, entity_id: &str) -> Vec<RelationTuple> {
+    pub fn get_all_tuples_for_entity(
+        &self,
+        entity_type: &str,
+        entity_id: &str,
+    ) -> Vec<RelationTuple> {
         let prefix = Self::build_entity_prefix(entity_type, entity_id);
         let mut tuples = Vec::new();
         for (k, _) in self.tuples.kv_prefix(&prefix) {
@@ -127,9 +156,15 @@ impl AuthStore {
         tuples
     }
 
-    pub fn get_all_for_target(&self, target_type: &str, match_subject_entity: &str, match_subject_id: &str) -> Vec<Subject> {
+    pub fn get_all_for_target(
+        &self,
+        target_type: &str,
+        match_subject_entity: &str,
+        match_subject_id: &str,
+    ) -> Vec<Subject> {
         let mut prefix = String::new();
-        prefix.push_str(target_type); prefix.push('\x00');
+        prefix.push_str(target_type);
+        prefix.push('\x00');
         let mut results = Vec::new();
         for (k, _) in self.tuples.kv_prefix(prefix.as_bytes()) {
             let key_str = String::from_utf8_lossy(&k);
@@ -148,7 +183,9 @@ impl AuthStore {
         }
         let mut unique_results = Vec::new();
         for r in results {
-            if !unique_results.contains(&r) { unique_results.push(r); }
+            if !unique_results.contains(&r) {
+                unique_results.push(r);
+            }
         }
         unique_results
     }

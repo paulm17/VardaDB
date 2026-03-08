@@ -1,9 +1,9 @@
 pub mod manager;
-pub mod remote;
-pub mod pusher;
-pub mod oracle;
 pub mod network_layer;
+pub mod oracle;
+pub mod pusher;
 pub mod reconciliation;
+pub mod remote;
 
 #[derive(Debug, Clone)]
 pub struct SyncConfig {
@@ -31,7 +31,7 @@ impl SyncManager {
     pub fn new(config: SyncConfig) -> Self {
         let remote = remote::Remote::new(config.remote_url.clone());
         let pusher = pusher::Pusher::new(remote.clone());
-        
+
         Self {
             config,
             pusher,
@@ -44,7 +44,7 @@ impl SyncManager {
             println!("Sync is DISABLED. Skipping background tasks.");
             return;
         }
-        
+
         println!("Starting Sync Manager...");
         self.pusher.start().await;
     }

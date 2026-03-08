@@ -16,8 +16,8 @@ pub mod sandbox;
 // #[cfg(feature = "desktop")]
 // pub mod desktop;
 // pub mod heartbeat;
- pub mod memory;
- pub mod security;
+pub mod memory;
+pub mod security;
 // pub mod server;
 
 pub use config::Config;

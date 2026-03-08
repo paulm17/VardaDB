@@ -1,11 +1,12 @@
-use axum::{
-    extract::{State, Path},
-    routing::{post, delete, get},
-    Json, Router, http::StatusCode,
-};
-use std::sync::Arc;
-use serde::{Deserialize, Serialize};
 use crate::traits::DatabaseManager;
+use axum::{
+    extract::{Path, State},
+    http::StatusCode,
+    routing::{delete, get, post},
+    Json, Router,
+};
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct ManagementState {
@@ -42,7 +43,11 @@ async fn create_db(
     State(state): State<ManagementState>,
     Json(payload): Json<CreateDbRequest>,
 ) -> Result<Json<DbResponse>, (StatusCode, String)> {
-    if !payload.name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+    if !payload
+        .name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
         return Err((StatusCode::BAD_REQUEST, "Invalid database name".to_string()));
     }
 
@@ -71,10 +76,10 @@ async fn delete_db(
     match state.manager.delete_db(&name).await {
         Ok(_) => Ok(StatusCode::NO_CONTENT),
         Err(e) => {
-             if e.contains("Cannot delete") {
+            if e.contains("Cannot delete") {
                 Err((StatusCode::FORBIDDEN, e))
             } else {
-                 Err((StatusCode::INTERNAL_SERVER_ERROR, e))
+                Err((StatusCode::INTERNAL_SERVER_ERROR, e))
             }
         }
     }
@@ -84,9 +89,9 @@ async fn get_db_status(
     State(state): State<ManagementState>,
     Path(name): Path<String>,
 ) -> Result<Json<crate::traits::DbStatus>, (StatusCode, String)> {
-     match state.manager.get_db_status(&name).await {
-         Ok(status) => Ok(Json(status)),
-         Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e)),
+    match state.manager.get_db_status(&name).await {
+        Ok(status) => Ok(Json(status)),
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e)),
     }
 }
 
@@ -98,13 +103,13 @@ async fn apply_schema(
     match state.manager.apply_schema(&name, &body).await {
         Ok(_) => Ok((StatusCode::OK, "Schema applied successfully".to_string())),
         Err(e) => {
-             if e.contains("not found") {
-                 Err((StatusCode::NOT_FOUND, e))
-             } else if e.contains("Invalid Schema") {
-                 Err((StatusCode::BAD_REQUEST, e))
-             } else {
-                 Err((StatusCode::INTERNAL_SERVER_ERROR, e))
-             }
+            if e.contains("not found") {
+                Err((StatusCode::NOT_FOUND, e))
+            } else if e.contains("Invalid Schema") {
+                Err((StatusCode::BAD_REQUEST, e))
+            } else {
+                Err((StatusCode::INTERNAL_SERVER_ERROR, e))
+            }
         }
     }
 }
@@ -116,11 +121,11 @@ async fn get_schema(
     match state.manager.get_schema(&name).await {
         Ok(sdl) => Ok(sdl),
         Err(e) => {
-             if e.contains("not found") {
-                 Err((StatusCode::NOT_FOUND, e))
-             } else {
-                 Err((StatusCode::INTERNAL_SERVER_ERROR, e))
-             }
+            if e.contains("not found") {
+                Err((StatusCode::NOT_FOUND, e))
+            } else {
+                Err((StatusCode::INTERNAL_SERVER_ERROR, e))
+            }
         }
     }
 }

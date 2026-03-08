@@ -1,5 +1,5 @@
-use vardadb::storage::backend::Storage;
 use tempfile::tempdir;
+use vardadb::storage::backend::Storage;
 
 #[test]
 fn test_database_persistence() {
@@ -10,7 +10,10 @@ fn test_database_persistence() {
     {
         let storage = Storage::new(db_path, None).unwrap();
         storage.create_database("archondb").unwrap();
-        assert!(storage.get_database("archondb").is_some(), "archondb should exist");
+        assert!(
+            storage.get_database("archondb").is_some(),
+            "archondb should exist"
+        );
         storage.flush().unwrap(); // Ensure persistence
     } // Drop storage (simulate stop)
 
@@ -19,7 +22,13 @@ fn test_database_persistence() {
         let storage = Storage::new(db_path, None).unwrap();
         let dbs = storage.list_databases();
         println!("Databases found: {:?}", dbs);
-        assert!(dbs.contains(&"archondb".to_string()), "archondb should persist after restart");
-        assert!(storage.get_database("archondb").is_some(), "archondb should be accessible");
+        assert!(
+            dbs.contains(&"archondb".to_string()),
+            "archondb should persist after restart"
+        );
+        assert!(
+            storage.get_database("archondb").is_some(),
+            "archondb should be accessible"
+        );
     }
 }

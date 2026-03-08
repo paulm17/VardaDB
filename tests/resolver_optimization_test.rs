@@ -1,11 +1,10 @@
-
-use vardadb::bridge::sqlite_resolver::SqliteResolver;
-use vardadb::storage::backend::Storage;
-use vardadb::engine::resolver::Resolver;
-use vardadb::engine::schema::Schema;
-use std::sync::Arc;
 use async_graphql::Value as GqlValue;
 use serde_json::Value as JsonValue;
+use std::sync::Arc;
+use vardadb::bridge::sqlite_resolver::SqliteResolver;
+use vardadb::engine::resolver::Resolver;
+use vardadb::engine::schema::Schema;
+use vardadb::storage::backend::Storage;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_resolver_optimization() {
@@ -31,39 +30,58 @@ async fn test_resolver_optimization() {
 
     // User 0
     let mut fields0 = std::collections::HashMap::new();
-    fields0.insert("email".to_string(), GqlValue::String("unique@example.com".to_string()));
-    fields0.insert("name".to_string(), GqlValue::String("UniqueGuy".to_string()));
-    fields0.insert("bio".to_string(), GqlValue::String("I love Rust".to_string()));
+    fields0.insert(
+        "email".to_string(),
+        GqlValue::String("unique@example.com".to_string()),
+    );
+    fields0.insert(
+        "name".to_string(),
+        GqlValue::String("UniqueGuy".to_string()),
+    );
+    fields0.insert(
+        "bio".to_string(),
+        GqlValue::String("I love Rust".to_string()),
+    );
     fields0.insert("age".to_string(), GqlValue::Number(20.into()));
-    
+
     let mut search_map = std::collections::HashMap::new();
     search_map.insert("bio".to_string(), vec!["term".to_string()]);
 
-    resolver.create_node(
-        "User", 
-        fields0, 
-        &["email".to_string()], // Uniques
-        &[], // Inverses
-        &search_map, // Search
-        None
-    ).expect("Failed to create User 0");
+    resolver
+        .create_node(
+            "User",
+            fields0,
+            &["email".to_string()], // Uniques
+            &[],                    // Inverses
+            &search_map,            // Search
+            None,
+        )
+        .expect("Failed to create User 0");
 
     // Other Users
     for i in 1..100 {
         let mut fields = std::collections::HashMap::new();
-        fields.insert("email".to_string(), GqlValue::String(format!("user{}@example.com", i)));
+        fields.insert(
+            "email".to_string(),
+            GqlValue::String(format!("user{}@example.com", i)),
+        );
         fields.insert("name".to_string(), GqlValue::String(format!("User{}", i)));
-        fields.insert("bio".to_string(), GqlValue::String("Just a user".to_string()));
+        fields.insert(
+            "bio".to_string(),
+            GqlValue::String("Just a user".to_string()),
+        );
         fields.insert("age".to_string(), GqlValue::Number((20 + i).into()));
-        
-        resolver.create_node(
-            "User",
-            fields,
-            &["email".to_string()],
-            &[],
-            &search_map,
-            None
-        ).expect(&format!("Failed to create User {}", i));
+
+        resolver
+            .create_node(
+                "User",
+                fields,
+                &["email".to_string()],
+                &[],
+                &search_map,
+                None,
+            )
+            .expect(&format!("Failed to create User {}", i));
     }
 
     // 2. Query: Unique Lookup (Should be O(1))
@@ -75,7 +93,9 @@ async fn test_resolver_optimization() {
             }
         }
     "#;
-    let res = schema.execute_with_resolver(query_unique, resolver.clone()).await;
+    let res = schema
+        .execute_with_resolver(query_unique, resolver.clone())
+        .await;
     let json: JsonValue = serde_json::from_str(&res).unwrap();
     let users = json["data"]["queryUser"].as_array().unwrap();
     assert_eq!(users.len(), 1);
@@ -91,7 +111,9 @@ async fn test_resolver_optimization() {
             }
         }
     "#;
-    let res = schema.execute_with_resolver(query_search, resolver.clone()).await;
+    let res = schema
+        .execute_with_resolver(query_search, resolver.clone())
+        .await;
     let json: JsonValue = serde_json::from_str(&res).unwrap();
     let users = json["data"]["queryUser"].as_array().unwrap();
     assert_eq!(users.len(), 1);
@@ -107,7 +129,9 @@ async fn test_resolver_optimization() {
             }
         }
     "#;
-    let res = schema.execute_with_resolver(query_combined, resolver.clone()).await;
+    let res = schema
+        .execute_with_resolver(query_combined, resolver.clone())
+        .await;
     let json: JsonValue = serde_json::from_str(&res).unwrap();
     let users = json["data"]["queryUser"].as_array().unwrap();
     assert_eq!(users.len(), 1);
@@ -121,7 +145,9 @@ async fn test_resolver_optimization() {
             }
         }
     "#;
-    let res = schema.execute_with_resolver(query_combined_2, resolver.clone()).await;
+    let res = schema
+        .execute_with_resolver(query_combined_2, resolver.clone())
+        .await;
     let json: JsonValue = serde_json::from_str(&res).unwrap();
     let users = json["data"]["queryUser"].as_array().unwrap();
     assert_eq!(users.len(), 1);

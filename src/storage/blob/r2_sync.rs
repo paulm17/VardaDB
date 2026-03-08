@@ -1,8 +1,8 @@
 // src/storage/blob/r2_sync.rs
+use crate::{config::VardaConfig, ServerState};
+use opendal::{services::S3, Operator};
 use std::sync::Arc;
 use tokio::time::{sleep, Duration};
-use opendal::{services::S3, Operator};
-use crate::{config::VardaConfig, ServerState};
 
 pub struct R2SyncWorker {
     config: VardaConfig,
@@ -53,23 +53,26 @@ impl R2SyncWorker {
         if self.operator.is_none() {
             return;
         }
-        
+
         // This worker loops indefinitely looking for UploadQueueEntry rows with status = 'PENDING'
         loop {
             // Wait first, to not immediately spin on startup
             sleep(Duration::from_secs(60)).await;
 
-            let resolver = crate::bridge::sqlite_resolver::SqliteResolver::with_bus(self.state.storage.clone(), self.state.event_bus.clone());
-            
-            use async_graphql::{Value, Name};
-            use std::collections::HashMap;
-            use indexmap::IndexMap;
+            let resolver = crate::bridge::sqlite_resolver::SqliteResolver::with_bus(
+                self.state.storage.clone(),
+                self.state.event_bus.clone(),
+            );
+
             use crate::engine::resolver::Resolver;
+            use async_graphql::{Name, Value};
+            use indexmap::IndexMap;
+            use std::collections::HashMap;
             use std::path::PathBuf;
 
             let mut eq_map = IndexMap::new();
             eq_map.insert(Name::new("eq"), Value::String("PENDING".to_string()));
-            
+
             let mut filter = HashMap::new();
             filter.insert("status".to_string(), Value::Object(eq_map));
 
@@ -80,7 +83,7 @@ impl R2SyncWorker {
                 Some(100),
                 None,
                 &["id".to_string(), "tusId".to_string()],
-                None
+                None,
             );
 
             if !uids.is_empty() {
@@ -106,22 +109,32 @@ impl R2SyncWorker {
                     _ => continue,
                 };
 
-                if content_hash.len() < 2 { continue; }
+                if content_hash.len() < 2 {
+                    continue;
+                }
 
-                let blobs_path = self.config.server.blobs_path.clone().unwrap_or_else(|| "varda_blobs".to_string());
+                let blobs_path = self
+                    .config
+                    .server
+                    .blobs_path
+                    .clone()
+                    .unwrap_or_else(|| "varda_blobs".to_string());
                 let prefix = &content_hash[0..2];
                 let file_path = PathBuf::from(&blobs_path).join(prefix).join(&content_hash);
 
                 if let Ok(bytes) = tokio::fs::read(&file_path).await {
                     let remote_path = format!("{}/{}", prefix, content_hash);
-                    
+
                     if let Some(op) = &self.operator {
                         match op.write(&remote_path, bytes).await {
                             Ok(_) => {
                                 // Update Status to COMPLETED
                                 let mut update_fields = HashMap::new();
-                                update_fields.insert("status".to_string(), Value::String("COMPLETED".to_string()));
-                                
+                                update_fields.insert(
+                                    "status".to_string(),
+                                    Value::String("COMPLETED".to_string()),
+                                );
+
                                 let _ = resolver.update_node(
                                     "UploadQueueEntry",
                                     uid,
@@ -129,7 +142,7 @@ impl R2SyncWorker {
                                     &["id".to_string(), "tusId".to_string()],
                                     &[],
                                     &HashMap::new(),
-                                    None
+                                    None,
                                 );
                                 tracing::info!("Backed up {} to R2", content_hash);
                             }

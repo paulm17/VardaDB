@@ -188,7 +188,6 @@ pub fn format_help_text(iface: Interface) -> String {
     lines.join("\n")
 }
 
-
 // pub fn telegram_bot_commands() -> Vec<teloxide::types::BotCommand> {
 //     use teloxide::types::BotCommand;
 //     COMMANDS

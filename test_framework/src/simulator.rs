@@ -8,24 +8,37 @@
 //! - Invariant checking at every step
 //! - Bug storage and replay
 
-use std::time::Instant;
-use std::collections::BinaryHeap;
-use std::cmp::Ordering;
+use async_graphql::Value;
 use rand::prelude::*;
 use rand_chacha::ChaCha8Rng;
-use async_graphql::Value;
+use std::cmp::Ordering;
+use std::collections::BinaryHeap;
+use std::time::Instant;
 
-use crate::harness::TestHarness;
 use crate::faults::FaultInjector;
-use crate::{TestRunner, TestResult};
+use crate::harness::TestHarness;
+use crate::{TestResult, TestRunner};
 
 /// Simulation event
 #[derive(Debug, Clone)]
 pub enum SimEvent {
-    Insert { type_name: String, fields: Vec<(String, String)> },
-    Update { type_name: String, id: String, field: String, value: String },
-    Delete { type_name: String, id: String },
-    Query { type_name: String },
+    Insert {
+        type_name: String,
+        fields: Vec<(String, String)>,
+    },
+    Update {
+        type_name: String,
+        id: String,
+        field: String,
+        value: String,
+    },
+    Delete {
+        type_name: String,
+        id: String,
+    },
+    Query {
+        type_name: String,
+    },
     CheckInvariant,
 }
 
@@ -88,7 +101,7 @@ impl Simulator {
     /// Run the simulation for a given number of interactions
     pub async fn run(&mut self, harness: &TestHarness, interactions: usize) -> SimulationResult {
         let mut stats = SimulationStats::default();
-        
+
         // Generate initial interaction plan
         self.generate_plan(interactions);
 
@@ -109,9 +122,16 @@ impl Simulator {
                         self.created_ids.push((type_name.clone(), id));
                     }
                 }
-                SimEvent::Update { type_name, id, field, value } => {
+                SimEvent::Update {
+                    type_name,
+                    id,
+                    field,
+                    value,
+                } => {
                     stats.updates += 1;
-                    let _ = self.execute_update(harness, type_name, id, field, value).await;
+                    let _ = self
+                        .execute_update(harness, type_name, id, field, value)
+                        .await;
                 }
                 SimEvent::Delete { type_name, id } => {
                     stats.deletes += 1;
@@ -154,14 +174,17 @@ impl Simulator {
     /// Generate a random event
     fn random_event(&mut self) -> SimEvent {
         let event_type = self.rng.gen_range(0..10);
-        
+
         match event_type {
             0..=4 => {
                 // Insert (50%)
                 SimEvent::Insert {
                     type_name: "Item".to_string(),
                     fields: vec![
-                        ("name".to_string(), format!("\"Item{}\"", self.rng.gen::<u32>())),
+                        (
+                            "name".to_string(),
+                            format!("\"Item{}\"", self.rng.gen::<u32>()),
+                        ),
                         ("value".to_string(), self.rng.gen_range(1..1000).to_string()),
                     ],
                 }
@@ -180,7 +203,10 @@ impl Simulator {
                     SimEvent::Insert {
                         type_name: "Item".to_string(),
                         fields: vec![
-                            ("name".to_string(), format!("\"Item{}\"", self.rng.gen::<u32>())),
+                            (
+                                "name".to_string(),
+                                format!("\"Item{}\"", self.rng.gen::<u32>()),
+                            ),
                             ("value".to_string(), self.rng.gen_range(1..1000).to_string()),
                         ],
                     }
@@ -191,18 +217,28 @@ impl Simulator {
                 if let Some((type_name, id)) = self.created_ids.choose(&mut self.rng).cloned() {
                     SimEvent::Delete { type_name, id }
                 } else {
-                    SimEvent::Query { type_name: "Item".to_string() }
+                    SimEvent::Query {
+                        type_name: "Item".to_string(),
+                    }
                 }
             }
             _ => {
                 // Query (20%)
-                SimEvent::Query { type_name: "Item".to_string() }
+                SimEvent::Query {
+                    type_name: "Item".to_string(),
+                }
             }
         }
     }
 
-    async fn execute_insert(&self, harness: &TestHarness, type_name: &str, fields: &[(String, String)]) -> Result<String, String> {
-        let field_str = fields.iter()
+    async fn execute_insert(
+        &self,
+        harness: &TestHarness,
+        type_name: &str,
+        fields: &[(String, String)],
+    ) -> Result<String, String> {
+        let field_str = fields
+            .iter()
             .map(|(k, v)| format!("{}: {}", k, v))
             .collect::<Vec<_>>()
             .join(", ");
@@ -213,10 +249,11 @@ impl Simulator {
         );
 
         let response = harness.execute_ok(&mutation).await?;
-        
+
         let create_key = format!("create{}", type_name);
         if let Value::Object(obj) = &response {
-            if let Some(Value::Object(create_obj)) = obj.get(&async_graphql::Name::new(&create_key)) {
+            if let Some(Value::Object(create_obj)) = obj.get(&async_graphql::Name::new(&create_key))
+            {
                 if let Some(Value::String(uid)) = create_obj.get(&async_graphql::Name::new("uid")) {
                     return Ok(uid.clone());
                 }
@@ -226,7 +263,14 @@ impl Simulator {
         Err("Failed to get UID".to_string())
     }
 
-    async fn execute_update(&self, harness: &TestHarness, type_name: &str, uid: &str, field: &str, value: &str) -> Result<(), String> {
+    async fn execute_update(
+        &self,
+        harness: &TestHarness,
+        type_name: &str,
+        uid: &str,
+        field: &str,
+        value: &str,
+    ) -> Result<(), String> {
         let mutation = format!(
             r#"mutation {{ update{}(uid: "{}", input: {{ {}: {} }}) }}"#,
             type_name, uid, field, value
@@ -236,21 +280,20 @@ impl Simulator {
         Ok(())
     }
 
-    async fn execute_delete(&self, harness: &TestHarness, type_name: &str, uid: &str) -> Result<(), String> {
-        let mutation = format!(
-            r#"mutation {{ delete{}(uid: "{}") }}"#,
-            type_name, uid
-        );
+    async fn execute_delete(
+        &self,
+        harness: &TestHarness,
+        type_name: &str,
+        uid: &str,
+    ) -> Result<(), String> {
+        let mutation = format!(r#"mutation {{ delete{}(uid: "{}") }}"#, type_name, uid);
 
         harness.execute_ok(&mutation).await?;
         Ok(())
     }
 
     async fn execute_query(&self, harness: &TestHarness, type_name: &str) -> Result<(), String> {
-        let query = format!(
-            r#"query {{ query{} {{ uid }} }}"#,
-            type_name
-        );
+        let query = format!(r#"query {{ query{} {{ uid }} }}"#, type_name);
 
         harness.execute_ok(&query).await?;
         Ok(())
@@ -259,14 +302,11 @@ impl Simulator {
     async fn check_invariants(&self, harness: &TestHarness) -> Result<(), String> {
         // Invariant 1: All created items should be queryable
         for (type_name, uid) in &self.created_ids {
-            let query = format!(
-                r#"query {{ get{}(uid: "{}") {{ uid }} }}"#,
-                type_name, uid
-            );
+            let query = format!(r#"query {{ get{}(uid: "{}") {{ uid }} }}"#, type_name, uid);
 
             let response = harness.execute_ok(&query).await?;
             let get_key = format!("get{}", type_name);
-            
+
             if let Value::Object(obj) = &response {
                 if let Some(Value::Null) = obj.get(&async_graphql::Name::new(&get_key)) {
                     return Err(format!("Created item {}:{} not found", type_name, uid));
@@ -315,13 +355,14 @@ pub async fn run_simulation(runner: &mut TestRunner, seed: u64, interactions: us
         let mut simulator = Simulator::new(seed);
         let result = simulator.run(&harness, interactions).await;
         Ok::<_, String>(result)
-    }.await;
+    }
+    .await;
 
     match result {
         Ok(sim_result) => {
             let stats = &sim_result.stats;
             let violations = stats.invariant_violations.len();
-            
+
             if violations == 0 {
                 runner.add_result(TestResult::pass(
                     &format!(
@@ -336,7 +377,10 @@ pub async fn run_simulation(runner: &mut TestRunner, seed: u64, interactions: us
                     &format!("Simulation ({} interactions)", interactions),
                     "simulation",
                     start.elapsed(),
-                    &format!("{} invariant violations: {:?}", violations, stats.invariant_violations),
+                    &format!(
+                        "{} invariant violations: {:?}",
+                        violations, stats.invariant_violations
+                    ),
                 ));
             }
         }

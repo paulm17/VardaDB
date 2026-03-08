@@ -1,7 +1,7 @@
 use byteorder::ByteOrder;
-use rusqlite::{Connection, params};
-use rusqlite::OptionalExtension;
 use rusqlite::ffi::sqlite3_auto_extension;
+use rusqlite::OptionalExtension;
+use rusqlite::{params, Connection};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -21,22 +21,21 @@ impl SqliteBackend {
     /// Runs performance PRAGMAs on the connection.
     pub fn new(path: impl AsRef<Path>) -> anyhow::Result<Self> {
         let db_path = path.as_ref().join("varda.db");
-        
+
         // Ensure parent directory exists
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        
-        
+
         unsafe {
             // Register sqlite-vec extension
             sqlite3_auto_extension(Some(std::mem::transmute(
-                sqlite_vec::sqlite3_vec_init as *const ()
+                sqlite_vec::sqlite3_vec_init as *const (),
             )));
         }
         let writer = Connection::open(&db_path)?;
         Self::apply_pragmas(&writer)?;
-        
+
         Ok(Self {
             writer: Mutex::new(writer),
             reader_pool: Mutex::new(Vec::new()),
@@ -52,7 +51,7 @@ impl SqliteBackend {
              PRAGMA mmap_size = 30000000000;
              PRAGMA cache_size = -2000;
              PRAGMA temp_store = MEMORY;
-             PRAGMA busy_timeout = 5000;"
+             PRAGMA busy_timeout = 5000;",
         )?;
         Ok(())
     }
@@ -99,7 +98,9 @@ impl SqliteBackend {
     /// List all table names from sqlite_master.
     pub fn list_tables(&self) -> Vec<String> {
         let conn = self.writer.lock().unwrap();
-        let mut stmt = conn.prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").unwrap();
+        let mut stmt = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
+            .unwrap();
         let rows = stmt.query_map([], |row| row.get::<_, String>(0)).unwrap();
         rows.filter_map(|r| r.ok()).collect()
     }
@@ -132,7 +133,8 @@ impl SqliteBackend {
     /// Execute a write operation with the writer connection.
     /// The closure receives a reference to the locked writer connection.
     pub fn with_writer<F, R>(&self, f: F) -> anyhow::Result<R>
-    where F: FnOnce(&Connection) -> anyhow::Result<R>
+    where
+        F: FnOnce(&Connection) -> anyhow::Result<R>,
     {
         let conn = self.writer.lock().unwrap();
         f(&conn)
@@ -140,7 +142,8 @@ impl SqliteBackend {
 
     /// Execute a batch of writes in a single transaction.
     pub fn write_batch<F>(&self, f: F) -> anyhow::Result<()>
-    where F: FnOnce(&Connection) -> anyhow::Result<()>
+    where
+        F: FnOnce(&Connection) -> anyhow::Result<()>,
     {
         let conn = self.writer.lock().unwrap();
         conn.execute_batch("BEGIN")?;
@@ -192,28 +195,40 @@ pub struct SqliteTable {
 
 impl SqliteTable {
     pub fn new(name: String, backend: Arc<SqliteBackend>) -> Self {
-    let insert_sql = format!(
+        let insert_sql = format!(
         "INSERT INTO \"{}\" (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         name
     );
-    let upsert_lww_sql = String::new(); // History tables don't use upsert_lww
-    Self { name, backend, has_ts: false, insert_sql, upsert_lww_sql }
-}
+        let upsert_lww_sql = String::new(); // History tables don't use upsert_lww
+        Self {
+            name,
+            backend,
+            has_ts: false,
+            insert_sql,
+            upsert_lww_sql,
+        }
+    }
 
-/// Create a handle for a main table (has a `ts` column).
-pub fn new_main(name: String, backend: Arc<SqliteBackend>) -> Self {
-    let insert_sql = format!(
+    /// Create a handle for a main table (has a `ts` column).
+    pub fn new_main(name: String, backend: Arc<SqliteBackend>) -> Self {
+        let insert_sql = format!(
         "INSERT INTO \"{}\" (key, value, ts) VALUES (?1, ?2, ?3) ON CONFLICT(key) DO UPDATE SET value = excluded.value, ts = excluded.ts",
         name
     );
-    let upsert_lww_sql = format!(
-        "INSERT INTO \"{}\" (key, value, ts) VALUES (?1, ?2, ?3) \
+        let upsert_lww_sql = format!(
+            "INSERT INTO \"{}\" (key, value, ts) VALUES (?1, ?2, ?3) \
          ON CONFLICT(key) DO UPDATE SET value = excluded.value, ts = excluded.ts \
          WHERE excluded.ts > \"{}\".ts",
-        name, name
-    );
-    Self { name, backend, has_ts: true, insert_sql, upsert_lww_sql }
-}
+            name, name
+        );
+        Self {
+            name,
+            backend,
+            has_ts: true,
+            insert_sql,
+            upsert_lww_sql,
+        }
+    }
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -223,7 +238,8 @@ pub fn new_main(name: String, backend: Arc<SqliteBackend>) -> Self {
     pub fn get(&self, key: &[u8]) -> anyhow::Result<Option<Vec<u8>>> {
         let conn = self.backend.get_reader()?;
         let sql = format!("SELECT value FROM \"{}\" WHERE key = ?1", self.name);
-        let result = conn.prepare_cached(&sql)?
+        let result = conn
+            .prepare_cached(&sql)?
             .query_row(params![key], |row| row.get::<_, Vec<u8>>(0))
             .optional()?;
         self.backend.return_reader(conn);
@@ -233,7 +249,8 @@ pub fn new_main(name: String, backend: Arc<SqliteBackend>) -> Self {
     pub fn contains_key(&self, key: &[u8]) -> anyhow::Result<bool> {
         let conn = self.backend.get_reader()?;
         let sql = format!("SELECT 1 FROM \"{}\" WHERE key = ?1 LIMIT 1", self.name);
-        let exists = conn.prepare_cached(&sql)?
+        let exists = conn
+            .prepare_cached(&sql)?
             .query_row(params![key], |_| Ok(()))
             .optional()?
             .is_some();
@@ -380,7 +397,8 @@ pub fn new_main(name: String, backend: Arc<SqliteBackend>) -> Self {
     pub fn get_with_ts(&self, key: &[u8]) -> anyhow::Result<Option<(Vec<u8>, Vec<u8>)>> {
         let conn = self.backend.get_reader()?;
         let sql = format!("SELECT value, ts FROM \"{}\" WHERE key = ?1", self.name);
-        let result = conn.prepare_cached(&sql)?
+        let result = conn
+            .prepare_cached(&sql)?
             .query_row(params![key], |row| {
                 Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
             })
@@ -398,7 +416,8 @@ pub fn new_main(name: String, backend: Arc<SqliteBackend>) -> Self {
                  WHERE excluded.ts > \"{}\".ts",
                 self.name, self.name
             );
-            conn.prepare_cached(&sql)?.execute(params![key, value, ts])?;
+            conn.prepare_cached(&sql)?
+                .execute(params![key, value, ts])?;
             Ok(())
         })
     }
@@ -410,16 +429,17 @@ pub fn new_main(name: String, backend: Arc<SqliteBackend>) -> Self {
         self.backend.with_writer(|conn| {
             // Check if existing entry is newer
             let check_sql = format!("SELECT ts FROM \"{}\" WHERE key = ?1", self.name);
-            let existing_ts: Option<Vec<u8>> = conn.prepare_cached(&check_sql)?
+            let existing_ts: Option<Vec<u8>> = conn
+                .prepare_cached(&check_sql)?
                 .query_row(params![key], |row| row.get::<_, Vec<u8>>(0))
                 .optional()?;
-            
+
             if let Some(existing) = existing_ts {
                 if existing.as_slice() >= ts {
                     return Ok(false); // Stale
                 }
             }
-            
+
             let del_sql = format!("DELETE FROM \"{}\" WHERE key = ?1", self.name);
             conn.prepare_cached(&del_sql)?.execute(params![key])?;
             Ok(true)
@@ -428,19 +448,33 @@ pub fn new_main(name: String, backend: Arc<SqliteBackend>) -> Self {
 
     /// Batch insert within a transaction (for put_batch_lww).
     /// The caller must wrap this in a write_batch transaction.
-    pub fn batch_insert_on_conn(&self, conn: &Connection, key: &[u8], value: &[u8]) -> anyhow::Result<()> {
+    pub fn batch_insert_on_conn(
+        &self,
+        conn: &Connection,
+        key: &[u8],
+        value: &[u8],
+    ) -> anyhow::Result<()> {
         if self.has_ts {
             let default_ts = [0u8; 16];
-            conn.prepare_cached(&self.insert_sql)?.execute(params![key, value, &default_ts[..]])?;
+            conn.prepare_cached(&self.insert_sql)?
+                .execute(params![key, value, &default_ts[..]])?;
         } else {
-            conn.prepare_cached(&self.insert_sql)?.execute(params![key, value])?;
+            conn.prepare_cached(&self.insert_sql)?
+                .execute(params![key, value])?;
         }
         Ok(())
     }
 
     /// Batch LWW upsert within a transaction for main tables.
-    pub fn batch_upsert_lww_on_conn(&self, conn: &Connection, key: &[u8], value: &[u8], ts: &[u8]) -> anyhow::Result<()> {
-        conn.prepare_cached(&self.upsert_lww_sql)?.execute(params![key, value, ts])?;
+    pub fn batch_upsert_lww_on_conn(
+        &self,
+        conn: &Connection,
+        key: &[u8],
+        value: &[u8],
+        ts: &[u8],
+    ) -> anyhow::Result<()> {
+        conn.prepare_cached(&self.upsert_lww_sql)?
+            .execute(params![key, value, ts])?;
         Ok(())
     }
 
@@ -509,7 +543,10 @@ pub fn new_main(name: String, backend: Arc<SqliteBackend>) -> Self {
                     }
                 },
             )?;
-            Ok(rows.filter_map(|r| r.ok()).filter(|uid| *uid != 0).collect())
+            Ok(rows
+                .filter_map(|r| r.ok())
+                .filter(|uid| *uid != 0)
+                .collect())
         })();
 
         self.backend.return_reader(conn);
@@ -517,11 +554,7 @@ pub fn new_main(name: String, backend: Arc<SqliteBackend>) -> Self {
     }
 
     /// Filter pushdown for `contains` (string LIKE %target%)
-    pub fn filter_by_field_contains(
-        &self,
-        field_name: &str,
-        substring: &str,
-    ) -> Vec<u64> {
+    pub fn filter_by_field_contains(&self, field_name: &str, substring: &str) -> Vec<u64> {
         let field_bytes = field_name.as_bytes();
         let field_len = field_bytes.len();
         let data_prefix: u8 = 0x01;
@@ -560,7 +593,10 @@ pub fn new_main(name: String, backend: Arc<SqliteBackend>) -> Self {
                     }
                 },
             )?;
-            Ok(rows.filter_map(|r| r.ok()).filter(|uid| *uid != 0).collect())
+            Ok(rows
+                .filter_map(|r| r.ok())
+                .filter(|uid| *uid != 0)
+                .collect())
         })();
 
         self.backend.return_reader(conn);
@@ -573,7 +609,9 @@ pub fn new_main(name: String, backend: Arc<SqliteBackend>) -> Self {
         field_name: &str,
         target_values: &[rusqlite::types::Value],
     ) -> Vec<u64> {
-        if target_values.is_empty() { return vec![]; }
+        if target_values.is_empty() {
+            return vec![];
+        }
         let field_bytes = field_name.as_bytes();
         let field_len = field_bytes.len();
         let data_prefix: u8 = 0x01;
@@ -584,7 +622,9 @@ pub fn new_main(name: String, backend: Arc<SqliteBackend>) -> Self {
             Err(_) => return vec![],
         };
 
-        let placeholders: Vec<String> = target_values.iter().enumerate()
+        let placeholders: Vec<String> = target_values
+            .iter()
+            .enumerate()
             .map(|(i, _)| format!("?{}", i + 4))
             .collect();
 
@@ -608,7 +648,8 @@ pub fn new_main(name: String, backend: Arc<SqliteBackend>) -> Self {
             for tv in target_values {
                 all_params.push(Box::new(tv.clone()));
             }
-            let param_refs: Vec<&dyn rusqlite::types::ToSql> = all_params.iter().map(|p| p.as_ref()).collect();
+            let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+                all_params.iter().map(|p| p.as_ref()).collect();
 
             let rows = stmt.query_map(param_refs.as_slice(), |row| {
                 let uid_bytes: Vec<u8> = row.get(0)?;
@@ -618,7 +659,10 @@ pub fn new_main(name: String, backend: Arc<SqliteBackend>) -> Self {
                     Ok(0)
                 }
             })?;
-            Ok(rows.filter_map(|r| r.ok()).filter(|uid| *uid != 0).collect())
+            Ok(rows
+                .filter_map(|r| r.ok())
+                .filter(|uid| *uid != 0)
+                .collect())
         })();
 
         self.backend.return_reader(conn);
@@ -665,7 +709,6 @@ impl permissions::storage::auth_store::KvStore for SqliteTable {
     }
 }
 
-
 // ─────────────────── Helpers ───────────────────
 
 /// Compute the exclusive upper bound for a prefix scan.
@@ -691,7 +734,10 @@ mod tests {
 
     #[test]
     fn test_prefix_upper_bound() {
-        assert_eq!(compute_prefix_upper_bound(&[0x01, 0x02]), Some(vec![0x01, 0x03]));
+        assert_eq!(
+            compute_prefix_upper_bound(&[0x01, 0x02]),
+            Some(vec![0x01, 0x03])
+        );
         assert_eq!(compute_prefix_upper_bound(&[0x01, 0xFF]), Some(vec![0x02]));
         assert_eq!(compute_prefix_upper_bound(&[0xFF, 0xFF]), None);
         assert_eq!(compute_prefix_upper_bound(&[0x00]), Some(vec![0x01]));
@@ -780,12 +826,14 @@ mod tests {
         backend.create_table("test").unwrap();
         let table = SqliteTable::new("test".to_string(), backend.clone());
 
-        backend.write_batch(|conn| {
-            table.batch_insert_on_conn(conn, b"k1", b"v1")?;
-            table.batch_insert_on_conn(conn, b"k2", b"v2")?;
-            table.batch_insert_on_conn(conn, b"k3", b"v3")?;
-            Ok(())
-        }).unwrap();
+        backend
+            .write_batch(|conn| {
+                table.batch_insert_on_conn(conn, b"k1", b"v1")?;
+                table.batch_insert_on_conn(conn, b"k2", b"v2")?;
+                table.batch_insert_on_conn(conn, b"k3", b"v3")?;
+                Ok(())
+            })
+            .unwrap();
 
         assert_eq!(table.get(b"k1").unwrap(), Some(b"v1".to_vec()));
         assert_eq!(table.get(b"k2").unwrap(), Some(b"v2".to_vec()));
@@ -811,4 +859,3 @@ mod tests {
         assert_eq!(all[2].0, b"c".to_vec());
     }
 }
-

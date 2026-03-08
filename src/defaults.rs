@@ -1,4 +1,3 @@
-
 pub const AGENT_SCHEMA: &str = r#"
 # VardaDB Default Schema
 # Incorporates LocalGPT patterns for Autonomous Agent capabilities

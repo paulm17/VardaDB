@@ -1,11 +1,10 @@
-
 #[tokio::test(flavor = "multi_thread")]
 async fn test_verse_query_structure() {
     use serde_json::Value as JsonValue;
-    use vardadb::engine::schema::Schema;
-    use vardadb::bridge::sqlite_resolver::SqliteResolver;
-    use vardadb::storage::backend::Storage;
     use std::sync::Arc;
+    use vardadb::bridge::sqlite_resolver::SqliteResolver;
+    use vardadb::engine::schema::Schema;
+    use vardadb::storage::backend::Storage;
 
     let tmp_dir = tempfile::tempdir().unwrap();
     let storage = Storage::new(tmp_dir.path(), None).unwrap();
@@ -55,27 +54,47 @@ async fn test_verse_query_structure() {
     // Book
     let q = "mutation { createBook(input: { nameEn: \"Luke\" }) { uid } }";
     let res = schema.execute_with_resolver(q, resolver.clone()).await;
-    let book_id = serde_json::from_str::<JsonValue>(&res).unwrap()["data"]["createBook"]["uid"].as_str().unwrap().to_string();
+    let book_id = serde_json::from_str::<JsonValue>(&res).unwrap()["data"]["createBook"]["uid"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // Translation
     let q = "mutation { createTranslations(input: { code: \"NIV\" }) { uid } }";
     let res = schema.execute_with_resolver(q, resolver.clone()).await;
-    let trans_id = serde_json::from_str::<JsonValue>(&res).unwrap()["data"]["createTranslations"]["uid"].as_str().unwrap().to_string();
+    let trans_id = serde_json::from_str::<JsonValue>(&res).unwrap()["data"]["createTranslations"]
+        ["uid"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // BookTranslation
     let q = format!("mutation {{ createBookTranslation(input: {{ book: {{ uid: \"{}\" }}, translation: {{ uid: \"{}\" }} }}) {{ uid }} }}", book_id, trans_id);
     let res = schema.execute_with_resolver(&q, resolver.clone()).await;
-    let bt_id = serde_json::from_str::<JsonValue>(&res).unwrap()["data"]["createBookTranslation"]["uid"].as_str().unwrap().to_string();
+    let bt_id = serde_json::from_str::<JsonValue>(&res).unwrap()["data"]["createBookTranslation"]
+        ["uid"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // Chapter
     let q = format!("mutation {{ createChapter(input: {{ number: 1, bookTranslation: {{ uid: \"{}\" }} }}) {{ uid }} }}", bt_id);
     let res = schema.execute_with_resolver(&q, resolver.clone()).await;
-    let chap_id = serde_json::from_str::<JsonValue>(&res).unwrap()["data"]["createChapter"]["uid"].as_str().unwrap().to_string();
+    let chap_id = serde_json::from_str::<JsonValue>(&res).unwrap()["data"]["createChapter"]["uid"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // Verse
-    let q = format!("mutation {{ createVerse(input: {{ number: 1, chapter: {{ uid: \"{}\" }} }}) {{ uid }} }}", chap_id);
+    let q = format!(
+        "mutation {{ createVerse(input: {{ number: 1, chapter: {{ uid: \"{}\" }} }}) {{ uid }} }}",
+        chap_id
+    );
     let res = schema.execute_with_resolver(&q, resolver.clone()).await;
-    let verse_id = serde_json::from_str::<JsonValue>(&res).unwrap()["data"]["createVerse"]["uid"].as_str().unwrap().to_string();
+    let verse_id = serde_json::from_str::<JsonValue>(&res).unwrap()["data"]["createVerse"]["uid"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // VerseContent
     let q = format!("mutation {{ createVerseContent(input: {{ text: \"Forasmuch as many have taken in hand...\", verse: {{ uid: \"{}\" }} }}) {{ uid }} }}", verse_id);
@@ -84,7 +103,7 @@ async fn test_verse_query_structure() {
 
     // 2. Test Query: getPassage equivalent?
     // User wants verses for "Luke 1".
-    
+
     // Approach A: Query Book -> Translations -> Chapters -> Verses
     let query_a = "
         query {
@@ -104,7 +123,9 @@ async fn test_verse_query_structure() {
             }
         }
     ";
-    let res = schema.execute_with_resolver(query_a, resolver.clone()).await;
+    let res = schema
+        .execute_with_resolver(query_a, resolver.clone())
+        .await;
     println!("Query A Result: {}", res);
     let json: JsonValue = serde_json::from_str(&res).unwrap();
     let books = json["data"]["queryBook"].as_array().unwrap();
@@ -115,7 +136,10 @@ async fn test_verse_query_structure() {
     assert_eq!(chaps.len(), 1);
     let verses = chaps[0]["verses"].as_array().unwrap();
     assert_eq!(verses.len(), 1);
-    assert_eq!(verses[0]["verseContents"][0]["text"], "Forasmuch as many have taken in hand...");
+    assert_eq!(
+        verses[0]["verseContents"][0]["text"],
+        "Forasmuch as many have taken in hand..."
+    );
 
     // Approach B: Query Verse directly (if implicit filters work, usually they don't for deep nested properties unless specifically supported)
     // VardaDB/AsyncGraphQL might not support `queryVerse(filter: { chapter: { bookTranslation: ... } })` unless `ChapterFilter` has `bookTranslation` field.
@@ -124,14 +148,14 @@ async fn test_verse_query_structure() {
     /*
     let query_b = "
         query {
-            queryVerse(filter: { 
-                chapter: { 
+            queryVerse(filter: {
+                chapter: {
                     number: { eq: 1 },
                     bookTranslation: {
                         book: { nameEn: { eq: \"Luke\" } },
                         translation: { code: { eq: \"NIV\" } }
                     }
-                } 
+                }
             }) {
                 number
                 verseContents { text }

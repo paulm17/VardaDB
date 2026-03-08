@@ -1,10 +1,8 @@
-use axum::{
-    response::IntoResponse, Extension, Json
-};
-use anyhow::Result;
-use reqwest::StatusCode;
 use crate::middleware::JWTAuthMiddleware;
 use crate::models::FilteredUser;
+use anyhow::Result;
+use axum::{response::IntoResponse, Extension, Json};
+use reqwest::StatusCode;
 
 pub async fn get_me_handler(
     Extension(jwtauth): Extension<JWTAuthMiddleware>,

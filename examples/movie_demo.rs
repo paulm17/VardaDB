@@ -24,9 +24,7 @@ enum Commands {
     /// Benchmark Read Performance (Cold vs Cached)
     Benchmark,
     /// Run Fulltext Search on Movie Plots
-    Search {
-        query: String,
-    },
+    Search { query: String },
     /// Run Geo-Spatial Query (Find movies near coordinates)
     Geo {
         #[arg(long)]
@@ -54,7 +52,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn load_data(client: &Client, url: &str, count: usize) -> Result<(), Box<dyn std::error::Error>> {
+async fn load_data(
+    client: &Client,
+    url: &str,
+    count: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
     println!("Loading Movie Schema...");
     let schema = r#"
 type Movie {
@@ -87,28 +89,32 @@ type Review {
 
     // Use Admin API to update Schema
     let admin_url = url.replace("/graphql", "/admin/schema");
-    let res = client.post(&admin_url)
-        .body(schema)
-        .send()
-        .await?;
-    
+    let res = client.post(&admin_url).body(schema).send().await?;
+
     if !res.status().is_success() {
         return Err(format!("Failed to update schema: {}", res.text().await?).into());
     }
     println!("Schema Updated Successfully.");
 
     println!("Generating {} movies...", count);
-    
+
     // Batch create in chunks of 50
     let chunk_size = 50;
     for i in (0..count).step_by(chunk_size) {
         let mut mutations = String::new();
         for j in 0..chunk_size {
-            if i + j >= count { break; }
+            if i + j >= count {
+                break;
+            }
             let idx = i + j;
             let title = format!("Movie {}", idx);
-            let plot = if idx % 2 == 0 { "Alien invasion thriller" } else { "Romantic comedy in Paris" };
-            mutations.push_str(&format!(r#"
+            let plot = if idx % 2 == 0 {
+                "Alien invasion thriller"
+            } else {
+                "Romantic comedy in Paris"
+            };
+            mutations.push_str(&format!(
+                r#"
                 m{}: createMovie(input: {{ 
                     title: "{}", 
                     plot: "{}", 
@@ -121,20 +127,33 @@ type Review {
                         coordinates: {{ latitude: 34.05, longitude: -118.25 }} 
                     }} ]
                 }}) {{ uid }}
-            "#, idx, title, plot, 1990 + (idx % 30), (idx % 10) as f64, idx, idx, idx));
+            "#,
+                idx,
+                title,
+                plot,
+                1990 + (idx % 30),
+                (idx % 10) as f64,
+                idx,
+                idx,
+                idx
+            ));
         }
 
         let query = format!("mutation {{ {} }}", mutations);
-        let res = client.post(url).json(&json!({ "query": query })).send().await?;
+        let res = client
+            .post(url)
+            .json(&json!({ "query": query }))
+            .send()
+            .await?;
         if !res.status().is_success() {
-             eprintln!("Batch failed: {}", res.text().await?);
+            eprintln!("Batch failed: {}", res.text().await?);
         } else {
-             let body: serde_json::Value = res.json().await?;
-             if let Some(errs) = body.get("errors") {
-                 eprintln!("GraphQL Errors: {}", serde_json::to_string_pretty(errs)?);
-             } else {
-                 print!(".");
-             }
+            let body: serde_json::Value = res.json().await?;
+            if let Some(errs) = body.get("errors") {
+                eprintln!("GraphQL Errors: {}", serde_json::to_string_pretty(errs)?);
+            } else {
+                print!(".");
+            }
         }
     }
     println!("\nData Load Complete.");
@@ -143,7 +162,7 @@ type Review {
 
 async fn run_benchmark(client: &Client, url: &str) -> Result<(), Box<dyn std::error::Error>> {
     println!("\n--- Query Caching Benchmark ---");
-    
+
     // 1. Cold Query
     let query = r#"
         query Bench {
@@ -157,14 +176,22 @@ async fn run_benchmark(client: &Client, url: &str) -> Result<(), Box<dyn std::er
     "#;
 
     let start = Instant::now();
-    let res = client.post(url).json(&json!({ "query": query })).send().await?;
+    let res = client
+        .post(url)
+        .json(&json!({ "query": query }))
+        .send()
+        .await?;
     let _json: serde_json::Value = res.json().await?;
     let duration = start.elapsed();
     println!("Cold Query Latency:  {:?}", duration);
 
     // 2. Hot Query
     let start = Instant::now();
-    let res = client.post(url).json(&json!({ "query": query })).send().await?;
+    let res = client
+        .post(url)
+        .json(&json!({ "query": query }))
+        .send()
+        .await?;
     let _json: serde_json::Value = res.json().await?;
     let duration = start.elapsed();
     println!("Cached Query Latency: {:?}", duration);
@@ -178,11 +205,19 @@ async fn run_benchmark(client: &Client, url: &str) -> Result<(), Box<dyn std::er
     // 3. Invalidation Test
     println!("\nPerforming Mutation to invalidate cache...");
     let mutation = r#"mutation { createMovie(input: { title: "Invalidator" }) { uid } }"#;
-    client.post(url).json(&json!({ "query": mutation })).send().await?;
+    client
+        .post(url)
+        .json(&json!({ "query": mutation }))
+        .send()
+        .await?;
 
     println!("Re-running Query (Should be Cold)...");
     let start = Instant::now();
-    let res = client.post(url).json(&json!({ "query": query })).send().await?;
+    let res = client
+        .post(url)
+        .json(&json!({ "query": query }))
+        .send()
+        .await?;
     let _json: serde_json::Value = res.json().await?;
     let duration = start.elapsed();
     println!("New Cold Latency:    {:?}", duration);
@@ -190,24 +225,41 @@ async fn run_benchmark(client: &Client, url: &str) -> Result<(), Box<dyn std::er
     Ok(())
 }
 
-async fn run_search(client: &Client, url: &str, term: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let query = format!(r#"
+async fn run_search(
+    client: &Client,
+    url: &str,
+    term: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let query = format!(
+        r#"
         query {{
             queryMovie(filter: {{ plot: {{ alloftext: "{}" }} }}) {{
                 title
                 plot
             }}
         }}
-    "#, term);
+    "#,
+        term
+    );
 
-    let res = client.post(url).json(&json!({ "query": query })).send().await?;
+    let res = client
+        .post(url)
+        .json(&json!({ "query": query }))
+        .send()
+        .await?;
     let json: serde_json::Value = res.json().await?;
     println!("{}", serde_json::to_string_pretty(&json)?);
     Ok(())
 }
 
-async fn run_geo(client: &Client, url: &str, lat: f64, lon: f64) -> Result<(), Box<dyn std::error::Error>> {
-    let query = format!(r#"
+async fn run_geo(
+    client: &Client,
+    url: &str,
+    lat: f64,
+    lon: f64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let query = format!(
+        r#"
         query {{
             queryLocation(filter: {{ 
                 coordinates: {{ near: {{ coordinate: {{ latitude: {}, longitude: {} }}, distance: 500000.0 }} }} 
@@ -217,9 +269,15 @@ async fn run_geo(client: &Client, url: &str, lat: f64, lon: f64) -> Result<(), B
                 movies {{ title }}
             }}
         }}
-    "#, lat, lon);
-    
-    let res = client.post(url).json(&json!({ "query": query })).send().await?;
+    "#,
+        lat, lon
+    );
+
+    let res = client
+        .post(url)
+        .json(&json!({ "query": query }))
+        .send()
+        .await?;
     let json: serde_json::Value = res.json().await?;
     println!("{}", serde_json::to_string_pretty(&json)?);
     Ok(())
@@ -242,7 +300,11 @@ async fn run_graph(client: &Client, url: &str) -> Result<(), Box<dyn std::error:
             }
         }
     "#;
-    let res = client.post(url).json(&json!({ "query": query })).send().await?;
+    let res = client
+        .post(url)
+        .json(&json!({ "query": query }))
+        .send()
+        .await?;
     let json: serde_json::Value = res.json().await?;
     println!("{}", serde_json::to_string_pretty(&json)?);
     Ok(())

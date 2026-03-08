@@ -1,5 +1,5 @@
 //! VardaDB Test Framework
-//! 
+//!
 //! A comprehensive testing framework for VardaDB covering:
 //! - CRUD operations testing
 //! - Property-based testing (InsertThenSelect, LWWConvergence, etc.)
@@ -23,22 +23,22 @@
 //! cargo run -p varda-test-framework -- --benchmarks
 //! ```
 
-mod harness;
-mod properties;
-mod simulator;
-mod faults;
 mod assertions;
 mod bank_test;
-mod stress_composer;
 mod benchmarks;
-mod multi_node;
-mod sync_tests;
 mod blob_tests;
+mod faults;
+mod harness;
+mod multi_node;
+mod properties;
+mod simulator;
+mod stress_composer;
+mod sync_tests;
 
+use chrono::Local;
 use clap::Parser;
 use colored::*;
 use std::time::Duration;
-use chrono::Local;
 
 #[derive(serde::Deserialize, Debug, Default, Clone)]
 pub struct TestConfig {
@@ -151,7 +151,7 @@ impl TestRunner {
             };
             let duration_str = format!("[{:.1}ms]", result.duration.as_secs_f64() * 1000.0);
             println!("  {} {} {}", status, result.name, duration_str.dimmed());
-            
+
             if let Some(ref msg) = result.message {
                 println!("    {} {}", "→".yellow(), msg);
             }
@@ -189,13 +189,13 @@ impl TestRunner {
         println!("║  Seed:    {:>54} ║", self.seed);
         println!("║  Total:   {:>54} ║", total);
         println!("║  Passed:  {} ║", format!("{:>54}", passed).green());
-        
+
         if failed > 0 {
             println!("║  Failed:  {} ║", format!("{:>54}", failed).red());
         } else {
             println!("║  Failed:  {:>54} ║", failed);
         }
-        
+
         println!("║  Time:    {:>52.2}s ║", duration.as_secs_f64());
         println!("╚{}╝", border);
 
@@ -218,7 +218,7 @@ impl TestRunner {
 fn print_banner(seed: u64) {
     let border = "═".repeat(66);
     let now = Local::now().format("%Y-%m-%d %H:%M:%S");
-    
+
     println!();
     println!("╔{}╗", border);
     println!("║{:^66}║", "VardaDB Test Framework".bold());
@@ -252,7 +252,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Handle replay mode
     if let Some(replay_seed) = cli.replay {
-        println!("{}", format!("▶ Replaying bug with seed {}...", replay_seed).cyan());
+        println!(
+            "{}",
+            format!("▶ Replaying bug with seed {}...", replay_seed).cyan()
+        );
         // TODO: Load interaction plan from bugbase and replay
         println!("  {} Bug replay not yet implemented", "⚠".yellow());
         return Ok(());
@@ -306,10 +309,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if category == "all" || category == "blob" {
         println!("{}", "▶ Running Blob Storage Integration Tests...".cyan());
-        
+
         let config_str = std::fs::read_to_string("config.toml").unwrap_or_else(|_| "".to_string());
         let test_config: TestConfig = toml::from_str(&config_str).unwrap_or_default();
-        
+
         blob_tests::run_blob_tests(&mut runner, test_config, seed).await;
     }
 

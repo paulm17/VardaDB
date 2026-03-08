@@ -1,10 +1,10 @@
-pub mod sqlite_state;
 pub mod dataflow;
+pub mod sqlite_state;
 
 use crate::caching::sqlite_state::SqliteState;
+use crate::storage::backend::Storage;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use crate::storage::backend::Storage;
 
 pub struct CacheManager {
     storage: Arc<Storage>,
@@ -24,7 +24,7 @@ impl CacheManager {
         if let Some(view) = views.get(name) {
             return view.clone();
         }
-        
+
         // In a real system, we would parse the query and set up a dataflow here.
         let view = Arc::new(SqliteState::new(self.storage.clone(), name));
         views.insert(name.to_string(), view.clone());
