@@ -33,6 +33,7 @@ async fn test_deep_mutation() {
             _sort: HashMap<String, Value>,
             _first: Option<usize>,
             _after: Option<String>,
+            _offset: Option<usize>,
             _: &[String],
             _near_vector: Option<Vec<f64>>,
         ) -> Vec<u64> {
@@ -46,6 +47,7 @@ async fn test_deep_mutation() {
             _: HashMap<String, Value>,
             _: Option<usize>,
             _: Option<String>,
+            _: Option<usize>,
             _near_vector: Option<Vec<f64>>,
         ) -> Result<Vec<u64>, String> {
             Ok(vec![])

@@ -49,6 +49,13 @@ pub struct LLMConfig {
     pub num_draft_tokens: usize,
     pub openai_api_key: Option<String>,
     pub llama_server_path: Option<String>,
+    #[serde(default)]
+    pub huggingface: HuggingFaceConfig,
+}
+
+#[derive(Deserialize, Debug, Clone, Default)]
+pub struct HuggingFaceConfig {
+    pub hf_token: Option<String>,
 }
 
 fn default_llm_provider() -> String {
@@ -74,6 +81,7 @@ impl Default for LLMConfig {
             num_draft_tokens: default_draft_tokens(),
             openai_api_key: None,
             llama_server_path: None,
+            huggingface: HuggingFaceConfig::default(),
         }
     }
 }

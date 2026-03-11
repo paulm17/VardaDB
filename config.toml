@@ -18,6 +18,9 @@ prefix = "varda/ops"
 provider = "mlx"
 port = 8080
 
+# [llm.huggingface]
+# hf_token = "hf_..."
+
 # [auth]
 # Base URL for the auth server
 # server_url = "http://localhost:8000" 

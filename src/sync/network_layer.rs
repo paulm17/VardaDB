@@ -1,7 +1,7 @@
 use anyhow::Result;
 use std::sync::Arc;
 use zenoh::{config::Config, Session}; // Removed prelude
-// use tokio::sync::broadcast; // Unused for now
+                                      // use tokio::sync::broadcast; // Unused for now
 use crate::realtime::bus::MutationEvent;
 
 pub struct NetworkLayer {

@@ -122,6 +122,13 @@ fn write_mlx_server_config(config: &LLMConfig, bind: &str) -> Result<PathBuf> {
         ));
     }
 
+    if let Some(hf_token) = &config.huggingface.hf_token {
+        content.push_str(&format!(
+            "\n[huggingface]\nhf_token = \"{}\"\n",
+            hf_token.replace('"', "\\\"")
+        ));
+    }
+
     let path = std::env::temp_dir().join(format!(
         "vardadb-mlx-server-{}-{}.toml",
         std::process::id(),

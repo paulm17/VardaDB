@@ -20,7 +20,6 @@ pub mod realtime;
 pub mod server;
 pub mod storage;
 pub mod sync;
-pub mod vardaclaw_runner;
 pub mod worker;
 
 pub mod observability;
@@ -54,6 +53,7 @@ impl crate::engine::resolver::Resolver for DummyResolver {
         _: std::collections::HashMap<String, async_graphql::Value>,
         _: Option<usize>,
         _: Option<String>,
+        _: Option<usize>,
         _: &[String],
         _: Option<Vec<f64>>,
     ) -> Vec<u64> {
@@ -67,6 +67,7 @@ impl crate::engine::resolver::Resolver for DummyResolver {
         _: std::collections::HashMap<String, async_graphql::Value>,
         _: Option<usize>,
         _: Option<String>,
+        _: Option<usize>,
         _: Option<Vec<f64>>,
     ) -> Result<Vec<u64>, String> {
         Ok(vec![])
@@ -391,13 +392,6 @@ pub async fn init_system(config: crate::config::VardaConfig) -> (Arc<ServerState
             worker.run().await;
         });
     }
-
-    // Start VardaClaw Background Runner
-    let claw_runner =
-        crate::vardaclaw_runner::VardaClawRunner::new(storage.clone(), config.clone());
-    tokio::spawn(async move {
-        claw_runner.run().await;
-    });
 
     // Start TCP Bulk Ingestion Listener on Port 9003
     let bulk_ingest_state = state.clone();

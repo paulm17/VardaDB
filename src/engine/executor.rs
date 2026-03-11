@@ -38,6 +38,7 @@ impl Resolver for DummyResolver {
         _: std::collections::HashMap<String, Value>,
         _: Option<usize>,
         _: Option<String>,
+        _: Option<usize>,
         _: &[String],
         _: Option<Vec<f64>>,
     ) -> Vec<u64> {
@@ -51,6 +52,7 @@ impl Resolver for DummyResolver {
         _: std::collections::HashMap<String, Value>,
         _: Option<usize>,
         _: Option<String>,
+        _: Option<usize>,
         _: Option<Vec<f64>>,
     ) -> Result<Vec<u64>, String> {
         Ok(vec![])

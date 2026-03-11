@@ -1,7 +1,0 @@
-[memory]
-workspace = "${LOCALGPT_WORKSPACE}"
-embedding_provider = "openai"
-embedding_model = "text-embedding-3-small"
-
-[providers.openai]
-api_key = "${OPENAI_API_KEY}"

@@ -571,19 +571,6 @@ impl Schema {
             }
         }
 
-        // Debug: dump all type inverses
-        for (type_name, meta) in &metadata_map {
-            if !meta.inverses.is_empty() {
-                eprintln!("[Schema] Type '{}' inverses:", type_name);
-                for inv in &meta.inverses {
-                    eprintln!(
-                        "  field='{}' → {}.{} (is_list={})",
-                        inv.field, inv.inverse_type, inv.inverse_field, inv.inverse_is_list
-                    );
-                }
-            }
-        }
-
         let metadata_arc = std::sync::Arc::new(metadata_map.clone());
 
         // Pass 2: Generate Schema Artifacts
@@ -778,6 +765,12 @@ impl Schema {
                                                         after = Some(s.to_string());
                                                     }
                                                 }
+                                                let mut offset = None;
+                                                if let Ok(offset_arg) = ctx.args.try_get("offset") {
+                                                    if let Ok(n) = offset_arg.u64() {
+                                                        offset = Some(n as usize);
+                                                    }
+                                                }
 
                                                 let mut near_vector = None;
                                                 if let Ok(nv_arg) = ctx.args.try_get("nearVector") {
@@ -800,6 +793,7 @@ impl Schema {
                                                     sort_map,
                                                     first,
                                                     after,
+                                                    offset,
                                                     near_vector,
                                                 ) {
                                                     Ok(uids) => {
@@ -906,6 +900,10 @@ impl Schema {
                                     ))
                                     .argument(dynamic::InputValue::new(
                                         "first",
+                                        dynamic::TypeRef::named(dynamic::TypeRef::INT),
+                                    ))
+                                    .argument(dynamic::InputValue::new(
+                                        "offset",
                                         dynamic::TypeRef::named(dynamic::TypeRef::INT),
                                     ))
                                     .argument(dynamic::InputValue::new(
@@ -1116,6 +1114,12 @@ impl Schema {
                                             after = Some(s.to_string());
                                         }
                                     }
+                                    let mut offset = None;
+                                    if let Ok(offset_arg) = ctx.args.try_get("offset") {
+                                        if let Ok(n) = offset_arg.u64() {
+                                            offset = Some(n as usize);
+                                        }
+                                    }
 
                                     let mut near_vector = None;
                                     if let Ok(nv_arg) = ctx.args.try_get("nearVector") {
@@ -1134,6 +1138,7 @@ impl Schema {
                                         sort_map,
                                         first,
                                         after,
+                                        offset,
                                         &uniques,
                                         near_vector,
                                     );
@@ -1155,6 +1160,10 @@ impl Schema {
                         ))
                         .argument(dynamic::InputValue::new(
                             "first",
+                            dynamic::TypeRef::named(dynamic::TypeRef::INT),
+                        ))
+                        .argument(dynamic::InputValue::new(
+                            "offset",
                             dynamic::TypeRef::named(dynamic::TypeRef::INT),
                         ))
                         .argument(dynamic::InputValue::new(

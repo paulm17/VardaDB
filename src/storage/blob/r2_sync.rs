@@ -82,6 +82,7 @@ impl R2SyncWorker {
                 HashMap::new(),
                 Some(100),
                 None,
+                None,
                 &["id".to_string(), "tusId".to_string()],
                 None,
             );

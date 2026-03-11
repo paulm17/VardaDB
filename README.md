@@ -208,6 +208,10 @@ By default, the LLM configuration uses:
 ```toml
 [llm]
 provider = "mlx"
+
+# Optional Hugging Face token forwarded to mlx-rs
+# [llm.huggingface]
+# hf_token = "hf_..."
 ```
 
 This makes `MLX-RS` the default path for local model execution when LLM features are enabled.

@@ -1,6 +1,5 @@
 use crate::storage::sqlite_backend::{SqliteBackend, SqliteTable};
 use byteorder::{BigEndian, ByteOrder};
-use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
 use jobs::{JobStore, Queue};
 use permissions::storage::auth_store::AuthStore;
 use std::path::Path;
@@ -56,9 +55,6 @@ pub struct Storage {
 
     // Flag indicating fingerprints are ready for sync
     pub fingerprints_ready: std::sync::Arc<std::sync::atomic::AtomicBool>,
-
-    // Embedding Model (Shared)
-    pub embedding_model: Arc<std::sync::Mutex<TextEmbedding>>,
 }
 
 impl Storage {
@@ -201,19 +197,6 @@ impl Storage {
             )
         });
 
-        // Initialize Embedding Model (BGESmallEN - lightweight, good performance)
-        info!("Storage: Initializing Embedding Model (BGESmallEN) - This may take a while to download...");
-        let embedding_model =
-            match TextEmbedding::try_new(InitOptions::new(EmbeddingModel::BGESmallENV15)) {
-                Ok(model) => model,
-                Err(e) => {
-                    error!("Storage: Failed to load embedding model: {}", e);
-                    return Err(anyhow::anyhow!("Failed to load embedding model: {}", e));
-                }
-            };
-        let embedding_model = Arc::new(std::sync::Mutex::new(embedding_model));
-        info!("Storage: Embedding Model Ready");
-
         let storage = Self {
             backend,
             keyspaces: std::sync::RwLock::new(initial_keyspaces),
@@ -229,7 +212,6 @@ impl Storage {
             vector_tx: tx,
             fingerprints: std::sync::Arc::new(dashmap::DashMap::new()),
             fingerprints_ready: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            embedding_model,
         };
 
         // Restore Fingerprints (Fast load / Fallback to scan)

@@ -55,6 +55,7 @@ async fn test_execution_flow() {
             _sort: std::collections::HashMap<String, async_graphql::Value>,
             _lim: Option<usize>,
             _cur: Option<String>,
+            _offset: Option<usize>,
             _: &[String],
             _near_vector: Option<Vec<f64>>,
         ) -> Vec<u64> {
@@ -68,6 +69,7 @@ async fn test_execution_flow() {
             _: std::collections::HashMap<String, async_graphql::Value>,
             _: Option<usize>,
             _: Option<String>,
+            _: Option<usize>,
             _near_vector: Option<Vec<f64>>,
         ) -> Result<Vec<u64>, String> {
             Ok(vec![])

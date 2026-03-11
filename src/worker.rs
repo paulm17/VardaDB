@@ -94,7 +94,8 @@ impl Worker {
         filter.insert("active".to_string(), Value::Boolean(true));
 
         // Scan for Agents
-        let agents = resolver.scan_nodes("Agent", filter, HashMap::new(), None, None, &[], None);
+        let agents =
+            resolver.scan_nodes("Agent", filter, HashMap::new(), None, None, None, &[], None);
 
         if agents.is_empty() {
             return;

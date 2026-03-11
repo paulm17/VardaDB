@@ -32,6 +32,7 @@ pub trait Resolver {
         sort: std::collections::HashMap<String, Value>,
         first: Option<usize>,
         after: Option<String>,
+        offset: Option<usize>,
         uniques: &[String],
         near_vector: Option<Vec<f64>>,
     ) -> Vec<u64>;
@@ -45,6 +46,7 @@ pub trait Resolver {
         sort: std::collections::HashMap<String, Value>,
         first: Option<usize>,
         after: Option<String>,
+        offset: Option<usize>,
         near_vector: Option<Vec<f64>>,
     ) -> Result<Vec<u64>, String>;
 

@@ -1448,26 +1448,26 @@ impl SqliteResolver {
         timestamp_override: Option<crate::storage::timestamp::Timestamp>,
     ) -> Result<(), String> {
         let fn_start = std::time::Instant::now();
-        // Debug: trace inverse edge creation
-        if !inverses.is_empty() {
-            eprintln!(
-                "[create_node_internal] type={} uid={} inverses={}",
-                type_name,
-                uid,
-                inverses.len()
-            );
-            for info in inverses {
-                let field_val = fields.get(&info.field);
-                eprintln!(
-                    "  inverse field='{}' val={:?} → {}.{} is_list={}",
-                    info.field,
-                    field_val,
-                    info.inverse_type,
-                    info.inverse_field,
-                    info.inverse_is_list
-                );
-            }
-        }
+        // // Debug: trace inverse edge creation
+        // if !inverses.is_empty() {
+        //     eprintln!(
+        //         "[create_node_internal] type={} uid={} inverses={}",
+        //         type_name,
+        //         uid,
+        //         inverses.len()
+        //     );
+        //     for info in inverses {
+        //         let field_val = fields.get(&info.field);
+        //         eprintln!(
+        //             "  inverse field='{}' val={:?} → {}.{} is_list={}",
+        //             info.field,
+        //             field_val,
+        //             info.inverse_type,
+        //             info.inverse_field,
+        //             info.inverse_is_list
+        //         );
+        //     }
+        // }
         // Normalize fields: If value is Object with uid/id, flatten to String(uid)
         for (_, value) in fields.iter_mut() {
             if let serde_json::Value::Object(map) = value {
@@ -2497,6 +2497,7 @@ impl Resolver for SqliteResolver {
         sort: std::collections::HashMap<String, Value>,
         first: Option<usize>,
         after: Option<String>,
+        offset: Option<usize>,
         near_vector: Option<Vec<f64>>,
     ) -> Result<Vec<u64>, String> {
         // 1. Resolve the List Field from Storage
@@ -2735,6 +2736,12 @@ impl Resolver for SqliteResolver {
             }
         }
 
+        if let Some(skip_count) = offset {
+            if skip_count > 0 {
+                uids = uids.into_iter().skip(skip_count).collect();
+            }
+        }
+
         if let Some(limit) = first {
             uids.truncate(limit);
         }
@@ -2813,7 +2820,7 @@ impl Resolver for SqliteResolver {
     fn create_node(
         &self,
         type_name: &str,
-        mut fields: std::collections::HashMap<String, Value>,
+        fields: std::collections::HashMap<String, Value>,
         uniques: &[String],
         inverses: &[crate::engine::resolver::InverseInfo],
         search_fields: &std::collections::HashMap<String, Vec<String>>,
@@ -2826,44 +2833,9 @@ impl Resolver for SqliteResolver {
             .expect("Time went backwards");
         let uid = since_the_epoch.as_nanos() as u64;
 
-        // Automatic Embedding Generation
+        // Automatic embedding generation was removed with the local model backend.
         if let Some(config) = vector_config {
-            if !fields.contains_key(&config.field) {
-                if let Some(Value::String(text)) = fields.get(&config.source) {
-                    // Start Timer
-                    let _embed_start = std::time::Instant::now();
-                    match self
-                        .storage
-                        .embedding_model
-                        .lock()
-                        .unwrap()
-                        .embed(vec![text.clone()], None)
-                    {
-                        Ok(embeddings) => {
-                            if let Some(first) = embeddings.first() {
-                                let json_values: Vec<Value> = first
-                                    .iter()
-                                    .map(|f| {
-                                        Value::Number(
-                                            async_graphql::Number::from_f64((*f).into())
-                                                .unwrap_or(async_graphql::Number::from(0)),
-                                        )
-                                    })
-                                    .collect();
-                                fields.insert(config.field.clone(), Value::List(json_values));
-                                // println!("Auto-Embedded field {} from {} in {:.2}ms", config.field, config.source, embed_start.elapsed().as_secs_f64() * 1000.0);
-                            }
-                        }
-                        Err(e) => {
-                            eprintln!("Failed to generate embedding: {}", e);
-                            // We continue without embedding? Or fail?
-                            // For now continue, maybe user wants to retry later.
-                        }
-                    }
-                }
-            }
-
-            // HNSW Indexing (Manual OR Auto)
+            // HNSW Indexing (manual vectors only)
             if let Some(val) = fields.get(&config.field) {
                 if let Value::List(list) = val {
                     let vec_data: Vec<f64> = list
@@ -2878,6 +2850,30 @@ impl Resolver for SqliteResolver {
                         tokio::task::spawn_blocking(move || {
                             if let Err(e) = storage.put_vector(uid, vec_data) {
                                 eprintln!("Background Vector Insert Error (UID {}): {}", uid, e);
+                            }
+                        });
+                    }
+                }
+            }
+        }
+
+        // Automatic embedding generation was removed with the local model backend.
+        if let Some(config) = vector_config {
+            // HNSW Update (manual vectors only)
+            if let Some(val) = fields.get(&config.field) {
+                if let Value::List(list) = val {
+                    let vec_data: Vec<f64> = list
+                        .iter()
+                        .filter_map(|v| match v {
+                            Value::Number(n) => n.as_f64(),
+                            _ => None,
+                        })
+                        .collect();
+                    if !vec_data.is_empty() {
+                        let storage = self.storage.clone();
+                        tokio::task::spawn_blocking(move || {
+                            if let Err(e) = storage.put_vector(uid, vec_data) {
+                                eprintln!("Background Vector Update Error (UID {}): {}", uid, e);
                             }
                         });
                     }
@@ -2924,6 +2920,7 @@ impl Resolver for SqliteResolver {
         sort: std::collections::HashMap<String, Value>,
         first: Option<usize>,
         after: Option<String>,
+        offset: Option<usize>,
         uniques: &[String],
         near_vector: Option<Vec<f64>>,
     ) -> Vec<u64> {
@@ -3165,6 +3162,12 @@ impl Resolver for SqliteResolver {
             }
         }
 
+        if let Some(skip_count) = offset {
+            if skip_count > 0 {
+                uids = uids.into_iter().skip(skip_count).collect();
+            }
+        }
+
         if let Some(limit) = first {
             uids.truncate(limit);
         }
@@ -3176,7 +3179,7 @@ impl Resolver for SqliteResolver {
         &self,
         type_name: &str,
         uid: u64,
-        mut fields: std::collections::HashMap<String, Value>,
+        fields: std::collections::HashMap<String, Value>,
         uniques: &[String],
         inverses: &[crate::engine::resolver::InverseInfo],
         search_fields: &std::collections::HashMap<String, Vec<String>>,
@@ -3184,37 +3187,8 @@ impl Resolver for SqliteResolver {
     ) -> Result<(), String> {
         let op_start = std::time::Instant::now();
 
-        // Automatic Embedding Generation (on Update)
+        // Automatic embedding generation was removed with the local model backend.
         if let Some(config) = vector_config {
-            // If source field is being updated, and embedding is NOT manually provided, regenerate it.
-            if fields.contains_key(&config.source) && !fields.contains_key(&config.field) {
-                if let Some(Value::String(text)) = fields.get(&config.source) {
-                    match self
-                        .storage
-                        .embedding_model
-                        .lock()
-                        .unwrap()
-                        .embed(vec![text.clone()], None)
-                    {
-                        Ok(embeddings) => {
-                            if let Some(first) = embeddings.first() {
-                                let json_values: Vec<Value> = first
-                                    .iter()
-                                    .map(|f| {
-                                        Value::Number(
-                                            async_graphql::Number::from_f64((*f).into())
-                                                .unwrap_or(async_graphql::Number::from(0)),
-                                        )
-                                    })
-                                    .collect();
-                                fields.insert(config.field.clone(), Value::List(json_values));
-                            }
-                        }
-                        Err(e) => eprintln!("Failed to generate embedding (update): {}", e),
-                    }
-                }
-            }
-
             // HNSW Update
             if let Some(val) = fields.get(&config.field) {
                 if let Value::List(list) = val {

@@ -69,7 +69,7 @@ impl SqliteBackend {
     /// Create Full-Text Search and Vector tables for native search
     pub fn create_native_search_tables(&self) -> anyhow::Result<()> {
         let conn = self.writer.lock().unwrap();
-        // BGESmallENV15 outputs 384-dimensional embeddings
+        // Native vector storage currently uses a fixed 384-dimensional schema.
         conn.execute_batch(
             "CREATE VIRTUAL TABLE IF NOT EXISTS fts_data USING fts5(uid UNINDEXED, field UNINDEXED, text_content, tokenize='porter unicode61');
              CREATE VIRTUAL TABLE IF NOT EXISTS fts_term_data USING fts5(uid UNINDEXED, field UNINDEXED, text_content, tokenize='unicode61');
