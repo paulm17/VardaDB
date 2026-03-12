@@ -49,7 +49,7 @@ impl SqliteBackend {
             "PRAGMA journal_mode = WAL;
              PRAGMA synchronous = NORMAL;
              PRAGMA mmap_size = 30000000000;
-             PRAGMA cache_size = -2000;
+             PRAGMA cache_size = -65536;
              PRAGMA temp_store = MEMORY;
              PRAGMA busy_timeout = 5000;",
         )?;
@@ -146,17 +146,10 @@ impl SqliteBackend {
         F: FnOnce(&Connection) -> anyhow::Result<()>,
     {
         let conn = self.writer.lock().unwrap();
-        conn.execute_batch("BEGIN")?;
-        match f(&conn) {
-            Ok(()) => {
-                conn.execute_batch("COMMIT")?;
-                Ok(())
-            }
-            Err(e) => {
-                let _ = conn.execute_batch("ROLLBACK");
-                Err(e)
-            }
-        }
+        let tx = conn.unchecked_transaction()?;
+        f(&tx)?;
+        tx.commit()?;
+        Ok(())
     }
 
     /// Checkpoint the WAL file and merge it into the main database.
@@ -239,23 +232,23 @@ impl SqliteTable {
         let conn = self.backend.get_reader()?;
         let sql = format!("SELECT value FROM \"{}\" WHERE key = ?1", self.name);
         let result = conn
-            .prepare_cached(&sql)?
-            .query_row(params![key], |row| row.get::<_, Vec<u8>>(0))
-            .optional()?;
+            .prepare_cached(&sql)
+            .and_then(|mut stmt| {
+                stmt.query_row(params![key], |row| row.get::<_, Vec<u8>>(0))
+                    .optional()
+            });
         self.backend.return_reader(conn);
-        Ok(result)
+        Ok(result?)
     }
 
     pub fn contains_key(&self, key: &[u8]) -> anyhow::Result<bool> {
         let conn = self.backend.get_reader()?;
         let sql = format!("SELECT 1 FROM \"{}\" WHERE key = ?1 LIMIT 1", self.name);
         let exists = conn
-            .prepare_cached(&sql)?
-            .query_row(params![key], |_| Ok(()))
-            .optional()?
-            .is_some();
+            .prepare_cached(&sql)
+            .and_then(|mut stmt| stmt.query_row(params![key], |_| Ok(())).optional());
         self.backend.return_reader(conn);
-        Ok(exists)
+        Ok(exists?.is_some())
     }
 
     /// Prefix scan: returns all (key, value) pairs where key starts with `prefix`.
@@ -366,17 +359,14 @@ impl SqliteTable {
         self.backend.with_writer(|conn| {
             if self.has_ts {
                 let default_ts = [0u8; 16];
-                let sql = format!(
-                    "INSERT INTO \"{}\" (key, value, ts) VALUES (?1, ?2, ?3) ON CONFLICT(key) DO UPDATE SET value = excluded.value, ts = excluded.ts",
-                    self.name
-                );
-                conn.prepare_cached(&sql)?.execute(params![key.as_ref(), value.as_ref(), &default_ts[..]])?;
+                conn.prepare_cached(&self.insert_sql)?.execute(params![
+                    key.as_ref(),
+                    value.as_ref(),
+                    &default_ts[..]
+                ])?;
             } else {
-                let sql = format!(
-                    "INSERT INTO \"{}\" (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                    self.name
-                );
-                conn.prepare_cached(&sql)?.execute(params![key.as_ref(), value.as_ref()])?;
+                conn.prepare_cached(&self.insert_sql)?
+                    .execute(params![key.as_ref(), value.as_ref()])?;
             }
             Ok(())
         })
@@ -397,14 +387,14 @@ impl SqliteTable {
     pub fn get_with_ts(&self, key: &[u8]) -> anyhow::Result<Option<(Vec<u8>, Vec<u8>)>> {
         let conn = self.backend.get_reader()?;
         let sql = format!("SELECT value, ts FROM \"{}\" WHERE key = ?1", self.name);
-        let result = conn
-            .prepare_cached(&sql)?
-            .query_row(params![key], |row| {
+        let result = conn.prepare_cached(&sql).and_then(|mut stmt| {
+            stmt.query_row(params![key], |row| {
                 Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
             })
-            .optional()?;
+            .optional()
+        });
         self.backend.return_reader(conn);
-        Ok(result)
+        Ok(result?)
     }
 
     /// Atomic LWW upsert: only writes if the new timestamp is greater than the existing one.
@@ -673,7 +663,7 @@ impl SqliteTable {
 // ─────────────────── KvStore Trait Implementations ───────────────────
 // Bridge SqliteTable into the sub-crate abstract KvStore traits.
 
-impl jobs::KvStore for SqliteTable {
+impl auth::state::KvStore for SqliteTable {
     fn kv_insert(&self, key: &[u8], value: &[u8]) -> Result<(), String> {
         self.insert(key, value).map_err(|e| e.to_string())
     }

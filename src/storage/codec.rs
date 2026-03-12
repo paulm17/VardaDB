@@ -1,4 +1,4 @@
-use byteorder::{BigEndian, WriteBytesExt};
+use byteorder::{BigEndian, ByteOrder, WriteBytesExt};
 
 // Key Structure:
 // [Prefix: 1 byte] [UID: 8 bytes] [Predicate: N bytes]
@@ -211,5 +211,35 @@ impl Codec {
         } else {
             None
         }
+    }
+
+    // --- Reverse Edge Index (Delete Cleanup) ---
+    // Prefix: 0x08
+    // Key: [0x08][SourceUID:8][TargetUID:8][Field][0x00]
+    pub fn encode_reverse_edge_key(source_uid: u64, target_uid: u64, field: &str) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(1 + 8 + 8 + field.len() + 1);
+        buf.push(0x08);
+        buf.write_u64::<BigEndian>(source_uid).unwrap();
+        buf.write_u64::<BigEndian>(target_uid).unwrap();
+        buf.extend_from_slice(field.as_bytes());
+        buf.push(0x00);
+        buf
+    }
+
+    pub fn encode_reverse_edge_prefix(source_uid: u64) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(1 + 8);
+        buf.push(0x08);
+        buf.write_u64::<BigEndian>(source_uid).unwrap();
+        buf
+    }
+
+    pub fn decode_reverse_edge_target_and_field(key: &[u8]) -> Option<(u64, String)> {
+        if key.len() < 1 + 8 + 8 + 1 || key[0] != 0x08 {
+            return None;
+        }
+        let target_uid = BigEndian::read_u64(&key[9..17]);
+        let field_bytes = &key[17..key.len() - 1];
+        let field = std::str::from_utf8(field_bytes).ok()?.to_string();
+        Some((target_uid, field))
     }
 }

@@ -336,8 +336,13 @@ impl SqliteResolver {
         if is_list {
             // O(1) write: just insert a single edge key
             let edge_key = Codec::encode_edge_key(target_uid, inverse_field, self_uid);
+            let reverse_edge_key =
+                Codec::encode_reverse_edge_key(self_uid, target_uid, inverse_field);
             self.storage
                 .insert(&self.db_name, &edge_key, &[])
+                .map_err(|e| e.to_string())?;
+            self.storage
+                .insert(&self.db_name, &reverse_edge_key, &[])
                 .map_err(|e| e.to_string())?;
         } else {
             // 1:1 or N:1 - Overwrite (unchanged, single value is fast)
@@ -370,8 +375,13 @@ impl SqliteResolver {
         if is_list {
             // O(1) delete: just remove the single edge key
             let edge_key = Codec::encode_edge_key(target_uid, inverse_field, self_uid);
+            let reverse_edge_key =
+                Codec::encode_reverse_edge_key(self_uid, target_uid, inverse_field);
             self.storage
                 .delete_key(&self.db_name, &edge_key)
+                .map_err(|e| e.to_string())?;
+            self.storage
+                .delete_key(&self.db_name, &reverse_edge_key)
                 .map_err(|e| e.to_string())?;
         } else {
             // 1:1 - If the current value IS self, remove it
@@ -1507,36 +1517,22 @@ impl SqliteResolver {
         // Generate Timestamp for this Atomic Mutation or use override
         let timestamp = timestamp_override.unwrap_or_else(|| self.storage.next_timestamp());
 
-        // === Single WriteBatch approach ===
-        // Acquire keyspace lock ONCE (was 4-5 times before)
+        // Read keyspace before writer lock.
         let keyspaces = self.storage.keyspaces.read().unwrap();
         let (main, _history) = keyspaces
             .get(&self.db_name)
             .ok_or_else(|| format!("Database not found: {}", self.db_name))?;
+        let main = main.clone();
+        drop(keyspaces);
 
-        // Using SqliteTable direct inserts (atomic within backend writer lock)
         let ts_bytes = timestamp.to_bytes();
-
-        // 1. Type Index — add to batch instead of separate storage.insert()
-        let type_key_idx = Codec::encode_type_index_key(type_name, uid);
-        main.insert(&type_key_idx, &[]).map_err(|e| e.to_string())?;
-
-        // 2. _type data field
-        let type_val_bytes = serde_json::to_vec(&serde_json::Value::String(type_name.to_string()))
-            .expect("Serialization failed");
-        let type_data_key = Codec::encode_data_key(uid, "_type");
-        let mut type_val_buf = Vec::with_capacity(16 + type_val_bytes.len());
-        type_val_buf.extend_from_slice(&ts_bytes);
-        type_val_buf.extend_from_slice(&type_val_bytes);
-        main.insert(&type_data_key, &type_val_buf)
-            .map_err(|e| e.to_string())?;
-
-        // 3. User fields + unique checks
         let mut items_to_index = Vec::new();
+        let mut deferred_inverses: Vec<(u64, String, bool)> = Vec::new();
+        let mut inv_count = 0u32;
         let uniq_start = std::time::Instant::now();
-        for (field, value) in &fields {
-            let val_bytes = serde_json::to_vec(&value).map_err(|e| e.to_string())?;
 
+        // 1. User fields + unique checks
+        for (field, value) in &fields {
             if let Some(tokenizers) = search_fields.get(field) {
                 if let serde_json::Value::String(s) = value {
                     items_to_index.push((field.clone(), s.clone(), tokenizers.clone()));
@@ -1551,97 +1547,19 @@ impl SqliteResolver {
                 if main.get(&idx_key).map_err(|e| e.to_string())?.is_some() {
                     return Err(format!("Duplicate value for unique field: {}", field));
                 }
-                let mut uid_bytes = vec![0u8; 8];
-                BigEndian::write_u64(&mut uid_bytes, uid);
-                main.insert(&idx_key, &uid_bytes)
-                    .map_err(|e| e.to_string())?;
             }
-
-            // Data field with timestamp prefix
-            let key = Codec::encode_data_key(uid, &field);
-            let mut val_buf = Vec::with_capacity(16 + val_bytes.len());
-            val_buf.extend_from_slice(&ts_bytes);
-            val_buf.extend_from_slice(&val_bytes);
-            main.insert(&key, &val_buf).map_err(|e| e.to_string())?;
         }
         let uniq_time = uniq_start.elapsed();
 
-        // 4. Inverse edges — list-type added to batch, non-list deferred
-        let mut deferred_inverses: Vec<(u64, String, bool)> = Vec::new();
-        let mut inv_count = 0u32;
+        // 2. Inverse edges — list-type added to batch, non-list deferred
         for info in inverses {
             if let Some(val) = fields.get(&info.field) {
                 let mut new_targets = Vec::new();
-                match val {
-                    serde_json::Value::String(s) => {
-                        if let Ok(id) = s.parse::<u64>() {
-                            new_targets.push(id);
-                        }
-                    }
-                    serde_json::Value::Number(n) => {
-                        if let Some(id) = n.as_u64() {
-                            new_targets.push(id);
-                        }
-                    }
-                    serde_json::Value::Object(map) => {
-                        if let Some(id_val) = map.get("uid").or(map.get("id")) {
-                            match id_val {
-                                serde_json::Value::String(s) => {
-                                    if let Ok(id) = s.parse::<u64>() {
-                                        new_targets.push(id);
-                                    }
-                                }
-                                serde_json::Value::Number(n) => {
-                                    if let Some(id) = n.as_u64() {
-                                        new_targets.push(id);
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-                    serde_json::Value::Array(items) => {
-                        for item in items {
-                            match item {
-                                serde_json::Value::String(s) => {
-                                    if let Ok(id) = s.parse::<u64>() {
-                                        new_targets.push(id);
-                                    }
-                                }
-                                serde_json::Value::Number(n) => {
-                                    if let Some(id) = n.as_u64() {
-                                        new_targets.push(id);
-                                    }
-                                }
-                                serde_json::Value::Object(map) => {
-                                    if let Some(id_val) = map.get("uid").or(map.get("id")) {
-                                        match id_val {
-                                            serde_json::Value::String(s) => {
-                                                if let Ok(id) = s.parse::<u64>() {
-                                                    new_targets.push(id);
-                                                }
-                                            }
-                                            serde_json::Value::Number(n) => {
-                                                if let Some(id) = n.as_u64() {
-                                                    new_targets.push(id);
-                                                }
-                                            }
-                                            _ => {}
-                                        }
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-                    _ => {}
-                }
+                Self::extract_target_uids(val, &mut new_targets);
 
                 for target in new_targets {
                     if info.inverse_is_list {
-                        // O(1) edge insert — add directly to batch
-                        let edge_key = Codec::encode_edge_key(target, &info.inverse_field, uid);
-                        main.insert(&edge_key, &[]).map_err(|e| e.to_string())?;
+                        deferred_inverses.push((target, info.inverse_field.clone(), true));
                     } else {
                         // Non-list needs read-before-write, defer after commit
                         deferred_inverses.push((target, info.inverse_field.clone(), false));
@@ -1651,23 +1569,63 @@ impl SqliteResolver {
             }
         }
 
-        // 5. Single atomic commit for ALL writes
+        // 3. Single atomic commit for all local key/value writes.
         let commit_start = std::time::Instant::now();
-        // (each insert is auto-committed via SqliteTable)
+        self.storage
+            .backend
+            .write_batch(|conn| {
+                let type_key_idx = Codec::encode_type_index_key(type_name, uid);
+                main.batch_insert_on_conn(conn, &type_key_idx, &[])?;
+
+                let type_val_bytes =
+                    serde_json::to_vec(&serde_json::Value::String(type_name.to_string()))?;
+                let type_data_key = Codec::encode_data_key(uid, "_type");
+                let mut type_val_buf = Vec::with_capacity(16 + type_val_bytes.len());
+                type_val_buf.extend_from_slice(&ts_bytes);
+                type_val_buf.extend_from_slice(&type_val_bytes);
+                main.batch_upsert_lww_on_conn(conn, &type_data_key, &type_val_buf, &ts_bytes)?;
+
+                for (field, value) in &fields {
+                    if uniques.contains(field) {
+                        let index_pred = format!("{}.{}", type_name, field);
+                        let val_str = serde_json::to_string(value)?;
+                        let idx_key = Codec::encode_unique_index_key(&index_pred, &val_str);
+                        let mut uid_bytes = vec![0u8; 8];
+                        BigEndian::write_u64(&mut uid_bytes, uid);
+                        main.batch_insert_on_conn(conn, &idx_key, &uid_bytes)?;
+                    }
+
+                    let val_bytes = serde_json::to_vec(value)?;
+                    let key = Codec::encode_data_key(uid, field);
+                    let mut val_buf = Vec::with_capacity(16 + val_bytes.len());
+                    val_buf.extend_from_slice(&ts_bytes);
+                    val_buf.extend_from_slice(&val_bytes);
+                    main.batch_upsert_lww_on_conn(conn, &key, &val_buf, &ts_bytes)?;
+                }
+
+                for (target, inverse_field, is_list) in &deferred_inverses {
+                    if *is_list {
+                        let edge_key = Codec::encode_edge_key(*target, inverse_field, uid);
+                        let reverse_edge_key =
+                            Codec::encode_reverse_edge_key(uid, *target, inverse_field);
+                        main.batch_insert_on_conn(conn, &edge_key, &[])?;
+                        main.batch_insert_on_conn(conn, &reverse_edge_key, &[])?;
+                    }
+                }
+
+                Ok(())
+            })
+            .map_err(|e| e.to_string())?;
         let commit_time = commit_start.elapsed();
 
-        // Check L0 pressure after commit
-        // SQLite: no L0 pressure concept
-
-        // Release keyspace lock before any deferred work
-        drop(keyspaces);
-
-        // 6. Handle deferred non-list inverse links (rare for this workload)
-        for (target, inverse_field, _is_list) in deferred_inverses {
-            self.link_inverse(target, &inverse_field, false, uid, &timestamp)?;
+        // 4. Handle deferred non-list inverse links after commit.
+        for (target, inverse_field, is_list) in deferred_inverses {
+            if !is_list {
+                self.link_inverse(target, &inverse_field, false, uid, &timestamp)?;
+            }
         }
 
-        // 7. Handle Search Indexing (After commit/lock release)
+        // 5. Handle Search Indexing after commit.
         for (field, val, tokenizers) in items_to_index {
             for strategy in tokenizers {
                 if let Err(e) = self.write_term_index(uid, &field, &val, &strategy) {
@@ -1687,7 +1645,7 @@ impl SqliteResolver {
             );
         }
 
-        // 8. Publish Event (Realtime)
+        // 6. Publish Event (Realtime)
         self.bus.publish(MutationEvent {
             type_name: type_name.to_string(),
             uid,
@@ -1815,7 +1773,17 @@ impl SqliteResolver {
                                             &info.inverse_field,
                                             uid,
                                         );
+                                        let reverse_edge_key = Codec::encode_reverse_edge_key(
+                                            uid,
+                                            target,
+                                            &info.inverse_field,
+                                        );
                                         main_clone.batch_insert_on_conn(conn, &edge_key, &[])?;
+                                        main_clone.batch_insert_on_conn(
+                                            conn,
+                                            &reverse_edge_key,
+                                            &[],
+                                        )?;
                                     } else {
                                         // Non-list inverse: write data key with LWW
                                         let inv_val = serde_json::Value::String(uid.to_string());
@@ -1877,6 +1845,26 @@ impl SqliteResolver {
                 }
             }
             _ => {}
+        }
+    }
+
+    fn extract_vector(val: &Value) -> Option<Vec<f64>> {
+        let Value::List(list) = val else {
+            return None;
+        };
+
+        let vec_data: Vec<f64> = list
+            .iter()
+            .filter_map(|v| match v {
+                Value::Number(n) => n.as_f64(),
+                _ => None,
+            })
+            .collect();
+
+        if vec_data.is_empty() {
+            None
+        } else {
+            Some(vec_data)
         }
     }
 
@@ -2351,6 +2339,24 @@ impl SqliteResolver {
                         .delete_with_lww(&self.db_name, uid, pred, &timestamp)
                         .map_err(|e| e.to_string())?;
                 }
+            }
+        }
+
+        // 6. Remove any outbound list-edge keys, including undeclared legacy edges.
+        let reverse_prefix = Codec::encode_reverse_edge_prefix(uid);
+        let reverse_edges = main_ks.prefix(&reverse_prefix);
+        for (key, _val) in reverse_edges {
+            if !key.starts_with(&reverse_prefix) {
+                break;
+            }
+            if let Some((target_uid, field)) = Codec::decode_reverse_edge_target_and_field(&key) {
+                let edge_key = Codec::encode_edge_key(target_uid, &field, uid);
+                self.storage
+                    .delete_key(&self.db_name, &edge_key)
+                    .map_err(|e| e.to_string())?;
+                self.storage
+                    .delete_key(&self.db_name, &key)
+                    .map_err(|e| e.to_string())?;
             }
         }
 
@@ -2833,52 +2839,16 @@ impl Resolver for SqliteResolver {
             .expect("Time went backwards");
         let uid = since_the_epoch.as_nanos() as u64;
 
-        // Automatic embedding generation was removed with the local model backend.
-        if let Some(config) = vector_config {
-            // HNSW Indexing (manual vectors only)
-            if let Some(val) = fields.get(&config.field) {
-                if let Value::List(list) = val {
-                    let vec_data: Vec<f64> = list
-                        .iter()
-                        .filter_map(|v| match v {
-                            Value::Number(n) => n.as_f64(),
-                            _ => None,
-                        })
-                        .collect();
-                    if !vec_data.is_empty() {
-                        let storage = self.storage.clone();
-                        tokio::task::spawn_blocking(move || {
-                            if let Err(e) = storage.put_vector(uid, vec_data) {
-                                eprintln!("Background Vector Insert Error (UID {}): {}", uid, e);
-                            }
-                        });
-                    }
+        if let Some(vec_data) = vector_config
+            .and_then(|config| fields.get(&config.field))
+            .and_then(Self::extract_vector)
+        {
+            let storage = self.storage.clone();
+            tokio::task::spawn_blocking(move || {
+                if let Err(e) = storage.put_vector(uid, vec_data) {
+                    eprintln!("Background Vector Insert Error (UID {}): {}", uid, e);
                 }
-            }
-        }
-
-        // Automatic embedding generation was removed with the local model backend.
-        if let Some(config) = vector_config {
-            // HNSW Update (manual vectors only)
-            if let Some(val) = fields.get(&config.field) {
-                if let Value::List(list) = val {
-                    let vec_data: Vec<f64> = list
-                        .iter()
-                        .filter_map(|v| match v {
-                            Value::Number(n) => n.as_f64(),
-                            _ => None,
-                        })
-                        .collect();
-                    if !vec_data.is_empty() {
-                        let storage = self.storage.clone();
-                        tokio::task::spawn_blocking(move || {
-                            if let Err(e) = storage.put_vector(uid, vec_data) {
-                                eprintln!("Background Vector Update Error (UID {}): {}", uid, e);
-                            }
-                        });
-                    }
-                }
-            }
+            });
         }
 
         let payload: std::collections::HashMap<String, serde_json::Value> = fields
@@ -2972,6 +2942,13 @@ impl Resolver for SqliteResolver {
             }
         }
 
+        let candidate_set = if near_vector.is_none() && text_search.is_none() {
+            self.get_candidates(type_name, &filter, uniques)
+        } else {
+            None
+        };
+        let used_candidates = candidate_set.is_some();
+
         if let Some(ref vec) = near_vector {
             // Case 1: Hybrid Search (Vector + Text) or Vector Search
             let k = first.unwrap_or(50) * 4;
@@ -3014,7 +2991,7 @@ impl Resolver for SqliteResolver {
                 }
             }
             // BM25 results are sorted by score (DESC) usually.
-        } else if let Some(candidates) = self.get_candidates(type_name, &filter, uniques) {
+        } else if let Some(candidates) = candidate_set {
             // Candidate Set Optimization
             // Try parallelize if set is large enough?
             // For now, always parallelize as user requested it explicitly.
@@ -3140,7 +3117,7 @@ impl Resolver for SqliteResolver {
             // Actually Full Scan builds `uids` in order (if not filtering via candidates).
             // But Candidate set is unordered.
             // To be safe, we sort if came from candidates.
-            if self.get_candidates(type_name, &filter, uniques).is_some() {
+            if used_candidates {
                 uids.sort();
             }
         }

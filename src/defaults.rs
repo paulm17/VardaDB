@@ -20,7 +20,6 @@ type Agent @model {
   # Relations
   sessions: [Session!] @hasInverse(field: "agent")
   skills: [Skill!] @hasInverse(field: "agents")
-  jobs: [Job!] @hasInverse(field: "agent")
 }
 
 """
@@ -50,34 +49,6 @@ type MemoryChunk @model {
   # Relevance/Quality score
   utilityScore: Float
   lastAccessed: DateTime
-}
-
-"""
-`Job` represents a unit of work scheduled in the Durable Execution Engine.
-This mapping allows the Agent to inspect its own pending tasks and history.
-"""
-type Job @model {
-  id: ID!
-  queue: String! @search(by: [term])
-  status: String! @search(by: [term]) # Ready, Scheduled, Active, Completed, Failed
-  runAt: DateTime!
-  payload: String
-  lastError: String
-  
-  # Agent context
-  agent: Agent @hasInverse(field: "jobs")
-}
-
-"""
-`CronSchedule` represents recurring tasks managed by the system.
-"""
-type CronSchedule @model {
-  name: String! @unique
-  expression: String!
-  queue: String!
-  enabled: Boolean!
-  lastRun: DateTime
-  nextRun: DateTime
 }
 
 """

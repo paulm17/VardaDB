@@ -8,12 +8,8 @@ pub struct VardaConfig {
     pub zenoh: ZenohConfig,
     #[serde(default)]
     pub remote_append: RemoteAppendConfig,
-    #[serde(default = "default_jobs_config")]
-    pub jobs: JobsConfig,
     #[serde(default)]
     pub llm: LLMConfig,
-    #[serde(default)]
-    pub vardaclaw: VardaClawConfig,
     #[serde(default)]
     pub r2: R2Config,
     pub auth: Option<auth::config::AuthConfig>,
@@ -26,14 +22,6 @@ pub struct R2Config {
     pub endpoint_url: Option<String>,
     pub region: Option<String>,
     pub bucket: Option<String>,
-}
-
-#[derive(Deserialize, Debug, Clone, Default)]
-pub struct VardaClawConfig {
-    #[serde(default)]
-    pub enabled: bool,
-    #[serde(default)]
-    pub workers: usize,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -86,12 +74,6 @@ impl Default for LLMConfig {
     }
 }
 
-fn default_jobs_config() -> JobsConfig {
-    JobsConfig {
-        workers: default_workers(),
-    }
-}
-
 #[derive(Deserialize, Debug, Clone)]
 pub struct ServerConfig {
     pub port: u16,
@@ -120,16 +102,6 @@ pub struct RemoteAppendConfig {
     pub path: Option<String>,
 }
 
-#[derive(Deserialize, Debug, Clone)]
-pub struct JobsConfig {
-    #[serde(default = "default_workers")]
-    pub workers: usize,
-}
-
-fn default_workers() -> usize {
-    2
-}
-
 fn default_mode() -> String {
     "peer".to_string()
 }
@@ -152,9 +124,7 @@ impl Default for VardaConfig {
             server: ServerConfig::default(),
             zenoh: ZenohConfig::default(),
             remote_append: RemoteAppendConfig::default(),
-            jobs: JobsConfig::default(),
             llm: LLMConfig::default(),
-            vardaclaw: VardaClawConfig::default(),
             r2: R2Config::default(),
             auth: None, // Auth is disabled by default
         }
@@ -181,14 +151,6 @@ impl Default for ZenohConfig {
             connect: vec![],
             listen: vec![],
             prefix: default_prefix(),
-        }
-    }
-}
-
-impl Default for JobsConfig {
-    fn default() -> Self {
-        Self {
-            workers: default_workers(),
         }
     }
 }

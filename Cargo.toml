@@ -5,8 +5,7 @@ edition = "2021"
 
 [workspace]
 members = [
-    "jobs", "management",
-#   "vardaclaw",
+    "management", "runtime",
     "test_framework",
     "auth", "permissions",
 ]
@@ -33,9 +32,6 @@ async-trait = "0.1"
 rusqlite = { version = "0.31", features = ["bundled", "load_extension"] }
 sqlite-vec = "0.1"
 
-# Durable Execution Engine
-jobs = { path = "jobs" }
-# vardaclaw = { path = "vardaclaw" }
 management = { path = "management" }
 
 # Auth

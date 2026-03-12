@@ -33,8 +33,5 @@ ed25519-dalek = { version = "2.1", features = ["rand_core"] }
 oauth2 = { version = "5.0", features = ["reqwest"] }
 lettre = { version = "0.11", optional = true, features = ["tokio1", "tokio1-native-tls", "builder"] }
 
-# Workspace dependencies
-jobs = { path = "../jobs" }
-
 [features]
 auth-email = ["lettre"]

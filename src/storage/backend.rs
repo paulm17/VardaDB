@@ -1,6 +1,5 @@
 use crate::storage::sqlite_backend::{SqliteBackend, SqliteTable};
 use byteorder::{BigEndian, ByteOrder};
-use jobs::{JobStore, Queue};
 use permissions::storage::auth_store::AuthStore;
 use std::path::Path;
 use std::sync::{Arc, Mutex, Weak};
@@ -41,9 +40,6 @@ pub struct Storage {
     pub metrics_table: SqliteTable,    // METRICS: Time-series metrics
     pub traces_table: SqliteTable,     // TRACES: Trace spans
     pub auth_store: AuthStore,         // AUTH: Authorization tuples and attributes
-
-    pub jobs_store: Arc<JobStore<SqliteTable>>, // JOB STORE (Global)
-    pub system_queue: Arc<Queue<SqliteTable>>,  // DEFAULT QUEUE (Global)
     pub node_id: u64,
     pub clock: std::sync::Mutex<crate::storage::timestamp::Timestamp>,
     pub vector_tx: std::sync::mpsc::SyncSender<(u64, Vec<f64>)>,
@@ -70,7 +66,6 @@ impl Storage {
         backend.create_native_search_tables()?;
         backend.create_table("auth_tuples")?;
         backend.create_table("auth_attributes")?;
-        backend.create_table("jobs")?;
         // Auth login tables (was previously created by AuthStore::init from Database)
         backend.create_table("auth_users")?;
         backend.create_table("auth_tokens")?;
@@ -118,11 +113,6 @@ impl Storage {
             }
             println!("Storage: Vector Background Worker Stopped");
         });
-
-        // Jobs Store
-        let jobs_table = SqliteTable::new("jobs".to_string(), backend.clone());
-        let jobs_store = Arc::new(JobStore::new(Arc::new(jobs_table)));
-        let system_queue = Arc::new(Queue::new("system_queue".to_string(), jobs_store.clone()));
 
         // Auto-discover databases from existing tables
         let mut initial_keyspaces = std::collections::HashMap::new();
@@ -205,8 +195,6 @@ impl Storage {
             metrics_table,
             traces_table,
             auth_store,
-            jobs_store,
-            system_queue,
             node_id,
             clock,
             vector_tx: tx,

@@ -109,33 +109,14 @@ pub async fn forgot_password_handler(
         ));
     }
 
+    // Phase-0 note: this path intentionally does not dispatch email anymore.
+    // It should be replaced by Restate-backed delivery when the new runtime lands.
     let email_sent = if let Some(_) = auth_state.as_ref().config.smtp.as_ref() {
-        if let Some(queue) = &auth_state.as_ref().email_queue {
-            use chrono::Utc;
-            use jobs::Job;
-
-            let job_payload = serde_json::json!({
-                "type": "password_reset",
-                "email": email,
-                "code": code,
-            });
-
-            let job = Job::new(
-                Utc::now().timestamp_millis() as u64
-                    + rand::Rng::gen_range(&mut rand::thread_rng(), 1..100000),
-                "auth_email".to_string(),
-                job_payload.to_string().into_bytes(),
-            );
-
-            let _ = queue.push_job(job);
-            true
-        } else {
-            tracing::warn!(
-                "Auth email is disabled! Password reset code generated but not sent: {}",
-                code
-            );
-            false
-        }
+        tracing::warn!(
+            "SMTP is configured, but asynchronous email dispatch is currently disabled. Password reset code generated but not sent: {}",
+            code
+        );
+        false
     } else {
         tracing::warn!(
             "Auth email is disabled! Password reset code generated but not sent: {}",

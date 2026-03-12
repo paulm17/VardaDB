@@ -228,11 +228,11 @@ The authentication logic is encapsulated in a dedicated Rust crate, allowing for
 ### 2. PASETO Token System
 VardaDB uses **PASETO (Platform-Agnostic Security Tokens)** instead of JWT for both Access and Refresh tokens. PASETOs provide stronger security defaults and a more resilient design against common token vulnerabilities.
 
-### 3. Durable Email Job Queue
-To ensure reliable delivery of critical communications (Magic Links, Password Resets), VardaDB uses a durable job queue.
-*   **Asynchronous**: Email dispatch does not block the API response.
-*   **Resilient**: Failed deliveries are retried automatically by the background worker.
-*   **Configurable**: SMTP settings are fully manageable via `config.toml`.
+### 3. Email Delivery Status
+SMTP configuration remains available in `config.toml`, but asynchronous email delivery is currently disabled while the legacy jobs subsystem is removed.
+*   **Current behavior**: Auth flows still persist confirmation state, but do not send queued email.
+*   **Operational implication**: Magic links and password reset codes are generated, then logged as unsent.
+*   **Next step**: Reintroduce delivery only through the new runtime boundary, not via the removed legacy queue.
 
 ### 4. Persistent Storage (SQLite)
 All identity data, including user records, session tokens, and confirmation flows, is stored in native SQLite tables.

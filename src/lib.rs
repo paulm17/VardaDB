@@ -9,7 +9,6 @@ pub fn debug_logging() -> bool {
 }
 
 pub mod bridge;
-pub mod caching;
 pub mod cli;
 pub mod codegen;
 pub mod config;
@@ -20,11 +19,9 @@ pub mod realtime;
 pub mod server;
 pub mod storage;
 pub mod sync;
-pub mod worker;
 
 pub mod observability;
 pub mod repl;
-pub use jobs;
 
 pub struct DummyResolver;
 
@@ -261,39 +258,36 @@ pub async fn init_system(config: crate::config::VardaConfig) -> (Arc<ServerState
     // Initialize Auth Subsystem
     let auth_state = if let Some(auth_config) = config.auth.clone() {
         println!("Auth subsystem enabled");
-        let email_queue: Option<std::sync::Arc<dyn jobs::JobEnqueuer>> = Some(Arc::new(
-            jobs::Queue::new("auth_email".to_string(), storage.jobs_store.clone()),
-        ));
 
         // Build auth store from pre-created SqliteTables
         let auth_login_store = auth::state::AuthStore::new(
             std::sync::Arc::new(crate::storage::sqlite_backend::SqliteTable::new(
                 "auth_users".to_string(),
                 storage.backend.clone(),
-            )) as std::sync::Arc<dyn jobs::KvStore>,
+            )) as std::sync::Arc<dyn auth::state::KvStore>,
             std::sync::Arc::new(crate::storage::sqlite_backend::SqliteTable::new(
                 "auth_tokens".to_string(),
                 storage.backend.clone(),
-            )) as std::sync::Arc<dyn jobs::KvStore>,
+            )) as std::sync::Arc<dyn auth::state::KvStore>,
             std::sync::Arc::new(crate::storage::sqlite_backend::SqliteTable::new(
                 "auth_confirmations".to_string(),
                 storage.backend.clone(),
-            )) as std::sync::Arc<dyn jobs::KvStore>,
+            )) as std::sync::Arc<dyn auth::state::KvStore>,
             std::sync::Arc::new(crate::storage::sqlite_backend::SqliteTable::new(
                 "auth_identities".to_string(),
                 storage.backend.clone(),
-            )) as std::sync::Arc<dyn jobs::KvStore>,
+            )) as std::sync::Arc<dyn auth::state::KvStore>,
             std::sync::Arc::new(crate::storage::sqlite_backend::SqliteTable::new(
                 "auth_social_state".to_string(),
                 storage.backend.clone(),
-            )) as std::sync::Arc<dyn jobs::KvStore>,
+            )) as std::sync::Arc<dyn auth::state::KvStore>,
             std::sync::Arc::new(crate::storage::sqlite_backend::SqliteTable::new(
                 "auth_keys".to_string(),
                 storage.backend.clone(),
-            )) as std::sync::Arc<dyn jobs::KvStore>,
+            )) as std::sync::Arc<dyn auth::state::KvStore>,
         );
 
-        match auth::state::AuthState::new(auth_config, auth_login_store, email_queue.clone()) {
+        match auth::state::AuthState::new(auth_config, auth_login_store) {
             Ok(state) => {
                 let arc_state = Arc::new(state);
 
@@ -302,13 +296,6 @@ pub async fn init_system(config: crate::config::VardaConfig) -> (Arc<ServerState
                     auth::state::start_pruning_task(arc_state_for_pruning).await;
                 });
 
-                #[cfg(feature = "auth-email")]
-                if let Some(queue) = email_queue {
-                    let arc_state_clone = arc_state.clone();
-                    tokio::spawn(async move {
-                        auth::email::job::start_email_worker(arc_state_clone, queue).await;
-                    });
-                }
                 Some(arc_state)
             }
             Err(e) => {
@@ -371,27 +358,6 @@ pub async fn init_system(config: crate::config::VardaConfig) -> (Arc<ServerState
 
     // Graceful Shutdown is now handled natively via `ctrlc::set_handler`
     // mapped globally inside `storage.register_exit_hook()` in `src/storage/backend.rs`.
-
-    // Start Job Workers
-    let worker_count = config.jobs.workers.min(10); // Enforce max 10
-    println!("Starting {} Job Workers...", worker_count);
-
-    // Register System Heartbeat (Run every 10 seconds)
-    if let Err(e) = storage.system_queue.register_cron(
-        "heartbeat".to_string(),
-        "0/10 * * * * * *".to_string(),
-        "system_queue".to_string(),
-        b"HEARTBEAT".to_vec(),
-    ) {
-        eprintln!("Failed to register heartbeat cron: {}", e);
-    }
-
-    for i in 0..worker_count {
-        let worker = crate::worker::Worker::new(storage.clone(), i);
-        tokio::spawn(async move {
-            worker.run().await;
-        });
-    }
 
     // Start TCP Bulk Ingestion Listener on Port 9003
     let bulk_ingest_state = state.clone();

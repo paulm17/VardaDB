@@ -1,8 +1,14 @@
 use ed25519_dalek::SigningKey;
-use jobs::KvStore;
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+
+pub trait KvStore: Send + Sync {
+    fn kv_insert(&self, key: &[u8], value: &[u8]) -> Result<(), String>;
+    fn kv_get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, String>;
+    fn kv_remove(&self, key: &[u8]) -> Result<(), String>;
+    fn kv_prefix(&self, prefix: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)>;
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct UserRecord {
@@ -75,15 +81,13 @@ pub struct AuthState {
     pub store: AuthStore,
     pub access_key: [u8; 64],
     pub refresh_key: [u8; 64],
-    pub email_queue: Option<Arc<dyn jobs::JobEnqueuer>>,
+    // Phase-0 note: the legacy jobs-backed auth email queue was removed as part of
+    // Restate prep. When Restate-backed delivery is introduced, re-add async email
+    // dispatch through the new runtime boundary instead of restoring the old queue.
 }
 
 impl AuthState {
-    pub fn new(
-        config: super::config::AuthConfig,
-        store: AuthStore,
-        email_queue: Option<Arc<dyn jobs::JobEnqueuer>>,
-    ) -> anyhow::Result<Self> {
+    pub fn new(config: super::config::AuthConfig, store: AuthStore) -> anyhow::Result<Self> {
         let access_key = if let Ok(Some(key_bytes)) = store.keys.kv_get(b"access_key") {
             key_bytes
                 .as_slice()
@@ -107,7 +111,6 @@ impl AuthState {
             store,
             access_key,
             refresh_key,
-            email_queue,
         })
     }
 

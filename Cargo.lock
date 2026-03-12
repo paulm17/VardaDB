@@ -396,7 +396,6 @@ dependencies = [
  "bincode",
  "chrono",
  "ed25519-dalek",
- "jobs",
  "lettre",
  "oauth2",
  "rand 0.8.5",
@@ -2704,19 +2703,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8eaf4bc02d17cbdd7ff4c7438cafcdf7fb9a4613313ad11b4f8fefe7d3fa0130"
 
 [[package]]
-name = "jobs"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "cron",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 1.0.69",
- "tracing",
-]
-
-[[package]]
 name = "jobserver"
 version = "0.1.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4472,6 +4458,23 @@ dependencies = [
  "heapless",
  "num-traits",
  "smallvec",
+]
+
+[[package]]
+name = "runtime"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "cron",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -6231,7 +6234,6 @@ dependencies = [
  "humantime",
  "hyper",
  "indexmap 2.13.0",
- "jobs",
  "libc",
  "lru",
  "management",
