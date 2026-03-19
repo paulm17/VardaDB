@@ -1,5 +1,6 @@
 use clap::{Parser, Subcommand};
 use std::fs;
+use std::path::{Path, PathBuf};
 use vardadb::{build_schema, codegen, run};
 
 #[derive(Parser)]
@@ -61,10 +62,20 @@ enum Commands {
     Db(vardadb::cli::DbCommands),
     /// Interactive Shell (REPL)
     Cli,
+    /// Embedded Restate runtime
+    Runtime {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
 }
 
 #[tokio::main]
 async fn main() {
+    if let Err(err) = maybe_delegate_runtime() {
+        eprintln!("Runtime command failed: {}", err);
+        std::process::exit(1);
+    }
+
     let cli = Cli::parse();
 
     // Load Config
@@ -159,5 +170,87 @@ async fn main() {
                 eprintln!("REPL Error: {}", e);
             }
         }
+        Some(Commands::Runtime { .. }) => unreachable!("runtime handled before parsing CLI"),
     }
+}
+
+fn maybe_delegate_runtime() -> anyhow::Result<()> {
+    let raw_args: Vec<String> = std::env::args().collect();
+    let Some(runtime_index) = raw_args.iter().position(|arg| arg == "runtime") else {
+        return Ok(());
+    };
+
+    let forwarded_args = raw_args[runtime_index + 1..].to_vec();
+
+    let runtime_bin = locate_runtime_binary()?;
+    let mut command = std::process::Command::new(runtime_bin);
+    if let Some(config_path) = runtime_config_handoff_path(&raw_args) {
+        command.arg("--vardadb-config").arg(config_path);
+    }
+
+    let status = command
+        .args(forwarded_args)
+        .status()
+        .map_err(|err| anyhow::anyhow!("failed to start embedded runtime: {err}"))?;
+
+    std::process::exit(status.code().unwrap_or(1));
+}
+
+fn extract_config_path(args: &[String]) -> Option<(String, bool)> {
+    let mut iter = args.iter().peekable();
+    while let Some(arg) = iter.next() {
+        if let Some(value) = arg.strip_prefix("--config=") {
+            return Some((value.to_string(), true));
+        }
+        if arg == "--config" || arg == "-c" {
+            if let Some(value) = iter.peek() {
+                return Some(((**value).to_string(), true));
+            }
+        }
+    }
+    None
+}
+
+fn runtime_config_handoff_path(args: &[String]) -> Option<String> {
+    match extract_config_path(args) {
+        Some((path, _explicit)) => Some(path),
+        None => {
+            let default = Path::new("config.toml");
+            default.exists().then(|| default.display().to_string())
+        }
+    }
+}
+
+fn locate_runtime_binary() -> anyhow::Result<PathBuf> {
+    let current = std::env::current_exe()
+        .map_err(|err| anyhow::anyhow!("failed to determine current executable path: {err}"))?;
+    let sibling = current
+        .parent()
+        .map(|dir| dir.join("vardadb-runtime"))
+        .ok_or_else(|| anyhow::anyhow!("failed to determine executable directory"))?;
+
+    if sibling.exists() {
+        return Ok(sibling);
+    }
+
+    for candidate in [
+        Path::new("runtime")
+            .join("target")
+            .join("debug")
+            .join("vardadb-runtime"),
+        Path::new("runtime")
+            .join("target")
+            .join("release")
+            .join("vardadb-runtime"),
+        Path::new("target").join("debug").join("vardadb-runtime"),
+        Path::new("target").join("release").join("vardadb-runtime"),
+    ] {
+        if candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+
+    anyhow::bail!(
+        "embedded runtime binary not found; build it from the nested workspace with `cargo +1.93.0 build --manifest-path runtime/Cargo.toml --bin vardadb-runtime`"
+    );
 }

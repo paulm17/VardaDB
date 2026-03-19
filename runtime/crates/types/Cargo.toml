@@ -1,0 +1,137 @@
+[package]
+name = "restate-types"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+default = []
+schemars = ["dep:schemars", "restate-serde-util/schema", "restate-time-util/schema", "restate-clock/schemars"]
+utoipa-schema = ["dep:utoipa",]
+unsafe-mutable-config = []
+# Enables the tokio console subscriber and exposes its configuration
+console = []
+test-util = ["unsafe-mutable-config", "dep:tempfile", "dep:restate-test-util", "restate-clock/test-util"]
+# Runs every partition in a separate rocksdb database
+# Note: this is currently backwards-incompatible with the production builds.
+multi-db = []
+
+[dependencies]
+restate-workspace-hack = { workspace = true }
+
+restate-base64-util = { workspace = true }
+restate-clock = { workspace = true, features = ["prost-types", "jiff", "hlc"] }
+restate-encoding = { workspace = true }
+restate-errors = { workspace = true }
+restate-memory = { workspace = true }
+restate-serde-util = { workspace = true }
+restate-test-util = { workspace = true, optional = true }
+restate-time-util = { workspace = true, features = ["serde", "serde_with"] }
+restate-utoipa = { workspace = true }
+
+ahash = {workspace = true }
+anyhow = { workspace = true }
+arc-swap = { workspace = true }
+# pending release of https://github.com/fbernier/base62/pull/28
+base62 = { git = "http://github.com/restatedev/base62", rev = "dc62ff947d0ea84db0864e5c7e96c129e7b5874c" }
+base64 = { workspace = true }
+bitflags = { workspace = true }
+bytes = { workspace = true }
+bytestring = { workspace = true }
+bilrost = { workspace = true, features = ["bytestring"] }
+chrono = { workspace = true, features = ["serde"] }
+clap = { workspace = true, features = ["std", "derive", "env"], optional = true }
+codederror = { workspace = true }
+dashmap = { workspace = true }
+derive_builder = { workspace = true }
+derive_more = { workspace = true }
+downcast-rs = { workspace = true }
+dyn-clone = { version = "1.0" }
+enum-map = { workspace = true }
+enum_dispatch = "0.3.13"
+enumset = { workspace = true, features = ["serde"] }
+figment = { version = "0.10.19", features = ["env", "toml"] }
+flexbuffers = { workspace = true }
+futures = { workspace = true }
+gardal = { workspace = true }
+generic-array = { version = "1.3.5" }
+hostname = { workspace = true }
+http = { workspace = true }
+indexmap = { workspace = true, features = ["serde"] }
+itertools = { workspace = true }
+jsonschema = { workspace = true }
+listenfd = { version = "1" }
+metrics = { workspace = true }
+moka = { workspace = true, features = ["sync", "logging"] }
+notify = { version = "8.2.0" }
+notify-debouncer-full = { version = "0.6" }
+num-traits = { workspace = true }
+opentelemetry = { workspace = true , features = ["trace"]}
+parking_lot = { workspace = true }
+paste = { workspace = true }
+prost = { workspace = true }
+prost-dto = { workspace = true }
+prost-types = { workspace = true }
+rand = { workspace = true }
+regex = { workspace = true }
+regress = { version = "0.10" }
+rustc-hash = "2.1.1"
+schemars = { workspace = true, optional = true }
+semver = { workspace = true }
+serde = { workspace = true, features = ["rc"] }
+serde_json = { workspace = true }
+serde_path_to_error = { version = "0.1" }
+serde_with = { workspace = true, features = ["json"] }
+sha2 = { workspace = true }
+smallvec = { workspace = true }
+smartstring = { workspace = true, features = ["serde"]}
+static_assertions = { workspace = true }
+strum = { workspace = true }
+tempfile = { workspace = true, optional = true }
+thiserror = { workspace = true }
+tiny-gradient = { version = "0.1.0" }
+tokio = { workspace = true, default-features = false, features = ["time", "sync"]}
+tokio-stream = { workspace = true, features = ["sync"] }
+tokio-util = { workspace = true, features = ["net"] }
+toml = { workspace = true }
+tonic = { workspace = true }
+tracing = { workspace = true }
+typed-builder = { workspace = true }
+ulid = { workspace = true }
+utoipa = { workspace = true, optional = true, features = ["time"] }
+xxhash-rust = { workspace = true, features = ["xxh3"] }
+
+[dev-dependencies]
+restate-types = {path = ".", default-features = false, features = ["test-util"]}
+restate-test-util = { workspace = true }
+
+criterion = { workspace = true, features = ["async_tokio"] }
+futures = { workspace = true }
+tempfile = { workspace = true }
+googletest = { workspace = true }
+rand = { workspace = true }
+test-log = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
+
+[build-dependencies]
+prost-build = { workspace = true }
+prettyplease = "0.2"
+schemars = { workspace = true }
+serde_json = { workspace = true }
+syn = { workspace = true }
+typify = { workspace = true }
+jsonptr = { workspace = true }
+
+[[bench]]
+name = "network_serialization"
+harness = false
+
+[[bench]]
+name = "id_encoding"
+harness = false
+
+[lints]
+workspace = true

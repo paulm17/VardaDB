@@ -1,0 +1,75 @@
+[package]
+name = "restate-worker"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+test = false
+doctest = false
+
+[features]
+default = ["standalone-runtime"]
+standalone-runtime = []
+test-util = ["restate-invoker-api/test-util"]
+options_schema = ["dep:schemars", "restate-invoker-impl/options_schema"]
+kafka-oidc = []
+
+[dependencies]
+restate-workspace-hack = { workspace = true }
+
+restate-clock = { workspace = true, features = ["jiff", "hlc"] }
+restate-errors = { workspace = true }
+restate-invoker-api = { workspace = true }
+restate-invoker-impl = { workspace = true }
+restate-service-protocol = { workspace = true, features = ["codec", "message"] }
+restate-service-protocol-v4 = { workspace = true, features = ["entry-codec"] }
+restate-storage-api = { workspace = true }
+restate-tracing-instrumentation = { workspace = true }
+restate-types = { workspace = true }
+restate-vqueues = { workspace = true }
+
+ahash = { workspace = true }
+anyhow = { workspace = true }
+assert2 = { workspace = true }
+async-channel = { workspace = true }
+bilrost = { workspace = true }
+bytes = { workspace = true }
+bytestring = { workspace = true }
+codederror = { workspace = true }
+derive_more = { workspace = true }
+enumset = { workspace = true }
+futures = { workspace = true }
+itertools = { workspace = true }
+metrics = { workspace = true }
+opentelemetry = { workspace = true }
+parking_lot = { workspace = true }
+pin-project = { workspace = true }
+rand = { workspace = true }
+schemars = { workspace = true, optional = true }
+serde = { workspace = true }
+strum = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+tracing-opentelemetry = { workspace = true }
+ulid = { workspace = true }
+
+[dev-dependencies]
+restate-invoker-api = { workspace = true, features = ["test-util"] }
+restate-service-protocol = { workspace = true, features = ["test-util"] }
+restate-storage-api = { workspace = true, features = ["test-util"] }
+restate-test-util = { workspace = true, features = ["prost"] }
+restate-types = { workspace = true, features = ["test-util"] }
+
+googletest = { workspace = true }
+mockall = { workspace = true }
+prost = { workspace = true }
+rstest = { workspace = true }
+test-log = { workspace = true }
+tracing-subscriber = { workspace = true }

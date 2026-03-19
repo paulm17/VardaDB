@@ -1,0 +1,64 @@
+[package]
+name = "restate-cli"
+version = { workspace = true }
+authors = { workspace = true }
+description = "Restate CLI"
+edition = { workspace = true }
+license = { workspace = true }
+rust-version = { workspace = true }
+repository = { workspace = true }
+homepage = { workspace = true }
+publish = false
+default-run = "restate"
+build = "build.rs"
+
+[package.metadata.dist]
+dist = true
+formula = "restate"
+
+[features]
+default = ["no-trace-logging"]
+no-trace-logging = ["tracing/max_level_trace", "tracing/release_max_level_debug"]
+
+[dependencies]
+restate-admin-rest-model = { workspace = true }
+restate-cli-util = { workspace = true }
+restate-types = { workspace = true }
+
+anyhow = { workspace = true }
+clap = { workspace = true, features = ["derive", "env", "wrap_help", "color", "std", "suggestions", "usage"] }
+cling = { workspace = true }
+comfy-table = { workspace = true }
+crossterm = { workspace = true }
+ctrlc = { version = "3.4.1" }
+dirs = { version = "5.0" }
+figment = { version = "0.10.8", features = ["env", "toml"] }
+http = { workspace = true }
+indicatif = "0.18.4"
+reqwest = { workspace = true, default-features = false, features = ["json", "rustls-tls", "stream", "http2"] }
+rustls = { workspace = true, features = ["aws-lc-rs"]}
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+url = { workspace = true }
+restate-workspace-hack = { workspace = true }
+
+[dev-dependencies]
+restate-cli-util = { workspace = true, features = ["test-util"] }
+
+[build-dependencies]
+vergen = { version = "8.0.0", default-features = false, features = [
+    "build",
+    "git",
+    "gitcl",
+    "cargo",
+] }
+
+[lib]
+bench = false
+
+[[bin]]
+name = "restate"
+path = "src/main.rs"

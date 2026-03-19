@@ -1,0 +1,70 @@
+[package]
+name = "restate-standalone"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Restate Standalone"
+build = "build.rs"
+
+[package.metadata.dist]
+dist = true
+
+[features]
+default = ["no-trace-logging"]
+no-trace-logging = ["tracing/max_level_trace", "tracing/release_max_level_debug"]
+
+[dependencies]
+restate-workspace-hack = { workspace = true }
+
+restate-admin-rest-model = { workspace = true }
+restate-clock = { workspace = true }
+restate-core = { workspace = true }
+restate-serde-util = { workspace = true }
+restate-service-client = { workspace = true }
+restate-service-protocol = { workspace = true, features = ["discovery"] }
+restate-sqlite-store = { workspace = true }
+restate-storage-api = { workspace = true }
+restate-time-util = { workspace = true }
+restate-tracing-instrumentation = { workspace = true, features = ["rt-tokio"] }
+restate-types = { workspace = true }
+restate-worker = { path = "../crates/worker", default-features = false, features = ["standalone-runtime"] }
+
+anyhow = { workspace = true }
+arc-swap = { workspace = true }
+axum = { workspace = true, features = ["json"] }
+bytestring = { workspace = true }
+clap = { workspace = true, features = ["derive", "env", "color", "help", "wrap_help", "usage", "suggestions", "error-context", "std"] }
+futures = { workspace = true }
+hyper-util = { workspace = true, features = ["http1", "http2", "server", "tokio", "service"] }
+listenfd = "1"
+rlimit = { workspace = true }
+rustls = { workspace = true, features = ["aws-lc-rs"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tokio-rusqlite = "0.7.0"
+toml = { workspace = true }
+tracing = { workspace = true }
+tracing-panic = { version = "0.1.2" }
+
+[dev-dependencies]
+libc = "0.2"
+reqwest = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "process", "rt-multi-thread", "io-util", "time"] }
+
+[target.'cfg(not(target_env = "msvc"))'.dependencies]
+tikv-jemallocator = { workspace = true }
+
+[build-dependencies]
+vergen = { workspace = true, default-features = false, features = [
+    "build",
+    "git",
+    "gitcl",
+    "cargo",
+] }

@@ -231,12 +231,10 @@ impl SqliteTable {
     pub fn get(&self, key: &[u8]) -> anyhow::Result<Option<Vec<u8>>> {
         let conn = self.backend.get_reader()?;
         let sql = format!("SELECT value FROM \"{}\" WHERE key = ?1", self.name);
-        let result = conn
-            .prepare_cached(&sql)
-            .and_then(|mut stmt| {
-                stmt.query_row(params![key], |row| row.get::<_, Vec<u8>>(0))
-                    .optional()
-            });
+        let result = conn.prepare_cached(&sql).and_then(|mut stmt| {
+            stmt.query_row(params![key], |row| row.get::<_, Vec<u8>>(0))
+                .optional()
+        });
         self.backend.return_reader(conn);
         Ok(result?)
     }

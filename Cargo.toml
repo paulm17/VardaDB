@@ -5,9 +5,10 @@ edition = "2021"
 
 [workspace]
 members = [
-    "management", "runtime",
+    "management",
     "test_framework",
-    "auth", "permissions",
+    "auth",
+    "permissions",
 ]
 
 [features]

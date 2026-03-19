@@ -1,0 +1,32 @@
+[package]
+name = "restate-sqlite-store"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "SQLite-backed storage primitives for standalone Restate"
+
+[dependencies]
+restate-workspace-hack = { workspace = true }
+
+restate-storage-api = { workspace = true }
+restate-types = { workspace = true }
+
+anyhow = { workspace = true }
+bilrost = { workspace = true }
+bytes = { workspace = true }
+bytestring = { workspace = true }
+futures = { workspace = true }
+parking_lot = { workspace = true }
+prost = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
+tokio-rusqlite = "0.7.0"
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

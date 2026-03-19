@@ -1,9 +1,10 @@
 .fastembed_cache/
+.cargo-deny/
 /target
 /test_framework/target
 /vardaclaw/target
 /management/target
-/jobs/target
+/runtime/target
 /client/rust/target
 /client/typescript/dist
 /client/typescript/node_modules
