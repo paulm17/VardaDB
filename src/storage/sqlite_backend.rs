@@ -4,6 +4,7 @@ use rusqlite::OptionalExtension;
 use rusqlite::{params, Connection};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use tracing::{error, info};
 
 /// Low-level SQLite backend — manages connections and table lifecycle.
 /// Replaces `fjall::Database`.
@@ -17,24 +18,34 @@ pub struct SqliteBackend {
 }
 
 impl SqliteBackend {
-    /// Open (or create) a SQLite database at the given path.
+    /// Open (or create) a SQLite database at the exact given path.
     /// Runs performance PRAGMAs on the connection.
-    pub fn new(path: impl AsRef<Path>) -> anyhow::Result<Self> {
-        let db_path = path.as_ref().join("varda.db");
+    pub fn new(db_path: impl AsRef<Path>) -> anyhow::Result<Self> {
+        let db_path = db_path.as_ref().to_path_buf();
+        info!(db_path = %db_path.display(), "SqliteBackend: opening database");
 
         // Ensure parent directory exists
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent)?;
+            info!(parent = %parent.display(), "SqliteBackend: ensured parent directory exists");
         }
 
-        unsafe {
-            // Register sqlite-vec extension
-            sqlite3_auto_extension(Some(std::mem::transmute(
-                sqlite_vec::sqlite3_vec_init as *const (),
-            )));
-        }
+        // Register sqlite-vec extension exactly once (sqlite3_auto_extension is
+        // cumulative — calling it N times registers the init function N times,
+        // causing each new connection to run it N times → SIGTRAP with ≥3 DBs).
+        static SQLITE_VEC_INIT: std::sync::Once = std::sync::Once::new();
+        SQLITE_VEC_INIT.call_once(|| {
+            unsafe {
+                sqlite3_auto_extension(Some(std::mem::transmute(
+                    sqlite_vec::sqlite3_vec_init as *const (),
+                )));
+            }
+        });
+
         let writer = Connection::open(&db_path)?;
+        info!(db_path = %db_path.display(), "SqliteBackend: writer connection opened");
         Self::apply_pragmas(&writer)?;
+        info!(db_path = %db_path.display(), "SqliteBackend: pragmas applied to writer connection");
 
         Ok(Self {
             writer: Mutex::new(writer),
@@ -58,16 +69,19 @@ impl SqliteBackend {
 
     /// Create a standard KV table (key BLOB PRIMARY KEY, value BLOB).
     pub fn create_table(&self, name: &str) -> anyhow::Result<()> {
+        info!(db_path = %self.path.display(), table = %name, "SqliteBackend: creating table if needed");
         let conn = self.writer.lock().unwrap();
         conn.execute_batch(&format!(
             "CREATE TABLE IF NOT EXISTS \"{}\" (key BLOB PRIMARY KEY, value BLOB NOT NULL) WITHOUT ROWID;",
             name
         ))?;
+        info!(db_path = %self.path.display(), table = %name, "SqliteBackend: create_table complete");
         Ok(())
     }
 
     /// Create Full-Text Search and Vector tables for native search
     pub fn create_native_search_tables(&self) -> anyhow::Result<()> {
+        info!(db_path = %self.path.display(), "SqliteBackend: creating native search tables if needed");
         let conn = self.writer.lock().unwrap();
         // Native vector storage currently uses a fixed 384-dimensional schema.
         conn.execute_batch(
@@ -75,16 +89,19 @@ impl SqliteBackend {
              CREATE VIRTUAL TABLE IF NOT EXISTS fts_term_data USING fts5(uid UNINDEXED, field UNINDEXED, text_content, tokenize='unicode61');
              CREATE VIRTUAL TABLE IF NOT EXISTS vec_data USING vec0(uid INTEGER PRIMARY KEY, embedding float[384]);"
         )?;
+        info!(db_path = %self.path.display(), "SqliteBackend: native search table setup complete");
         Ok(())
     }
 
     /// Create a main data table with an extra `ts` column for LWW.
     pub fn create_main_table(&self, name: &str) -> anyhow::Result<()> {
+        info!(db_path = %self.path.display(), table = %name, "SqliteBackend: creating main table if needed");
         let conn = self.writer.lock().unwrap();
         conn.execute_batch(&format!(
             "CREATE TABLE IF NOT EXISTS \"{}\" (key BLOB PRIMARY KEY, value BLOB NOT NULL, ts BLOB NOT NULL) WITHOUT ROWID;",
             name
         ))?;
+        info!(db_path = %self.path.display(), table = %name, "SqliteBackend: create_main_table complete");
         Ok(())
     }
 
@@ -110,6 +127,11 @@ impl SqliteBackend {
         {
             let mut pool = self.reader_pool.lock().unwrap();
             if let Some(conn) = pool.pop() {
+                info!(
+                    db_path = %self.path.display(),
+                    remaining_pool_size = pool.len(),
+                    "SqliteBackend: reusing reader connection from pool"
+                );
                 return Ok(conn);
             }
         }
@@ -117,7 +139,9 @@ impl SqliteBackend {
         // but it doesn't hurt to ensure it or just let the connection open.
         // Actually sqlite3_auto_extension applies to all subsequent db connections.
         let conn = Connection::open(&self.path)?;
+        info!(db_path = %self.path.display(), "SqliteBackend: opened new reader connection");
         Self::apply_pragmas(&conn)?;
+        info!(db_path = %self.path.display(), "SqliteBackend: pragmas applied to reader connection");
         Ok(conn)
     }
 
@@ -126,6 +150,17 @@ impl SqliteBackend {
         let mut pool = self.reader_pool.lock().unwrap();
         if pool.len() < 8 {
             pool.push(conn);
+            info!(
+                db_path = %self.path.display(),
+                pool_size = pool.len(),
+                "SqliteBackend: returned reader connection to pool"
+            );
+        } else {
+            info!(
+                db_path = %self.path.display(),
+                pool_size = pool.len(),
+                "SqliteBackend: dropping excess reader connection"
+            );
         }
         // Drop excess connections
     }
@@ -136,8 +171,19 @@ impl SqliteBackend {
     where
         F: FnOnce(&Connection) -> anyhow::Result<R>,
     {
+        info!(db_path = %self.path.display(), "SqliteBackend: acquiring writer lock");
         let conn = self.writer.lock().unwrap();
-        f(&conn)
+        info!(db_path = %self.path.display(), "SqliteBackend: writer lock acquired");
+        let result = f(&conn);
+        match &result {
+            Ok(_) => {
+                info!(db_path = %self.path.display(), "SqliteBackend: writer operation complete")
+            }
+            Err(e) => {
+                error!(db_path = %self.path.display(), error = %e, "SqliteBackend: writer operation failed")
+            }
+        }
+        result
     }
 
     /// Execute a batch of writes in a single transaction.
@@ -145,18 +191,22 @@ impl SqliteBackend {
     where
         F: FnOnce(&Connection) -> anyhow::Result<()>,
     {
+        info!(db_path = %self.path.display(), "SqliteBackend: starting write batch");
         let conn = self.writer.lock().unwrap();
         let tx = conn.unchecked_transaction()?;
         f(&tx)?;
         tx.commit()?;
+        info!(db_path = %self.path.display(), "SqliteBackend: write batch committed");
         Ok(())
     }
 
     /// Checkpoint the WAL file and merge it into the main database.
     /// Call this on shutdown for a clean exit.
     pub fn shutdown(&self) -> anyhow::Result<()> {
+        info!(db_path = %self.path.display(), "SqliteBackend: running WAL checkpoint for shutdown");
         let conn = self.writer.lock().unwrap();
         conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+        info!(db_path = %self.path.display(), "SqliteBackend: shutdown checkpoint complete");
         Ok(())
     }
 }
@@ -229,6 +279,7 @@ impl SqliteTable {
     // ── Reads (use reader pool) ──
 
     pub fn get(&self, key: &[u8]) -> anyhow::Result<Option<Vec<u8>>> {
+        info!(table = %self.name, key_len = key.len(), "SqliteTable: get start");
         let conn = self.backend.get_reader()?;
         let sql = format!("SELECT value FROM \"{}\" WHERE key = ?1", self.name);
         let result = conn.prepare_cached(&sql).and_then(|mut stmt| {
@@ -236,6 +287,13 @@ impl SqliteTable {
                 .optional()
         });
         self.backend.return_reader(conn);
+        match &result {
+            Ok(Some(value)) => {
+                info!(table = %self.name, value_len = value.len(), "SqliteTable: get hit")
+            }
+            Ok(None) => info!(table = %self.name, "SqliteTable: get miss"),
+            Err(e) => error!(table = %self.name, error = %e, "SqliteTable: get failed"),
+        }
         Ok(result?)
     }
 
@@ -252,10 +310,14 @@ impl SqliteTable {
     /// Prefix scan: returns all (key, value) pairs where key starts with `prefix`.
     /// Results are ordered by key.
     pub fn prefix(&self, prefix: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)> {
+        info!(table = %self.name, prefix_len = prefix.len(), "SqliteTable: prefix scan start");
         let upper = compute_prefix_upper_bound(prefix);
         let conn = match self.backend.get_reader() {
             Ok(c) => c,
-            Err(_) => return vec![],
+            Err(e) => {
+                error!(table = %self.name, error = %e, "SqliteTable: prefix scan failed to get reader");
+                return vec![];
+            }
         };
         let result = if let Some(ref upper) = upper {
             let sql = format!(
@@ -297,14 +359,24 @@ impl SqliteTable {
             }
         };
         self.backend.return_reader(conn);
+        info!(table = %self.name, row_count = result.len(), "SqliteTable: prefix scan complete");
         result
     }
 
     /// Range scan: returns all (key, value) pairs where `lower <= key < upper`.
     pub fn range(&self, lower: &[u8], upper: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)> {
+        info!(
+            table = %self.name,
+            lower_len = lower.len(),
+            upper_len = upper.len(),
+            "SqliteTable: range scan start"
+        );
         let conn = match self.backend.get_reader() {
             Ok(c) => c,
-            Err(_) => return vec![],
+            Err(e) => {
+                error!(table = %self.name, error = %e, "SqliteTable: range scan failed to get reader");
+                return vec![];
+            }
         };
         let sql = format!(
             "SELECT key, value FROM \"{}\" WHERE key >= ?1 AND key < ?2 ORDER BY key",
@@ -323,14 +395,19 @@ impl SqliteTable {
             Err(_) => vec![],
         };
         self.backend.return_reader(conn);
+        info!(table = %self.name, row_count = result.len(), "SqliteTable: range scan complete");
         result
     }
 
     /// Iterate over all entries in the table, ordered by key.
     pub fn iter(&self) -> Vec<(Vec<u8>, Vec<u8>)> {
+        info!(table = %self.name, "SqliteTable: full scan start");
         let conn = match self.backend.get_reader() {
             Ok(c) => c,
-            Err(_) => return vec![],
+            Err(e) => {
+                error!(table = %self.name, error = %e, "SqliteTable: full scan failed to get reader");
+                return vec![];
+            }
         };
         let sql = format!("SELECT key, value FROM \"{}\" ORDER BY key", self.name);
         let result = match conn.prepare_cached(&sql) {
@@ -346,6 +423,7 @@ impl SqliteTable {
             Err(_) => vec![],
         };
         self.backend.return_reader(conn);
+        info!(table = %self.name, row_count = result.len(), "SqliteTable: full scan complete");
         result
     }
 
@@ -734,7 +812,7 @@ mod tests {
     #[test]
     fn test_basic_kv_operations() {
         let dir = tempdir().unwrap();
-        let backend = Arc::new(SqliteBackend::new(dir.path()).unwrap());
+        let backend = Arc::new(SqliteBackend::new(dir.path().join("test.db")).unwrap());
         backend.create_table("test").unwrap();
         let table = SqliteTable::new("test".to_string(), backend.clone());
 
@@ -763,7 +841,7 @@ mod tests {
     #[test]
     fn test_prefix_scan() {
         let dir = tempdir().unwrap();
-        let backend = Arc::new(SqliteBackend::new(dir.path()).unwrap());
+        let backend = Arc::new(SqliteBackend::new(dir.path().join("test.db")).unwrap());
         backend.create_table("test").unwrap();
         let table = SqliteTable::new("test".to_string(), backend.clone());
 
@@ -781,7 +859,7 @@ mod tests {
     #[test]
     fn test_lww_upsert() {
         let dir = tempdir().unwrap();
-        let backend = Arc::new(SqliteBackend::new(dir.path()).unwrap());
+        let backend = Arc::new(SqliteBackend::new(dir.path().join("test.db")).unwrap());
         backend.create_main_table("main").unwrap();
         let table = SqliteTable::new("main".to_string(), backend.clone());
 
@@ -810,7 +888,7 @@ mod tests {
     #[test]
     fn test_write_batch() {
         let dir = tempdir().unwrap();
-        let backend = Arc::new(SqliteBackend::new(dir.path()).unwrap());
+        let backend = Arc::new(SqliteBackend::new(dir.path().join("test.db")).unwrap());
         backend.create_table("test").unwrap();
         let table = SqliteTable::new("test".to_string(), backend.clone());
 
@@ -831,7 +909,7 @@ mod tests {
     #[test]
     fn test_iter() {
         let dir = tempdir().unwrap();
-        let backend = Arc::new(SqliteBackend::new(dir.path()).unwrap());
+        let backend = Arc::new(SqliteBackend::new(dir.path().join("test.db")).unwrap());
         backend.create_table("test").unwrap();
         let table = SqliteTable::new("test".to_string(), backend.clone());
 

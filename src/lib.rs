@@ -260,30 +260,31 @@ pub async fn init_system(config: crate::config::VardaConfig) -> (Arc<ServerState
         println!("Auth subsystem enabled");
 
         // Build auth store from pre-created SqliteTables
+        let default_backend = storage.backends.get("default").unwrap().clone();
         let auth_login_store = auth::state::AuthStore::new(
             std::sync::Arc::new(crate::storage::sqlite_backend::SqliteTable::new(
                 "auth_users".to_string(),
-                storage.backend.clone(),
+                default_backend.clone(),
             )) as std::sync::Arc<dyn auth::state::KvStore>,
             std::sync::Arc::new(crate::storage::sqlite_backend::SqliteTable::new(
                 "auth_tokens".to_string(),
-                storage.backend.clone(),
+                default_backend.clone(),
             )) as std::sync::Arc<dyn auth::state::KvStore>,
             std::sync::Arc::new(crate::storage::sqlite_backend::SqliteTable::new(
                 "auth_confirmations".to_string(),
-                storage.backend.clone(),
+                default_backend.clone(),
             )) as std::sync::Arc<dyn auth::state::KvStore>,
             std::sync::Arc::new(crate::storage::sqlite_backend::SqliteTable::new(
                 "auth_identities".to_string(),
-                storage.backend.clone(),
+                default_backend.clone(),
             )) as std::sync::Arc<dyn auth::state::KvStore>,
             std::sync::Arc::new(crate::storage::sqlite_backend::SqliteTable::new(
                 "auth_social_state".to_string(),
-                storage.backend.clone(),
+                default_backend.clone(),
             )) as std::sync::Arc<dyn auth::state::KvStore>,
             std::sync::Arc::new(crate::storage::sqlite_backend::SqliteTable::new(
                 "auth_keys".to_string(),
-                storage.backend.clone(),
+                default_backend.clone(),
             )) as std::sync::Arc<dyn auth::state::KvStore>,
         );
 

@@ -18,6 +18,11 @@ pub struct CreateDbRequest {
     pub name: String,
 }
 
+#[derive(Deserialize)]
+pub struct UpdatePathRequest {
+    pub path: String,
+}
+
 #[derive(Serialize)]
 pub struct DbResponse {
     pub name: String,
@@ -26,7 +31,7 @@ pub struct DbResponse {
 
 #[derive(Serialize)]
 pub struct ListDbsResponse {
-    pub databases: Vec<String>,
+    pub databases: Vec<crate::traits::DbInfo>,
 }
 
 pub fn router(manager: Arc<dyn DatabaseManager>) -> Router {
@@ -34,6 +39,7 @@ pub fn router(manager: Arc<dyn DatabaseManager>) -> Router {
     Router::new()
         .route("/db", post(create_db).get(list_dbs))
         .route("/db/{name}", delete(delete_db))
+        .route("/db/{name}/path", post(update_db_path))
         .route("/db/{name}/schema", post(apply_schema).get(get_schema))
         .route("/db/{name}/status", get(get_db_status))
         .with_state(state)
@@ -92,6 +98,26 @@ async fn get_db_status(
     match state.manager.get_db_status(&name).await {
         Ok(status) => Ok(Json(status)),
         Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e)),
+    }
+}
+
+async fn update_db_path(
+    State(state): State<ManagementState>,
+    Path(name): Path<String>,
+    Json(payload): Json<UpdatePathRequest>,
+) -> Result<(StatusCode, String), (StatusCode, String)> {
+    match state.manager.update_db_path(&name, &payload.path).await {
+        Ok(_) => Ok((StatusCode::OK, "Path updated successfully".to_string())),
+        Err(e) => {
+            if e.contains("Cannot update")
+                || e.contains("does not exist")
+                || e.contains("missing registry entry")
+            {
+                Err((StatusCode::BAD_REQUEST, e))
+            } else {
+                Err((StatusCode::INTERNAL_SERVER_ERROR, e))
+            }
+        }
     }
 }
 

@@ -842,19 +842,13 @@ impl Schema {
                                                     } else {
                                                         match val {
                                                             async_graphql::Value::List(items) => {
-                                                                // Should not happen for Scalars usually, unless scalar list?
-                                                                // Existing logic for scalar list:
-                                                                let mut fvs = Vec::new();
-                                                                for item in items {
-                                                                    fvs.push(
-                                                                        dynamic::FieldValue::value(
-                                                                            item,
+                                                                Ok(Some(
+                                                                    dynamic::FieldValue::value(
+                                                                        async_graphql::Value::List(
+                                                                            items,
                                                                         ),
-                                                                    );
-                                                                }
-                                                                Ok(Some(dynamic::FieldValue::list(
-                                                                    fvs,
-                                                                )))
+                                                                    ),
+                                                                ))
                                                             }
                                                             async_graphql::Value::String(s) => Ok(
                                                                 Some(dynamic::FieldValue::value(

@@ -433,8 +433,8 @@ impl SqliteResolver {
             table
         );
 
-        self.storage
-            .backend
+        let backend = self.storage.backends.get(&self.db_name).unwrap().clone();
+        backend
             .with_writer(|conn| {
                 conn.execute(&sql_del, rusqlite::params![uid_i64, index_field])?;
                 conn.execute(&sql_ins, rusqlite::params![uid_i64, index_field, text])?;
@@ -463,8 +463,8 @@ impl SqliteResolver {
             "fts_data"
         };
         let sql_del = format!("DELETE FROM {} WHERE uid = ?1 AND field = ?2", table);
-        self.storage
-            .backend
+        let backend = self.storage.backends.get(&self.db_name).unwrap().clone();
+        backend
             .with_writer(|conn| {
                 conn.execute(&sql_del, rusqlite::params![uid_i64, index_field])?;
                 Ok(())
@@ -502,7 +502,8 @@ impl SqliteResolver {
             terms.join(" OR ")
         };
 
-        let conn = match self.storage.backend.get_reader() {
+        let backend = self.storage.backends.get(&self.db_name).unwrap().clone();
+        let conn = match backend.get_reader() {
             Ok(c) => c,
             Err(_) => return vec![],
         };
@@ -534,7 +535,7 @@ impl SqliteResolver {
         })()
         .unwrap_or_default();
 
-        self.storage.backend.return_reader(conn);
+        backend.return_reader(conn);
         out
     }
 
@@ -567,7 +568,8 @@ impl SqliteResolver {
         let vec_bytes =
             unsafe { std::slice::from_raw_parts(vec_f32.as_ptr() as *const u8, vec_f32.len() * 4) };
 
-        let conn = match self.storage.backend.get_reader() {
+        let backend = self.storage.backends.get(&self.db_name).unwrap().clone();
+        let conn = match backend.get_reader() {
             Ok(c) => c,
             Err(_) => return vec![],
         };
@@ -622,7 +624,7 @@ impl SqliteResolver {
 
         let out = out.unwrap_or_default();
 
-        self.storage.backend.return_reader(conn);
+        backend.return_reader(conn);
         out
     }
 
@@ -1571,8 +1573,8 @@ impl SqliteResolver {
 
         // 3. Single atomic commit for all local key/value writes.
         let commit_start = std::time::Instant::now();
-        self.storage
-            .backend
+        let backend = self.storage.backends.get(&self.db_name).unwrap().clone();
+        backend
             .write_batch(|conn| {
                 let type_key_idx = Codec::encode_type_index_key(type_name, uid);
                 main.batch_insert_on_conn(conn, &type_key_idx, &[])?;
@@ -1691,8 +1693,8 @@ impl SqliteResolver {
         let ts = self.storage.next_timestamp();
         let ts_bytes = ts.to_bytes();
 
-        self.storage
-            .backend
+        let backend = self.storage.backends.get(&self.db_name).unwrap().clone();
+        backend
             .write_batch(|conn| {
                 // Log metadata for debugging
                 for (type_name, meta) in type_metadata {

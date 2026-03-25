@@ -1,7 +1,7 @@
 use crate::storage::sqlite_backend::{SqliteBackend, SqliteTable};
 use byteorder::{BigEndian, ByteOrder};
 use permissions::storage::auth_store::AuthStore;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
 use tracing::{error, info};
 use uuid::Uuid;
@@ -29,7 +29,8 @@ extern "C" fn crash_handler(_signum: libc::c_int) {
 }
 
 pub struct Storage {
-    pub backend: Arc<SqliteBackend>,
+    pub backends: dashmap::DashMap<String, Arc<SqliteBackend>>,
+    pub base_path: PathBuf,
     // Database Management
     // Map: DatabaseName -> (Main Table, History Table)
     pub keyspaces: std::sync::RwLock<std::collections::HashMap<String, (SqliteTable, SqliteTable)>>,
@@ -55,34 +56,50 @@ pub struct Storage {
 
 impl Storage {
     pub fn new(path: impl AsRef<Path>, node_id_override: Option<u64>) -> anyhow::Result<Self> {
-        let backend = Arc::new(SqliteBackend::new(path.as_ref())?);
+        let base_path = path.as_ref().to_path_buf();
+        let default_db_path = base_path.join("default.db");
+        info!(
+            storage_path = %base_path.display(),
+            default_db_path = %default_db_path.display(),
+            node_id_override = ?node_id_override,
+            "Storage: starting initialization"
+        );
+        let default_backend = Arc::new(SqliteBackend::new(&default_db_path)?);
+        info!(
+            default_db_path = %default_db_path.display(),
+            "Storage: opened default backend"
+        );
 
-        // Create System Tables
-        backend.create_table("sys")?;
-        backend.create_table("quarantine")?;
-        backend.create_table("sys_metrics")?;
-        backend.create_table("sys_traces")?;
-        backend.create_table("vectors")?;
-        backend.create_native_search_tables()?;
-        backend.create_table("auth_tuples")?;
-        backend.create_table("auth_attributes")?;
-        // Auth login tables (was previously created by AuthStore::init from Database)
-        backend.create_table("auth_users")?;
-        backend.create_table("auth_tokens")?;
-        backend.create_table("auth_confirmations")?;
-        backend.create_table("auth_identities")?;
-        backend.create_table("auth_social_state")?;
-        backend.create_table("auth_keys")?;
+        let backends = dashmap::DashMap::new();
+        backends.insert("default".to_string(), default_backend.clone());
 
-        let sys_table = SqliteTable::new("sys".to_string(), backend.clone());
-        let quarantine_table = SqliteTable::new("quarantine".to_string(), backend.clone());
-        let metrics_table = SqliteTable::new("sys_metrics".to_string(), backend.clone());
-        let traces_table = SqliteTable::new("sys_traces".to_string(), backend.clone());
+        // Create System Tables on default database
+        default_backend.create_table("sys")?;
+        default_backend.create_table("quarantine")?;
+        default_backend.create_table("sys_metrics")?;
+        default_backend.create_table("sys_traces")?;
+        default_backend.create_table("vectors")?;
+        default_backend.create_native_search_tables()?;
+        default_backend.create_table("auth_tuples")?;
+        default_backend.create_table("auth_attributes")?;
+        // Auth login tables
+        default_backend.create_table("auth_users")?;
+        default_backend.create_table("auth_tokens")?;
+        default_backend.create_table("auth_confirmations")?;
+        default_backend.create_table("auth_identities")?;
+        default_backend.create_table("auth_social_state")?;
+        default_backend.create_table("auth_keys")?;
+
+        let sys_table = SqliteTable::new("sys".to_string(), default_backend.clone());
+        let quarantine_table = SqliteTable::new("quarantine".to_string(), default_backend.clone());
+        let metrics_table = SqliteTable::new("sys_metrics".to_string(), default_backend.clone());
+        let traces_table = SqliteTable::new("sys_traces".to_string(), default_backend.clone());
 
         // AuthZ Store
-        let auth_tuples_table = SqliteTable::new("auth_tuples".to_string(), backend.clone());
+        let auth_tuples_table =
+            SqliteTable::new("auth_tuples".to_string(), default_backend.clone());
         let auth_attributes_table =
-            SqliteTable::new("auth_attributes".to_string(), backend.clone());
+            SqliteTable::new("auth_attributes".to_string(), default_backend.clone());
         let auth_store = AuthStore::new(
             std::sync::Arc::new(auth_tuples_table)
                 as std::sync::Arc<dyn permissions::storage::auth_store::KvStore>,
@@ -92,7 +109,7 @@ impl Storage {
 
         // Vector Worker (Bounded Channel)
         let (tx, rx) = std::sync::mpsc::sync_channel::<(u64, Vec<f64>)>(5000);
-        let worker_backend = backend.clone();
+        let worker_backend = default_backend.clone();
 
         std::thread::spawn(move || {
             println!("Storage: Vector Background Worker Started");
@@ -114,30 +131,70 @@ impl Storage {
             println!("Storage: Vector Background Worker Stopped");
         });
 
-        // Auto-discover databases from existing tables
+        // Auto-discover databases from registry
         let mut initial_keyspaces = std::collections::HashMap::new();
 
         // Always ensure "default" database exists
-        backend.create_main_table("default_main")?;
-        backend.create_table("default_history")?;
-        let default_main = SqliteTable::new_main("default_main".to_string(), backend.clone());
-        let default_history = SqliteTable::new("default_history".to_string(), backend.clone());
+        default_backend.create_main_table("default_main")?;
+        default_backend.create_table("default_history")?;
+        let default_main =
+            SqliteTable::new_main("default_main".to_string(), default_backend.clone());
+        let default_history =
+            SqliteTable::new("default_history".to_string(), default_backend.clone());
         initial_keyspaces.insert("default".to_string(), (default_main, default_history));
 
-        // Auto-discover other databases from sqlite_master
-        let all_tables = backend.list_tables();
-        println!("Storage: All tables in database: {:?}", all_tables);
+        let registry = sys_table.prefix(b"db:");
+        info!(
+            registry_entries = registry.len(),
+            "Storage: loaded database registry entries"
+        );
+        for (k, v) in registry {
+            let db_name = String::from_utf8(k[3..].to_vec()).unwrap_or_default();
+            let db_path_str = String::from_utf8(v).unwrap_or_default();
+            if db_name.is_empty() || db_path_str.is_empty() {
+                continue;
+            }
 
-        for table_name in &all_tables {
-            if table_name.ends_with("_main") && table_name != "default_main" {
-                let db_name = table_name.trim_end_matches("_main");
-                let history_name = format!("{}_history", db_name);
+            let db_path = std::path::PathBuf::from(db_path_str);
+            info!(
+                db_name = %db_name,
+                db_path = %db_path.display(),
+                "Storage: attempting auto-load of registered database"
+            );
+            if !db_path.exists() {
+                println!("Storage [Warning]: Registered database '{}' file not found at {:?}. Skipping auto-load.", db_name, db_path);
+                error!(
+                    db_name = %db_name,
+                    db_path = %db_path.display(),
+                    "Storage: registered database file missing during auto-load"
+                );
+                continue;
+            }
 
-                if all_tables.contains(&history_name) {
-                    println!("Storage: Discovered database '{}'", db_name);
-                    let main_table = SqliteTable::new_main(table_name.clone(), backend.clone());
-                    let hist_table = SqliteTable::new(history_name, backend.clone());
-                    initial_keyspaces.insert(db_name.to_string(), (main_table, hist_table));
+            match SqliteBackend::new(&db_path) {
+                Ok(b) => {
+                    let b_arc = Arc::new(b);
+                    backends.insert(db_name.clone(), b_arc.clone());
+
+                    let main_name = format!("{}_main", db_name);
+                    let hist_name = format!("{}_history", db_name);
+
+                    let main_table = SqliteTable::new_main(main_name, b_arc.clone());
+                    let hist_table = SqliteTable::new(hist_name, b_arc.clone());
+
+                    initial_keyspaces.insert(db_name.clone(), (main_table, hist_table));
+                    println!("Storage: Discovered and loaded database '{}'", db_name);
+                    info!(
+                        db_name = %db_name,
+                        db_path = %db_path.display(),
+                        "Storage: discovered and loaded database"
+                    );
+                }
+                Err(e) => {
+                    error!(
+                        "Storage [Error]: Failed to open database '{}' at {:?}: {}",
+                        db_name, db_path, e
+                    );
                 }
             }
         }
@@ -188,7 +245,8 @@ impl Storage {
         });
 
         let storage = Self {
-            backend,
+            backends,
+            base_path,
             keyspaces: std::sync::RwLock::new(initial_keyspaces),
             sys_table,
             quarantine_table,
@@ -201,6 +259,11 @@ impl Storage {
             fingerprints: std::sync::Arc::new(dashmap::DashMap::new()),
             fingerprints_ready: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
+        info!(
+            database_count = storage.keyspaces.read().unwrap().len(),
+            backend_count = storage.backends.len(),
+            "Storage: core initialization complete, restoring fingerprints"
+        );
 
         // Restore Fingerprints (Fast load / Fallback to scan)
         if let Err(e) = storage.restore_fingerprints() {
@@ -230,24 +293,114 @@ impl Storage {
     // --- Database Management ---
 
     pub fn create_database(&self, name: &str) -> anyhow::Result<()> {
+        self.create_database_with_path(name, None)
+    }
+
+    pub fn create_database_with_path(
+        &self,
+        name: &str,
+        custom_path: Option<String>,
+    ) -> anyhow::Result<()> {
+        let db_path = if let Some(p) = custom_path {
+            PathBuf::from(p)
+        } else {
+            self.base_path.join(format!("{}.db", name))
+        };
+
+        let new_backend = Arc::new(SqliteBackend::new(&db_path)?);
+
         let main_name = format!("{}_main", name);
         let history_name = format!("{}_history", name);
 
-        self.backend.create_main_table(&main_name)?;
-        self.backend.create_table(&history_name)?;
+        new_backend.create_main_table(&main_name)?;
+        new_backend.create_table(&history_name)?;
 
-        let main_table = SqliteTable::new_main(main_name, self.backend.clone());
-        let history_table = SqliteTable::new(history_name, self.backend.clone());
+        let main_table = SqliteTable::new_main(main_name.clone(), new_backend.clone());
+        let history_table = SqliteTable::new(history_name, new_backend.clone());
+
+        self.backends.insert(name.to_string(), new_backend);
 
         let mut lock = self.keyspaces.write().unwrap();
         lock.insert(name.to_string(), (main_table, history_table));
 
+        // Add to db_registry system table
+        let registry_key = format!("db:{}", name);
+        self.sys_table.insert(
+            registry_key.as_bytes(),
+            db_path.to_string_lossy().as_bytes(),
+        )?;
+
         Ok(())
     }
 
-    pub fn list_databases(&self) -> Vec<String> {
+    pub fn update_db_path(&self, name: &str, new_path: &str) -> anyhow::Result<()> {
+        if name == "default" {
+            return Err(anyhow::anyhow!("Cannot update path of default database"));
+        }
+
+        // Only allow if database already actually exists in registry
+        let registry_key = format!("db:{}", name);
+        if let Ok(None) = self.sys_table.get(registry_key.as_bytes()) {
+            return Err(anyhow::anyhow!(
+                "Database does not exist or missing registry entry"
+            ));
+        }
+
+        let db_path = PathBuf::from(new_path);
+
+        // Ensure new backend can be initialized
+        let new_backend = Arc::new(SqliteBackend::new(&db_path)?);
+
+        let main_name = format!("{}_main", name);
+        let history_name = format!("{}_history", name);
+
+        new_backend.create_main_table(&main_name)?;
+        new_backend.create_table(&history_name)?;
+
+        // Update registry
+        self.sys_table.insert(
+            registry_key.as_bytes(),
+            db_path.to_string_lossy().as_bytes(),
+        )?;
+
+        let main_table = SqliteTable::new_main(main_name, new_backend.clone());
+        let history_table = SqliteTable::new(history_name, new_backend.clone());
+
+        self.backends.insert(name.to_string(), new_backend);
+
+        let mut lock = self.keyspaces.write().unwrap();
+        lock.insert(name.to_string(), (main_table, history_table));
+
+        println!(
+            "Storage: Updated path for database '{}' to {:?}",
+            name, db_path
+        );
+
+        Ok(())
+    }
+
+    pub fn list_databases(&self) -> Vec<(String, String)> {
         let lock = self.keyspaces.read().unwrap();
-        lock.keys().cloned().collect()
+        let mut result = Vec::with_capacity(lock.len());
+
+        for name in lock.keys() {
+            let path = if name == "default" {
+                self.base_path
+                    .join("default.db")
+                    .to_string_lossy()
+                    .to_string()
+            } else {
+                let registry_key = format!("db:{}", name);
+                if let Ok(Some(bytes)) = self.sys_table.get(registry_key.as_bytes()) {
+                    String::from_utf8(bytes).unwrap_or_else(|_| "Unknown".to_string())
+                } else {
+                    "Unknown".to_string()
+                }
+            };
+            result.push((name.clone(), path));
+        }
+
+        result
     }
 
     pub fn get_database(&self, name: &str) -> Option<(SqliteTable, SqliteTable)> {
@@ -256,6 +409,9 @@ impl Storage {
     }
 
     pub fn delete_database(&self, name: &str) -> anyhow::Result<()> {
+        if name == "default" {
+            return Err(anyhow::anyhow!("Cannot delete default database"));
+        }
         {
             let mut lock = self.keyspaces.write().unwrap();
             if lock.remove(name).is_none() {
@@ -263,10 +419,16 @@ impl Storage {
             }
         };
 
-        let main_name = format!("{}_main", name);
-        let history_name = format!("{}_history", name);
-        self.backend.drop_table(&main_name)?;
-        self.backend.drop_table(&history_name)?;
+        if let Some((_, backend)) = self.backends.remove(name) {
+            let main_name = format!("{}_main", name);
+            let history_name = format!("{}_history", name);
+            let _ = backend.drop_table(&main_name);
+            let _ = backend.drop_table(&history_name);
+        }
+
+        let registry_key = format!("db:{}", name);
+        let _ = self.sys_table.remove(registry_key.as_bytes());
+
         Ok(())
     }
 
@@ -332,8 +494,13 @@ impl Storage {
         let ts_bytes = timestamp.to_bytes();
         let main_clone = main.clone();
 
+        let backend = self
+            .backends
+            .get(db_name)
+            .ok_or(anyhow::anyhow!("Database not found"))?
+            .clone();
         let batch_start = Instant::now();
-        self.backend.write_batch(|conn| {
+        backend.write_batch(|conn| {
             for (uid, predicate, value) in &items {
                 let key = crate::storage::codec::Codec::encode_data_key(*uid, predicate);
                 main_clone.batch_upsert_lww_on_conn(conn, &key, value, &ts_bytes)?;
@@ -436,8 +603,15 @@ impl Storage {
             eprintln!("Storage: Failed to persist fingerprints: {}", e);
         }
 
-        // WAL checkpoint — merges WAL into main database file
-        self.backend.shutdown()?;
+        for entry in self.backends.iter() {
+            if let Err(e) = entry.value().shutdown() {
+                eprintln!(
+                    "Storage: Failed to shutdown backend '{}': {}",
+                    entry.key(),
+                    e
+                );
+            }
+        }
 
         println!("Storage: Flush complete (WAL checkpoint done)");
         Ok(())
@@ -534,13 +708,15 @@ impl Storage {
 
     pub fn delete_vector(&self, uid: u64) -> anyhow::Result<()> {
         let uid_i64 = uid as i64;
-        self.backend.with_writer(|conn| {
-            conn.execute(
-                "DELETE FROM vec_data WHERE uid = ?1",
-                rusqlite::params![uid_i64],
-            )?;
-            Ok(())
-        })?;
+        if let Some(backend) = self.backends.get("default") {
+            backend.with_writer(|conn| {
+                conn.execute(
+                    "DELETE FROM vec_data WHERE uid = ?1",
+                    rusqlite::params![uid_i64],
+                )?;
+                Ok(())
+            })?;
+        }
         Ok(())
     }
 
@@ -549,7 +725,11 @@ impl Storage {
         let vec_bytes =
             unsafe { std::slice::from_raw_parts(vec_f32.as_ptr() as *const u8, vec_f32.len() * 4) };
 
-        let conn = self.backend.get_reader()?;
+        let backend = self
+            .backends
+            .get("default")
+            .ok_or(anyhow::anyhow!("Missing default DB"))?;
+        let conn = backend.get_reader()?;
         let res = (|| -> anyhow::Result<Vec<(u64, f64)>> {
             let mut stmt = conn.prepare("SELECT uid, distance FROM vec_data WHERE embedding MATCH ?1 AND k = ?2 ORDER BY distance")?;
             let rows = stmt.query_map(rusqlite::params![vec_bytes, k as i64], |row| {
@@ -567,7 +747,7 @@ impl Storage {
             Ok(results)
         })();
 
-        self.backend.return_reader(conn);
+        backend.return_reader(conn);
         res
     }
 
@@ -625,6 +805,10 @@ impl Storage {
 
     pub fn persist_fingerprints(&self) -> anyhow::Result<()> {
         use std::sync::atomic::Ordering;
+        info!(
+            fingerprint_count = self.fingerprints.len(),
+            "Storage: persisting fingerprints to sys table"
+        );
         for entry in self.fingerprints.iter() {
             let db_name = entry.key();
             let (h_atomic, c_atomic) = entry.value();
@@ -636,17 +820,34 @@ impl Storage {
             BigEndian::write_u64(&mut buf[8..16], h);
 
             let key = format!("fp:{}", db_name);
+            info!(
+                db_name = %db_name,
+                fingerprint_key = %key,
+                count = c,
+                hash = format_args!("{:x}", h),
+                "Storage: writing fingerprint record"
+            );
             self.sys_table.insert(key.as_bytes(), &buf)?;
         }
+        info!("Storage: fingerprint persistence complete");
         Ok(())
     }
 
     pub fn restore_fingerprints(&self) -> anyhow::Result<()> {
         let keyspaces = self.keyspaces.read().unwrap();
         let mut needs_rebuild: Vec<(String, SqliteTable)> = Vec::new();
+        info!(
+            keyspace_count = keyspaces.len(),
+            "Storage: restoring fingerprints"
+        );
 
         for (name, (_, history_table)) in keyspaces.iter() {
             let key = format!("fp:{}", name);
+            info!(
+                db_name = %name,
+                fingerprint_key = %key,
+                "Storage: checking fingerprint record"
+            );
             if let Some(val) = self.sys_table.get(key.as_bytes())? {
                 if val.len() == 16 {
                     let c = BigEndian::read_u64(&val[0..8]);
@@ -663,13 +864,29 @@ impl Storage {
                         "Storage: Restored fingerprint for '{}' (Count: {}, Hash: {:x})",
                         name, c, h
                     );
+                    info!(
+                        db_name = %name,
+                        count = c,
+                        hash = format_args!("{:x}", h),
+                        "Storage: restored fingerprint from sys table"
+                    );
                     continue;
                 }
+                error!(
+                    db_name = %name,
+                    fingerprint_key = %key,
+                    value_len = val.len(),
+                    "Storage: fingerprint record had unexpected length"
+                );
             }
 
             println!(
                 "Storage: Fingerprint missing for '{}' - will rebuild in background",
                 name
+            );
+            info!(
+                db_name = %name,
+                "Storage: fingerprint missing, scheduling background rebuild"
             );
             self.fingerprints.insert(
                 name.clone(),
@@ -688,9 +905,14 @@ impl Storage {
 
         if needs_rebuild.is_empty() {
             println!("Storage: All fingerprints ready (restored from disk)");
+            info!("Storage: all fingerprints restored from disk");
         } else {
             println!(
                 "Storage: Fingerprints ready (initialized to zero, will rebuild in background)"
+            );
+            info!(
+                rebuild_count = needs_rebuild.len(),
+                "Storage: initialized placeholder fingerprints and spawning rebuild thread"
             );
             self.spawn_fingerprint_rebuild(needs_rebuild);
         }
@@ -705,6 +927,12 @@ impl Storage {
         let fingerprints = self.fingerprints.clone();
         let ready_flag = self.fingerprints_ready.clone();
         let sys_table = self.sys_table.clone();
+        let db_names: Vec<String> = db_list.iter().map(|(name, _)| name.clone()).collect();
+        info!(
+            rebuild_count = db_names.len(),
+            databases = ?db_names,
+            "Storage: spawning background fingerprint rebuild thread"
+        );
 
         std::thread::spawn(move || {
             println!(
@@ -712,15 +940,48 @@ impl Storage {
                 db_list.len()
             );
             let start = std::time::Instant::now();
+            info!(
+                rebuild_count = db_list.len(),
+                "Storage: background fingerprint rebuild thread started"
+            );
 
             for (name, history_table) in db_list {
                 let scan_start = std::time::Instant::now();
                 let mut hash: u64 = 0;
                 let mut count: u64 = 0;
+                info!(
+                    db_name = %name,
+                    "Storage: background fingerprint rebuild scanning database"
+                );
 
-                for (k, v) in history_table.iter() {
+                let rows = history_table.iter();
+                info!(
+                    db_name = %name,
+                    row_count = rows.len(),
+                    "Storage: background fingerprint rebuild loaded history rows"
+                );
+
+                for (k, v) in rows {
+                    let next_count = count + 1;
+                    if next_count <= 10 || next_count % 1_000 == 0 {
+                        info!(
+                            db_name = %name,
+                            row_index = next_count,
+                            key_len = k.len(),
+                            value_len = v.len(),
+                            "Storage: background fingerprint rebuild hashing row"
+                        );
+                    }
                     hash ^= Self::hash_item(&k, &v);
-                    count += 1;
+                    count = next_count;
+                    if count <= 10 || count % 1_000 == 0 {
+                        info!(
+                            db_name = %name,
+                            row_index = count,
+                            running_hash = format_args!("{:x}", hash),
+                            "Storage: background fingerprint rebuild hashed row"
+                        );
+                    }
                     if count % 100_000 == 0 {
                         println!(
                             "Storage: Fingerprint rebuild for '{}' - scanned {} items ({:.1}s)...",
@@ -730,11 +991,24 @@ impl Storage {
                         );
                     }
                 }
+                info!(
+                    db_name = %name,
+                    total_count = count,
+                    final_hash = format_args!("{:x}", hash),
+                    "Storage: background fingerprint rebuild finished hashing rows"
+                );
                 println!(
                     "Storage: Fingerprint rebuild for '{}' completed - {} items in {:.1}s",
                     name,
                     count,
                     scan_start.elapsed().as_secs_f64()
+                );
+                info!(
+                    db_name = %name,
+                    count,
+                    hash = format_args!("{:x}", hash),
+                    elapsed_secs = scan_start.elapsed().as_secs_f64(),
+                    "Storage: background fingerprint rebuild scan complete"
                 );
 
                 // Update the DashMap entry
@@ -743,6 +1017,15 @@ impl Storage {
                     let (h_atomic, c_atomic) = entry.value();
                     h_atomic.store(hash, Ordering::Release);
                     c_atomic.store(count, Ordering::Release);
+                    info!(
+                        db_name = %name,
+                        "Storage: updated in-memory fingerprint after rebuild"
+                    );
+                } else {
+                    error!(
+                        db_name = %name,
+                        "Storage: missing in-memory fingerprint entry during rebuild"
+                    );
                 }
 
                 // Persist to sys table
@@ -750,6 +1033,11 @@ impl Storage {
                 let mut buf = vec![0u8; 16];
                 BigEndian::write_u64(&mut buf[0..8], count);
                 BigEndian::write_u64(&mut buf[8..16], hash);
+                info!(
+                    db_name = %name,
+                    fingerprint_key = %key,
+                    "Storage: persisting rebuilt fingerprint"
+                );
                 if let Err(e) = sys_table.insert(key.as_bytes(), &buf) {
                     eprintln!(
                         "Storage: Failed to persist rebuilt fingerprint for '{}': {}",
@@ -767,6 +1055,10 @@ impl Storage {
             println!(
                 "Storage: Background fingerprint rebuild complete in {:?}",
                 start.elapsed()
+            );
+            info!(
+                elapsed_secs = start.elapsed().as_secs_f64(),
+                "Storage: background fingerprint rebuild thread complete"
             );
         });
     }

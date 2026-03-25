@@ -11,8 +11,14 @@ struct DbResponse {
 }
 
 #[derive(Deserialize)]
+struct DbInfo {
+    name: String,
+    path: String,
+}
+
+#[derive(Deserialize)]
 struct ListDbsResponse {
-    databases: Vec<String>,
+    databases: Vec<DbInfo>,
 }
 
 use clap::Subcommand;
@@ -30,6 +36,13 @@ pub enum DbCommands {
     Delete {
         /// Name of the database
         name: String,
+    },
+    /// Update the storage path for a database
+    UpdatePath {
+        /// Name of the database
+        name: String,
+        /// New absolute file path
+        path: String,
     },
     /// Apply a schema to a database
     Apply {
@@ -68,9 +81,9 @@ pub async fn handle_db_command(command: &DbCommands, config: &VardaConfig) -> an
             if res.status().is_success() {
                 let list: ListDbsResponse = res.json().await?;
                 let mut table = Table::new();
-                table.set_header(vec!["Database Name"]);
+                table.set_header(vec!["Database Name", "Path"]);
                 for db in list.databases {
-                    table.add_row(vec![db]);
+                    table.add_row(vec![db.name, db.path]);
                 }
                 println!("{}", table);
             } else {
@@ -89,6 +102,23 @@ pub async fn handle_db_command(command: &DbCommands, config: &VardaConfig) -> an
             } else {
                 let err = res.text().await?;
                 eprintln!("Failed to delete database: {}", err);
+            }
+        }
+        DbCommands::UpdatePath { name, path } => {
+            let res = client
+                .post(format!("{}/db/{}/path", base_url, name))
+                .json(&serde_json::json!({ "path": path }))
+                .send()
+                .await?;
+
+            if res.status().is_success() {
+                println!(
+                    "Database '{}' path updated successfully to '{}'.",
+                    name, path
+                );
+            } else {
+                let err = res.text().await?;
+                eprintln!("Failed to update database path: {}", err);
             }
         }
         DbCommands::Apply { name, schema } => {

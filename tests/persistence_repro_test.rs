@@ -23,7 +23,7 @@ fn test_database_persistence() {
         let dbs = storage.list_databases();
         println!("Databases found: {:?}", dbs);
         assert!(
-            dbs.contains(&"archondb".to_string()),
+            dbs.iter().any(|(name, _)| name == "archondb"),
             "archondb should persist after restart"
         );
         assert!(

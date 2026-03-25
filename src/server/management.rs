@@ -53,8 +53,12 @@ impl DatabaseManager for ManagementState {
         }
     }
 
-    async fn list_dbs(&self) -> Result<Vec<String>, String> {
-        Ok(self.storage.list_databases())
+    async fn list_dbs(&self) -> Result<Vec<management::DbInfo>, String> {
+        let dbs = self.storage.list_databases();
+        Ok(dbs
+            .into_iter()
+            .map(|(name, path)| management::DbInfo { name, path })
+            .collect())
     }
 
     async fn delete_db(&self, name: &str) -> Result<(), String> {
@@ -135,6 +139,13 @@ impl DatabaseManager for ManagementState {
                 Ok(())
             }
             Err(e) => Err(format!("Invalid Schema: {}", e)),
+        }
+    }
+
+    async fn update_db_path(&self, name: &str, new_path: &str) -> Result<(), String> {
+        match self.storage.update_db_path(name, new_path) {
+            Ok(_) => Ok(()),
+            Err(e) => Err(e.to_string()),
         }
     }
 }

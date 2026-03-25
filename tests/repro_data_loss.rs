@@ -35,7 +35,7 @@ fn test_data_persistence_after_restart() {
         let storage = Storage::new(db_path, None).unwrap();
         let databases = storage.list_databases();
         assert!(
-            databases.contains(&db_name.to_string()),
+            databases.iter().any(|(name, _)| name == db_name),
             "Database should persist"
         );
 
