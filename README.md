@@ -17,6 +17,8 @@ Designed for local-first applications, edge computing, and high-throughput local
 *   **SQLite KV Storage**: High-performance, embedded storage via **rusqlite** with WAL mode for instant recovery.
 *   **Query Caching**: Integrated LRU cache for high-speed read comparisons.
 *   **Native MLX-RS Inference**: Built-in local LLM support via **MLX-RS**, the Rust counterpart to Python's `mlx-lm`.
+*   **MCP Server Mode**: Stdio-based Model Context Protocol server for AI tool integration.
+*   **Embedded Task/Workflow Runtime**: Integrated background task and workflow engine via **wardadb-runtime**.
 *   **Secure Auth Stack**: Integrated PASETO identity service and **Zanzibar-style ReBAC** authorization engine.
 
 ---
@@ -48,7 +50,15 @@ cargo run -- start --port 9000
 *   **Playground**: `http://localhost:9000/playground`
 *   **Schema Admin**: `http://localhost:9000/admin/schema`
 
-### 2. Embedded Library
+### 2. MCP Server
+
+VardaDB can run as an MCP (Model Context Protocol) server over stdio, allowing AI agents to interact with the database directly.
+
+```bash
+cargo run -- --mcp
+```
+
+### 3. Embedded Library
 
 VardaDB can be embedded directly into your Rust applications, bypassing the network layer entirely.
 
@@ -73,6 +83,25 @@ let res = schema.execute(Request::new("{ queryUser { name } }")).await;
 Run the embedded demo:
 ```bash
 cargo run --example embedded_demo
+```
+
+### 4. Embedded Task/Workflow Runtime
+
+VardaDB includes a task/workflow runtime for background jobs and resilient workflows.
+
+**Build the runtime:**
+```bash
+# Requires Rust 1.93.0
+cargo +1.93.0 build --manifest-path runtime/Cargo.toml --bin vardadb-runtime
+```
+
+**Usage:**
+```bash
+# Start the runtime
+cargo run -- runtime start
+
+# List services
+cargo run -- runtime services list
 ```
 
 ---
@@ -136,6 +165,9 @@ VardaDB uses **SQLite** (via `rusqlite`) configured as a high-performance Key-Va
 *   **Instant Recovery**: Thanks to WAL mode, startup is near-instant, avoiding the recovery delays typical of LSM-tree engines.
 *   **Durability**: Data is persisted to disk (`varda_db_data/`) with atomic checkpoints.
 *   **Resolution**: The `SqliteResolver` (bridging GraphQL to KV storage) now translates graph traversals into efficient B-Tree lookups.
+*   **Multi-Database**: VardaDB supports multiple independent databases, each stored in its own SQLite file.
+    *   **Header-based Routing**: Use the `x-varda-db` (or `db`, `ns`) header to route GraphQL requests to specific databases.
+    *   **Dynamic Loading**: Databases and their schemas are loaded lazily on the first request.
 
 ### 4. Geo Support
 Built-in geospatial capabilities allow you to build location-aware apps.
@@ -178,6 +210,16 @@ VardaDB provides a built-in CLI for managing databases. The server must be runni
 *   **Delete Database**:
     ```bash
     cargo run -- db delete my_old_db
+    ```
+
+*   **Update Storage Path**:
+    ```bash
+    cargo run -- db update-path my_db /absolute/path/to/my.db
+    ```
+
+*   **Apply Schema**:
+    ```bash
+    cargo run -- db apply --name my_db --schema schema.graphql
     ```
 
 ### 9. Interactive Shell (REPL)
