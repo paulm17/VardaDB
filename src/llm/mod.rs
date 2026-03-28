@@ -2,7 +2,7 @@ use std::fs;
 use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -21,18 +21,25 @@ use crate::config::LLMConfig;
 
 const MLX_SERVER_START_TIMEOUT: Duration = Duration::from_secs(10);
 const MLX_SERVER_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const MLX_SERVER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 const EMBEDDINGS_BATCH_SIZE: usize = 256;
+
+static ACTIVE_MLX_ENGINES: std::sync::OnceLock<Mutex<Vec<Weak<MlxEngine>>>> =
+    std::sync::OnceLock::new();
+static MLX_EXIT_HOOK_REGISTERED: std::sync::Once = std::sync::Once::new();
 
 pub struct MlxEngine {
     pub base_url: String,
     pub model: String,
     client: reqwest::Client,
-    child: Mutex<Child>,
+    child: Mutex<Option<Child>>,
     config_path: PathBuf,
 }
 
 impl MlxEngine {
     pub fn start(config: LLMConfig) -> Result<Arc<Self>, Box<dyn std::error::Error>> {
+        register_process_exit_hook();
+
         let server_path = resolve_mlx_server_path(&config);
         let bind = format!("127.0.0.1:{}", config.port);
         let base_url = format!("http://{}", bind);
@@ -65,29 +72,107 @@ impl MlxEngine {
             "started managed mlx-server"
         );
 
-        Ok(Arc::new(Self {
+        let engine = Arc::new(Self {
             base_url,
             model: config.model,
             client: reqwest::Client::builder().build()?,
-            child: Mutex::new(child),
+            child: Mutex::new(Some(child)),
             config_path,
-        }))
+        });
+
+        register_managed_engine(&engine);
+
+        Ok(engine)
+    }
+
+    pub fn shutdown(&self) {
+        if let Ok(mut child_guard) = self.child.lock() {
+            if let Some(mut child) = child_guard.take() {
+                shutdown_child(&mut child, &self.config_path);
+            } else {
+                let _ = fs::remove_file(&self.config_path);
+            }
+        } else {
+            let _ = fs::remove_file(&self.config_path);
+        }
     }
 }
 
 impl Drop for MlxEngine {
     fn drop(&mut self) {
-        if let Ok(child) = self.child.get_mut() {
-            let _ = child.kill();
-            let _ = child.wait();
+        if let Ok(child_guard) = self.child.get_mut() {
+            if let Some(child) = child_guard.as_mut() {
+                shutdown_child(child, &self.config_path);
+            } else {
+                let _ = fs::remove_file(&self.config_path);
+            }
+        } else {
+            let _ = fs::remove_file(&self.config_path);
         }
-        let _ = fs::remove_file(&self.config_path);
     }
 }
 
 fn cleanup_process(child: &mut Child, config_path: &PathBuf) {
-    let _ = child.kill();
-    let _ = child.wait();
+    shutdown_child(child, config_path);
+}
+
+fn register_managed_engine(engine: &Arc<MlxEngine>) {
+    let mutex = ACTIVE_MLX_ENGINES.get_or_init(|| Mutex::new(Vec::new()));
+    if let Ok(mut list) = mutex.lock() {
+        list.push(Arc::downgrade(engine));
+    }
+}
+
+fn register_process_exit_hook() {
+    MLX_EXIT_HOOK_REGISTERED.call_once(|| unsafe {
+        libc::atexit(cleanup_on_process_exit);
+    });
+}
+
+extern "C" fn cleanup_on_process_exit() {
+    shutdown_all_managed_processes();
+}
+
+pub fn shutdown_all_managed_processes() {
+    if let Some(mutex) = ACTIVE_MLX_ENGINES.get() {
+        if let Ok(mut list) = mutex.lock() {
+            for weak in list.drain(..) {
+                if let Some(engine) = weak.upgrade() {
+                    engine.shutdown();
+                }
+            }
+        }
+    }
+}
+
+fn shutdown_child(child: &mut Child, config_path: &PathBuf) {
+    let already_exited = matches!(child.try_wait(), Ok(Some(_)));
+    if !already_exited {
+        #[cfg(unix)]
+        unsafe {
+            libc::kill(child.id() as i32, libc::SIGTERM);
+        }
+
+        let started = Instant::now();
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) if started.elapsed() < MLX_SERVER_SHUTDOWN_TIMEOUT => {
+                    thread::sleep(Duration::from_millis(50));
+                }
+                Ok(None) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break;
+                }
+                Err(_) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break;
+                }
+            }
+        }
+    }
     let _ = fs::remove_file(config_path);
 }
 

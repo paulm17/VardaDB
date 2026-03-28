@@ -6,22 +6,39 @@ use std::sync::{Arc, Mutex, Weak};
 use tracing::{error, info};
 use uuid::Uuid;
 
+macro_rules! dbg_info {
+    ($($arg:tt)*) => {
+        if crate::debug_logging() {
+            info!($($arg)*);
+        }
+    };
+}
+
+macro_rules! dbg_println {
+    ($($arg:tt)*) => {
+        if crate::debug_logging() {
+            println!($($arg)*);
+        }
+    };
+}
+
 // Global registry for flushing
 static ACTIVE_STORAGES: std::sync::OnceLock<Mutex<Vec<Weak<Storage>>>> = std::sync::OnceLock::new();
 
 extern "C" fn crash_handler(_signum: libc::c_int) {
-    println!("\n[VardaDB] Process exiting. Global shutdown hook triggered...");
+    dbg_println!("\n[VardaDB] Process exiting. Global shutdown hook triggered...");
+    crate::llm::shutdown_all_managed_processes();
     if let Some(mutex) = ACTIVE_STORAGES.get() {
         if let Ok(mut list) = mutex.lock() {
             let count = list.len();
             if count > 0 {
-                println!("[VardaDB] Flushing {} active storage instances...", count);
+                dbg_println!("[VardaDB] Flushing {} active storage instances...", count);
                 for weak in list.drain(..) {
                     if let Some(storage) = weak.upgrade() {
                         let _ = storage.flush();
                     }
                 }
-                println!("[VardaDB] Flush complete. Exiting.");
+                dbg_println!("[VardaDB] Flush complete. Exiting.");
             }
         }
     }
@@ -58,14 +75,14 @@ impl Storage {
     pub fn new(path: impl AsRef<Path>, node_id_override: Option<u64>) -> anyhow::Result<Self> {
         let base_path = path.as_ref().to_path_buf();
         let default_db_path = base_path.join("default.db");
-        info!(
+        dbg_info!(
             storage_path = %base_path.display(),
             default_db_path = %default_db_path.display(),
             node_id_override = ?node_id_override,
             "Storage: starting initialization"
         );
         let default_backend = Arc::new(SqliteBackend::new(&default_db_path)?);
-        info!(
+        dbg_info!(
             default_db_path = %default_db_path.display(),
             "Storage: opened default backend"
         );
@@ -112,7 +129,7 @@ impl Storage {
         let worker_backend = default_backend.clone();
 
         std::thread::spawn(move || {
-            println!("Storage: Vector Background Worker Started");
+            dbg_println!("Storage: Vector Background Worker Started");
             while let Ok((uid, vec)) = rx.recv() {
                 let vec_f32: Vec<f32> = vec.iter().map(|v| *v as f32).collect();
                 let vec_bytes = unsafe {
@@ -128,7 +145,7 @@ impl Storage {
                     Ok(())
                 });
             }
-            println!("Storage: Vector Background Worker Stopped");
+            dbg_println!("Storage: Vector Background Worker Stopped");
         });
 
         // Auto-discover databases from registry
@@ -144,7 +161,7 @@ impl Storage {
         initial_keyspaces.insert("default".to_string(), (default_main, default_history));
 
         let registry = sys_table.prefix(b"db:");
-        info!(
+        dbg_info!(
             registry_entries = registry.len(),
             "Storage: loaded database registry entries"
         );
@@ -156,13 +173,13 @@ impl Storage {
             }
 
             let db_path = std::path::PathBuf::from(db_path_str);
-            info!(
+            dbg_info!(
                 db_name = %db_name,
                 db_path = %db_path.display(),
                 "Storage: attempting auto-load of registered database"
             );
             if !db_path.exists() {
-                println!("Storage [Warning]: Registered database '{}' file not found at {:?}. Skipping auto-load.", db_name, db_path);
+                dbg_println!("Storage [Warning]: Registered database '{}' file not found at {:?}. Skipping auto-load.", db_name, db_path);
                 error!(
                     db_name = %db_name,
                     db_path = %db_path.display(),
@@ -183,8 +200,8 @@ impl Storage {
                     let hist_table = SqliteTable::new(hist_name, b_arc.clone());
 
                     initial_keyspaces.insert(db_name.clone(), (main_table, hist_table));
-                    println!("Storage: Discovered and loaded database '{}'", db_name);
-                    info!(
+                    dbg_println!("Storage: Discovered and loaded database '{}'", db_name);
+                    dbg_info!(
                         db_name = %db_name,
                         db_path = %db_path.display(),
                         "Storage: discovered and loaded database"
@@ -217,7 +234,7 @@ impl Storage {
             new_id
         };
 
-        info!("Storage: Initialized with Node ID: {}", node_id);
+        dbg_info!("Storage: Initialized with Node ID: {}", node_id);
 
         let clock = std::sync::Mutex::new(if let Some(val) = sys_table.get(b"clock")? {
             if val.len() >= 16 {
@@ -259,7 +276,7 @@ impl Storage {
             fingerprints: std::sync::Arc::new(dashmap::DashMap::new()),
             fingerprints_ready: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
-        info!(
+        dbg_info!(
             database_count = storage.keyspaces.read().unwrap().len(),
             backend_count = storage.backends.len(),
             "Storage: core initialization complete, restoring fingerprints"
@@ -371,7 +388,7 @@ impl Storage {
         let mut lock = self.keyspaces.write().unwrap();
         lock.insert(name.to_string(), (main_table, history_table));
 
-        println!(
+        dbg_println!(
             "Storage: Updated path for database '{}' to {:?}",
             name, db_path
         );
@@ -590,7 +607,7 @@ impl Storage {
     }
 
     pub fn flush(&self) -> anyhow::Result<()> {
-        println!("Storage: Flush starting...");
+        dbg_println!("Storage: Flush starting...");
 
         // Persist clock state
         {
@@ -613,7 +630,7 @@ impl Storage {
             }
         }
 
-        println!("Storage: Flush complete (WAL checkpoint done)");
+        dbg_println!("Storage: Flush complete (WAL checkpoint done)");
         Ok(())
     }
 
@@ -766,11 +783,11 @@ impl Storage {
     }
 
     pub fn rebuild_fingerprints(&self) -> anyhow::Result<()> {
-        println!("Storage: Rebuilding fingerprints...");
+        dbg_println!("Storage: Rebuilding fingerprints...");
         let keyspaces = self.keyspaces.read().unwrap();
 
         for (name, (_, history)) in keyspaces.iter() {
-            println!("Storage: Scanning history for '{}'...", name);
+            dbg_println!("Storage: Scanning history for '{}'...", name);
             let mut h: u64 = 0;
             let mut c: u64 = 0;
 
@@ -786,7 +803,7 @@ impl Storage {
                     std::sync::atomic::AtomicU64::new(c),
                 ),
             );
-            println!("Storage: Rebuilt '{}' (Count: {}, Hash: {:x})", name, c, h);
+            dbg_println!("Storage: Rebuilt '{}' (Count: {}, Hash: {:x})", name, c, h);
         }
         Ok(())
     }
@@ -805,7 +822,7 @@ impl Storage {
 
     pub fn persist_fingerprints(&self) -> anyhow::Result<()> {
         use std::sync::atomic::Ordering;
-        info!(
+        dbg_info!(
             fingerprint_count = self.fingerprints.len(),
             "Storage: persisting fingerprints to sys table"
         );
@@ -820,7 +837,7 @@ impl Storage {
             BigEndian::write_u64(&mut buf[8..16], h);
 
             let key = format!("fp:{}", db_name);
-            info!(
+            dbg_info!(
                 db_name = %db_name,
                 fingerprint_key = %key,
                 count = c,
@@ -829,21 +846,21 @@ impl Storage {
             );
             self.sys_table.insert(key.as_bytes(), &buf)?;
         }
-        info!("Storage: fingerprint persistence complete");
+        dbg_info!("Storage: fingerprint persistence complete");
         Ok(())
     }
 
     pub fn restore_fingerprints(&self) -> anyhow::Result<()> {
         let keyspaces = self.keyspaces.read().unwrap();
         let mut needs_rebuild: Vec<(String, SqliteTable)> = Vec::new();
-        info!(
+        dbg_info!(
             keyspace_count = keyspaces.len(),
             "Storage: restoring fingerprints"
         );
 
         for (name, (_, history_table)) in keyspaces.iter() {
             let key = format!("fp:{}", name);
-            info!(
+            dbg_info!(
                 db_name = %name,
                 fingerprint_key = %key,
                 "Storage: checking fingerprint record"
@@ -860,11 +877,11 @@ impl Storage {
                             std::sync::atomic::AtomicU64::new(c),
                         ),
                     );
-                    println!(
+                    dbg_println!(
                         "Storage: Restored fingerprint for '{}' (Count: {}, Hash: {:x})",
                         name, c, h
                     );
-                    info!(
+                    dbg_info!(
                         db_name = %name,
                         count = c,
                         hash = format_args!("{:x}", h),
@@ -880,11 +897,11 @@ impl Storage {
                 );
             }
 
-            println!(
+            dbg_println!(
                 "Storage: Fingerprint missing for '{}' - will rebuild in background",
                 name
             );
-            info!(
+            dbg_info!(
                 db_name = %name,
                 "Storage: fingerprint missing, scheduling background rebuild"
             );
@@ -904,13 +921,13 @@ impl Storage {
         self.fingerprints_ready.store(true, Ordering::Release);
 
         if needs_rebuild.is_empty() {
-            println!("Storage: All fingerprints ready (restored from disk)");
-            info!("Storage: all fingerprints restored from disk");
+            dbg_println!("Storage: All fingerprints ready (restored from disk)");
+            dbg_info!("Storage: all fingerprints restored from disk");
         } else {
-            println!(
+            dbg_println!(
                 "Storage: Fingerprints ready (initialized to zero, will rebuild in background)"
             );
-            info!(
+            dbg_info!(
                 rebuild_count = needs_rebuild.len(),
                 "Storage: initialized placeholder fingerprints and spawning rebuild thread"
             );
@@ -928,19 +945,19 @@ impl Storage {
         let ready_flag = self.fingerprints_ready.clone();
         let sys_table = self.sys_table.clone();
         let db_names: Vec<String> = db_list.iter().map(|(name, _)| name.clone()).collect();
-        info!(
+        dbg_info!(
             rebuild_count = db_names.len(),
             databases = ?db_names,
             "Storage: spawning background fingerprint rebuild thread"
         );
 
         std::thread::spawn(move || {
-            println!(
+            dbg_println!(
                 "Storage: Background fingerprint rebuild started for {} database(s)",
                 db_list.len()
             );
             let start = std::time::Instant::now();
-            info!(
+            dbg_info!(
                 rebuild_count = db_list.len(),
                 "Storage: background fingerprint rebuild thread started"
             );
@@ -949,13 +966,13 @@ impl Storage {
                 let scan_start = std::time::Instant::now();
                 let mut hash: u64 = 0;
                 let mut count: u64 = 0;
-                info!(
+                dbg_info!(
                     db_name = %name,
                     "Storage: background fingerprint rebuild scanning database"
                 );
 
                 let rows = history_table.iter();
-                info!(
+                dbg_info!(
                     db_name = %name,
                     row_count = rows.len(),
                     "Storage: background fingerprint rebuild loaded history rows"
@@ -964,7 +981,7 @@ impl Storage {
                 for (k, v) in rows {
                     let next_count = count + 1;
                     if next_count <= 10 || next_count % 1_000 == 0 {
-                        info!(
+                        dbg_info!(
                             db_name = %name,
                             row_index = next_count,
                             key_len = k.len(),
@@ -975,7 +992,7 @@ impl Storage {
                     hash ^= Self::hash_item(&k, &v);
                     count = next_count;
                     if count <= 10 || count % 1_000 == 0 {
-                        info!(
+                        dbg_info!(
                             db_name = %name,
                             row_index = count,
                             running_hash = format_args!("{:x}", hash),
@@ -983,7 +1000,7 @@ impl Storage {
                         );
                     }
                     if count % 100_000 == 0 {
-                        println!(
+                        dbg_println!(
                             "Storage: Fingerprint rebuild for '{}' - scanned {} items ({:.1}s)...",
                             name,
                             count,
@@ -991,19 +1008,19 @@ impl Storage {
                         );
                     }
                 }
-                info!(
+                dbg_info!(
                     db_name = %name,
                     total_count = count,
                     final_hash = format_args!("{:x}", hash),
                     "Storage: background fingerprint rebuild finished hashing rows"
                 );
-                println!(
+                dbg_println!(
                     "Storage: Fingerprint rebuild for '{}' completed - {} items in {:.1}s",
                     name,
                     count,
                     scan_start.elapsed().as_secs_f64()
                 );
-                info!(
+                dbg_info!(
                     db_name = %name,
                     count,
                     hash = format_args!("{:x}", hash),
@@ -1017,7 +1034,7 @@ impl Storage {
                     let (h_atomic, c_atomic) = entry.value();
                     h_atomic.store(hash, Ordering::Release);
                     c_atomic.store(count, Ordering::Release);
-                    info!(
+                    dbg_info!(
                         db_name = %name,
                         "Storage: updated in-memory fingerprint after rebuild"
                     );
@@ -1033,7 +1050,7 @@ impl Storage {
                 let mut buf = vec![0u8; 16];
                 BigEndian::write_u64(&mut buf[0..8], count);
                 BigEndian::write_u64(&mut buf[8..16], hash);
-                info!(
+                dbg_info!(
                     db_name = %name,
                     fingerprint_key = %key,
                     "Storage: persisting rebuilt fingerprint"
@@ -1045,18 +1062,18 @@ impl Storage {
                     );
                 }
 
-                println!(
+                dbg_println!(
                     "Storage: Rebuilt fingerprint for '{}' (Count: {}, Hash: {:x})",
                     name, count, hash
                 );
             }
 
             ready_flag.store(true, std::sync::atomic::Ordering::Release);
-            println!(
+            dbg_println!(
                 "Storage: Background fingerprint rebuild complete in {:?}",
                 start.elapsed()
             );
-            info!(
+            dbg_info!(
                 elapsed_secs = start.elapsed().as_secs_f64(),
                 "Storage: background fingerprint rebuild thread complete"
             );
@@ -1071,11 +1088,11 @@ impl Storage {
             return;
         }
 
-        println!("Storage: Waiting for fingerprints to be ready...");
+        dbg_println!("Storage: Waiting for fingerprints to be ready...");
         while !self.fingerprints_ready.load(Ordering::Acquire) {
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
-        println!("Storage: Fingerprints are now ready");
+        dbg_println!("Storage: Fingerprints are now ready");
     }
 
     fn update_history_hash(&self, db_name: &str, key: &[u8], value: &[u8]) {

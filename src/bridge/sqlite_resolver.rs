@@ -2605,24 +2605,8 @@ impl Resolver for SqliteResolver {
         // Also scan edge index keys (for inverse-linked lists)
         let edge_prefix = Codec::encode_edge_prefix(parent_uid, field_name);
 
-        if field_name == "chapters" {
-            println!(
-                "[resolve_list] Checking edges for parent={} field='{}' prefix_len={}",
-                parent_uid,
-                field_name,
-                edge_prefix.len()
-            );
-        }
-
         if let Some((main_ks, _)) = self.storage.get_database(&self.db_name) {
             let iter = main_ks.prefix(&edge_prefix);
-
-            if field_name == "chapters" {
-                println!(
-                    "[resolve_list] Found {} potential edges for chapters",
-                    iter.len()
-                );
-            }
 
             for (key, _val) in iter {
                 if !key.starts_with(&edge_prefix) {
@@ -2630,12 +2614,6 @@ impl Resolver for SqliteResolver {
                 }
                 if let Some(source_uid) = Codec::decode_edge_source_uid(&key) {
                     uids.push(source_uid);
-                    if field_name == "chapters" {
-                        println!(
-                            "[resolve_list] Added chapter edge source_uid={}",
-                            source_uid
-                        );
-                    }
                 }
             }
         }
