@@ -75,6 +75,7 @@ impl R2SyncWorker {
 
             let mut filter = HashMap::new();
             filter.insert("status".to_string(), Value::Object(eq_map));
+            let query_metadata = HashMap::new();
 
             let uids = resolver.scan_nodes(
                 "UploadQueueEntry",
@@ -85,6 +86,7 @@ impl R2SyncWorker {
                 None,
                 &["id".to_string(), "tusId".to_string()],
                 None,
+                &query_metadata,
             );
 
             if !uids.is_empty() {

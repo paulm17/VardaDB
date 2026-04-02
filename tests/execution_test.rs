@@ -58,8 +58,25 @@ async fn test_execution_flow() {
             _offset: Option<usize>,
             _: &[String],
             _near_vector: Option<Vec<f64>>,
+            _: &std::collections::HashMap<
+                String,
+                vardadb::engine::resolver::QueryTypeMetadata,
+            >,
         ) -> Vec<u64> {
             vec![]
+        }
+        fn count_nodes(
+            &self,
+            _: &str,
+            _: std::collections::HashMap<String, async_graphql::Value>,
+            _: &[String],
+            _: Option<Vec<f64>>,
+            _: &std::collections::HashMap<
+                String,
+                vardadb::engine::resolver::QueryTypeMetadata,
+            >,
+        ) -> usize {
+            0
         }
         fn resolve_list(
             &self,

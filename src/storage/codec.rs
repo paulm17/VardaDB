@@ -24,6 +24,13 @@ impl Codec {
         buf
     }
 
+    pub fn decode_data_uid(key: &[u8]) -> Option<u64> {
+        if key.len() < 9 || key[0] != 0x01 {
+            return None;
+        }
+        Some(BigEndian::read_u64(&key[1..9]))
+    }
+
     pub fn encode_index_key(predicate: &str, value: &str, uid: u64) -> Vec<u8> {
         // Index: [Prefix][Predicate][Value][UID]
         // Note: Real Dgraph uses more complex encoding for values.
@@ -86,6 +93,47 @@ impl Codec {
         buf.extend_from_slice(term.as_bytes());
         buf.push(0x00);
         buf
+    }
+
+    pub fn encode_order_index_key(
+        type_name: &str,
+        field: &str,
+        descending: bool,
+        encoded_value: &[u8],
+        uid: u64,
+    ) -> Vec<u8> {
+        // [0x09][Type][0x00][Field][0x00][Dir][Value][0x00][UID]
+        let mut buf =
+            Vec::with_capacity(1 + type_name.len() + field.len() + encoded_value.len() + 11);
+        buf.push(0x09);
+        buf.extend_from_slice(type_name.as_bytes());
+        buf.push(0x00);
+        buf.extend_from_slice(field.as_bytes());
+        buf.push(0x00);
+        buf.push(if descending { 1 } else { 0 });
+        buf.extend_from_slice(encoded_value);
+        buf.push(0x00);
+        buf.write_u64::<BigEndian>(uid).unwrap();
+        buf
+    }
+
+    pub fn encode_order_index_prefix(type_name: &str, field: &str, descending: bool) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(1 + type_name.len() + field.len() + 4);
+        buf.push(0x09);
+        buf.extend_from_slice(type_name.as_bytes());
+        buf.push(0x00);
+        buf.extend_from_slice(field.as_bytes());
+        buf.push(0x00);
+        buf.push(if descending { 1 } else { 0 });
+        buf
+    }
+
+    pub fn decode_order_index_uid(key: &[u8]) -> Option<u64> {
+        if key.len() >= 8 {
+            Some(BigEndian::read_u64(&key[key.len() - 8..]))
+        } else {
+            None
+        }
     }
 
     // --- Evolu / Varda Extensions ---

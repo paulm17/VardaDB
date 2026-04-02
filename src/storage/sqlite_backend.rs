@@ -1,5 +1,5 @@
 use byteorder::ByteOrder;
-use rusqlite::ffi::sqlite3_auto_extension;
+use rusqlite::ffi::{sqlite3_auto_extension, sqlite3_reset_auto_extension};
 use rusqlite::OptionalExtension;
 use rusqlite::{params, Connection};
 use std::path::{Path, PathBuf};
@@ -42,12 +42,11 @@ impl SqliteBackend {
         // cumulative — calling it N times registers the init function N times,
         // causing each new connection to run it N times → SIGTRAP with ≥3 DBs).
         static SQLITE_VEC_INIT: std::sync::Once = std::sync::Once::new();
-        SQLITE_VEC_INIT.call_once(|| {
-            unsafe {
-                sqlite3_auto_extension(Some(std::mem::transmute(
-                    sqlite_vec::sqlite3_vec_init as *const (),
-                )));
-            }
+        SQLITE_VEC_INIT.call_once(|| unsafe {
+            sqlite3_reset_auto_extension();
+            sqlite3_auto_extension(Some(std::mem::transmute(
+                sqlite_vec::sqlite3_vec_init as *const (),
+            )));
         });
 
         let writer = Connection::open(&db_path)?;
@@ -135,11 +134,6 @@ impl SqliteBackend {
         {
             let mut pool = self.reader_pool.lock().unwrap();
             if let Some(conn) = pool.pop() {
-                dbg_info!(
-                    db_path = %self.path.display(),
-                    remaining_pool_size = pool.len(),
-                    "SqliteBackend: reusing reader connection from pool"
-                );
                 return Ok(conn);
             }
         }
@@ -149,7 +143,6 @@ impl SqliteBackend {
         let conn = Connection::open(&self.path)?;
         dbg_info!(db_path = %self.path.display(), "SqliteBackend: opened new reader connection");
         Self::apply_pragmas(&conn)?;
-        dbg_info!(db_path = %self.path.display(), "SqliteBackend: pragmas applied to reader connection");
         Ok(conn)
     }
 
@@ -158,11 +151,6 @@ impl SqliteBackend {
         let mut pool = self.reader_pool.lock().unwrap();
         if pool.len() < 8 {
             pool.push(conn);
-            dbg_info!(
-                db_path = %self.path.display(),
-                pool_size = pool.len(),
-                "SqliteBackend: returned reader connection to pool"
-            );
         } else {
             dbg_info!(
                 db_path = %self.path.display(),
@@ -184,7 +172,9 @@ impl SqliteBackend {
         dbg_info!(db_path = %self.path.display(), "SqliteBackend: writer lock acquired");
         let result = f(&conn);
         match &result {
-            Ok(_) => dbg_info!(db_path = %self.path.display(), "SqliteBackend: writer operation complete"),
+            Ok(_) => {
+                dbg_info!(db_path = %self.path.display(), "SqliteBackend: writer operation complete")
+            }
             Err(e) => {
                 error!(db_path = %self.path.display(), error = %e, "SqliteBackend: writer operation failed")
             }
@@ -285,7 +275,6 @@ impl SqliteTable {
     // ── Reads (use reader pool) ──
 
     pub fn get(&self, key: &[u8]) -> anyhow::Result<Option<Vec<u8>>> {
-        dbg_info!(table = %self.name, key_len = key.len(), "SqliteTable: get start");
         let conn = self.backend.get_reader()?;
         let sql = format!("SELECT value FROM \"{}\" WHERE key = ?1", self.name);
         let result = conn.prepare_cached(&sql).and_then(|mut stmt| {
@@ -293,12 +282,8 @@ impl SqliteTable {
                 .optional()
         });
         self.backend.return_reader(conn);
-        match &result {
-            Ok(Some(value)) => {
-                dbg_info!(table = %self.name, value_len = value.len(), "SqliteTable: get hit")
-            }
-            Ok(None) => dbg_info!(table = %self.name, "SqliteTable: get miss"),
-            Err(e) => error!(table = %self.name, error = %e, "SqliteTable: get failed"),
+        if let Err(e) = &result {
+            error!(table = %self.name, error = %e, "SqliteTable: get failed");
         }
         Ok(result?)
     }
@@ -316,7 +301,6 @@ impl SqliteTable {
     /// Prefix scan: returns all (key, value) pairs where key starts with `prefix`.
     /// Results are ordered by key.
     pub fn prefix(&self, prefix: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)> {
-        dbg_info!(table = %self.name, prefix_len = prefix.len(), "SqliteTable: prefix scan start");
         let upper = compute_prefix_upper_bound(prefix);
         let conn = match self.backend.get_reader() {
             Ok(c) => c,
@@ -365,18 +349,11 @@ impl SqliteTable {
             }
         };
         self.backend.return_reader(conn);
-        dbg_info!(table = %self.name, row_count = result.len(), "SqliteTable: prefix scan complete");
         result
     }
 
     /// Range scan: returns all (key, value) pairs where `lower <= key < upper`.
     pub fn range(&self, lower: &[u8], upper: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)> {
-        dbg_info!(
-            table = %self.name,
-            lower_len = lower.len(),
-            upper_len = upper.len(),
-            "SqliteTable: range scan start"
-        );
         let conn = match self.backend.get_reader() {
             Ok(c) => c,
             Err(e) => {
@@ -401,13 +378,37 @@ impl SqliteTable {
             Err(_) => vec![],
         };
         self.backend.return_reader(conn);
-        dbg_info!(table = %self.name, row_count = result.len(), "SqliteTable: range scan complete");
         result
+    }
+
+    pub fn count_prefix(&self, prefix: &[u8]) -> anyhow::Result<usize> {
+        let upper = compute_prefix_upper_bound(prefix);
+        let conn = self.backend.get_reader()?;
+
+        let result = if let Some(ref upper) = upper {
+            let sql = format!(
+                "SELECT COUNT(*) FROM \"{}\" WHERE key >= ?1 AND key < ?2",
+                self.name
+            );
+            conn.prepare_cached(&sql).and_then(|mut stmt| {
+                stmt.query_row(params![prefix, upper.as_slice()], |row| {
+                    row.get::<_, i64>(0)
+                })
+            })
+        } else {
+            let sql = format!("SELECT COUNT(*) FROM \"{}\" WHERE key >= ?1", self.name);
+            conn.prepare_cached(&sql)
+                .and_then(|mut stmt| stmt.query_row(params![prefix], |row| row.get::<_, i64>(0)))
+        };
+
+        self.backend.return_reader(conn);
+        result
+            .map(|count| count.max(0) as usize)
+            .map_err(anyhow::Error::from)
     }
 
     /// Iterate over all entries in the table, ordered by key.
     pub fn iter(&self) -> Vec<(Vec<u8>, Vec<u8>)> {
-        dbg_info!(table = %self.name, "SqliteTable: full scan start");
         let conn = match self.backend.get_reader() {
             Ok(c) => c,
             Err(e) => {
@@ -429,7 +430,6 @@ impl SqliteTable {
             Err(_) => vec![],
         };
         self.backend.return_reader(conn);
-        dbg_info!(table = %self.name, row_count = result.len(), "SqliteTable: full scan complete");
         result
     }
 

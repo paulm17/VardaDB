@@ -41,6 +41,7 @@ impl Resolver for DummyResolver {
         _: Option<usize>,
         _: &[String],
         _: Option<Vec<f64>>,
+        _: &std::collections::HashMap<String, crate::engine::resolver::QueryTypeMetadata>,
     ) -> Vec<u64> {
         vec![]
     }
@@ -56,6 +57,16 @@ impl Resolver for DummyResolver {
         _: Option<Vec<f64>>,
     ) -> Result<Vec<u64>, String> {
         Ok(vec![])
+    }
+    fn count_nodes(
+        &self,
+        _: &str,
+        _: std::collections::HashMap<String, Value>,
+        _: &[String],
+        _: Option<Vec<f64>>,
+        _: &std::collections::HashMap<String, crate::engine::resolver::QueryTypeMetadata>,
+    ) -> usize {
+        0
     }
     fn update_node(
         &self,

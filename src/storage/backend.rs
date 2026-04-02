@@ -72,6 +72,17 @@ pub struct Storage {
 }
 
 impl Storage {
+    fn initialize_database_tables(
+        backend: &SqliteBackend,
+        main_table_name: &str,
+        history_table_name: &str,
+    ) -> anyhow::Result<()> {
+        backend.create_main_table(main_table_name)?;
+        backend.create_table(history_table_name)?;
+        backend.create_native_search_tables()?;
+        Ok(())
+    }
+
     pub fn new(path: impl AsRef<Path>, node_id_override: Option<u64>) -> anyhow::Result<Self> {
         let base_path = path.as_ref().to_path_buf();
         let default_db_path = base_path.join("default.db");
@@ -152,8 +163,11 @@ impl Storage {
         let mut initial_keyspaces = std::collections::HashMap::new();
 
         // Always ensure "default" database exists
-        default_backend.create_main_table("default_main")?;
-        default_backend.create_table("default_history")?;
+        Self::initialize_database_tables(
+            default_backend.as_ref(),
+            "default_main",
+            "default_history",
+        )?;
         let default_main =
             SqliteTable::new_main("default_main".to_string(), default_backend.clone());
         let default_history =
@@ -191,10 +205,12 @@ impl Storage {
             match SqliteBackend::new(&db_path) {
                 Ok(b) => {
                     let b_arc = Arc::new(b);
-                    backends.insert(db_name.clone(), b_arc.clone());
-
                     let main_name = format!("{}_main", db_name);
                     let hist_name = format!("{}_history", db_name);
+
+                    Self::initialize_database_tables(b_arc.as_ref(), &main_name, &hist_name)?;
+
+                    backends.insert(db_name.clone(), b_arc.clone());
 
                     let main_table = SqliteTable::new_main(main_name, b_arc.clone());
                     let hist_table = SqliteTable::new(hist_name, b_arc.clone());
@@ -329,8 +345,7 @@ impl Storage {
         let main_name = format!("{}_main", name);
         let history_name = format!("{}_history", name);
 
-        new_backend.create_main_table(&main_name)?;
-        new_backend.create_table(&history_name)?;
+        Self::initialize_database_tables(new_backend.as_ref(), &main_name, &history_name)?;
 
         let main_table = SqliteTable::new_main(main_name.clone(), new_backend.clone());
         let history_table = SqliteTable::new(history_name, new_backend.clone());
@@ -371,8 +386,7 @@ impl Storage {
         let main_name = format!("{}_main", name);
         let history_name = format!("{}_history", name);
 
-        new_backend.create_main_table(&main_name)?;
-        new_backend.create_table(&history_name)?;
+        Self::initialize_database_tables(new_backend.as_ref(), &main_name, &history_name)?;
 
         // Update registry
         self.sys_table.insert(
@@ -390,7 +404,8 @@ impl Storage {
 
         dbg_println!(
             "Storage: Updated path for database '{}' to {:?}",
-            name, db_path
+            name,
+            db_path
         );
 
         Ok(())
@@ -879,7 +894,9 @@ impl Storage {
                     );
                     dbg_println!(
                         "Storage: Restored fingerprint for '{}' (Count: {}, Hash: {:x})",
-                        name, c, h
+                        name,
+                        c,
+                        h
                     );
                     dbg_info!(
                         db_name = %name,
@@ -1064,7 +1081,9 @@ impl Storage {
 
                 dbg_println!(
                     "Storage: Rebuilt fingerprint for '{}' (Count: {}, Hash: {:x})",
-                    name, count, hash
+                    name,
+                    count,
+                    hash
                 );
             }
 

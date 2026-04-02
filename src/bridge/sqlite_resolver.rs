@@ -1,4 +1,4 @@
-use crate::engine::resolver::Resolver;
+use crate::engine::resolver::{RequestCache, Resolver};
 use crate::storage::backend::Storage;
 use crate::storage::codec::Codec;
 use crate::storage::timestamp::Timestamp;
@@ -16,6 +16,457 @@ pub struct SqliteResolver {
 }
 
 impl SqliteResolver {
+    fn preload_objects_for_uids(&self, uids: &[u64], cache: &RequestCache) {
+        if uids.len() < 8 {
+            return;
+        }
+
+        let missing: std::collections::HashSet<u64> = uids
+            .iter()
+            .copied()
+            .filter(|uid| cache.get_loaded_object(*uid).is_none())
+            .collect();
+
+        if missing.len() < 8 {
+            return;
+        }
+
+        let mut sorted_uids: Vec<u64> = missing.iter().copied().collect();
+        sorted_uids.sort_unstable();
+        let Some(min_uid) = sorted_uids.first().copied() else {
+            return;
+        };
+        let Some(max_uid) = sorted_uids.last().copied() else {
+            return;
+        };
+
+        let lower = Codec::encode_data_prefix(min_uid);
+        let upper = crate::storage::sqlite_backend::compute_prefix_upper_bound(
+            &Codec::encode_data_prefix(max_uid),
+        )
+        .unwrap_or_else(|| vec![0x02]);
+
+        let mut grouped: std::collections::HashMap<u64, std::collections::HashMap<String, Value>> =
+            std::collections::HashMap::new();
+        if let Some((main_ks, _)) = self.storage.get_database(&self.db_name) {
+            for (key, value) in main_ks.range(&lower, &upper) {
+                let Some(uid) = Codec::decode_data_uid(&key) else {
+                    continue;
+                };
+                if !missing.contains(&uid) || key.len() <= 9 {
+                    continue;
+                }
+                let Ok(field_name) = std::str::from_utf8(&key[9..]) else {
+                    continue;
+                };
+                if let Some(parsed) = Self::parse_resolved_value(&value) {
+                    grouped
+                        .entry(uid)
+                        .or_default()
+                        .insert(field_name.to_string(), parsed);
+                }
+            }
+        }
+
+        for uid in sorted_uids {
+            cache.insert_loaded_object(uid, grouped.remove(&uid).unwrap_or_default());
+        }
+    }
+
+    fn load_object_fields(&self, uid: u64) -> std::collections::HashMap<String, Value> {
+        let prefix = Codec::encode_data_prefix(uid);
+        let mut fields = std::collections::HashMap::new();
+        if let Some((main_ks, _)) = self.storage.get_database(&self.db_name) {
+            for (key, value) in main_ks.prefix(&prefix) {
+                if !key.starts_with(&prefix) || key.len() <= prefix.len() {
+                    break;
+                }
+                let Ok(field_name) = std::str::from_utf8(&key[prefix.len()..]) else {
+                    continue;
+                };
+                if let Some(parsed) = Self::parse_resolved_value(&value) {
+                    fields.insert(field_name.to_string(), parsed);
+                }
+            }
+        }
+        fields
+    }
+
+    fn parse_resolved_value(bytes: &[u8]) -> Option<Value> {
+        if bytes.len() > 16 {
+            serde_json::from_slice(&bytes[16..]).ok()
+        } else {
+            serde_json::from_slice(bytes).ok()
+        }
+    }
+
+    fn value_to_uid(value: &Value) -> Option<u64> {
+        match value {
+            Value::String(s) => s.parse::<u64>().ok(),
+            Value::Number(n) => n.as_u64(),
+            Value::Object(map) => map
+                .get("uid")
+                .or(map.get("id"))
+                .and_then(Self::value_to_uid),
+            _ => None,
+        }
+    }
+
+    fn parse_uid_list(value: Value) -> Vec<u64> {
+        match value {
+            Value::List(list) => list
+                .into_iter()
+                .filter_map(|item| Self::value_to_uid(&item))
+                .collect(),
+            other => Self::value_to_uid(&other).into_iter().collect(),
+        }
+    }
+
+    fn load_related_uids(&self, parent_uid: u64, field_name: &str) -> Vec<u64> {
+        let key = Codec::encode_data_key(parent_uid, field_name);
+        let mut uids = self
+            .storage
+            .get(&self.db_name, &key)
+            .ok()
+            .flatten()
+            .and_then(|bytes| Self::parse_resolved_value(&bytes))
+            .map(Self::parse_uid_list)
+            .unwrap_or_default();
+
+        let edge_prefix = Codec::encode_edge_prefix(parent_uid, field_name);
+        if let Some((main_ks, _)) = self.storage.get_database(&self.db_name) {
+            for (key, _val) in main_ks.prefix(&edge_prefix) {
+                if !key.starts_with(&edge_prefix) {
+                    break;
+                }
+                if let Some(source_uid) = Codec::decode_edge_source_uid(&key) {
+                    uids.push(source_uid);
+                }
+            }
+        }
+
+        uids
+    }
+
+    fn related_uids_cached(
+        &self,
+        parent_uid: u64,
+        field_name: &str,
+        cache: Option<&RequestCache>,
+    ) -> Vec<u64> {
+        if let Some(cache) = cache {
+            if let Some(uids) = cache.get_related_uids(parent_uid, field_name) {
+                return uids;
+            }
+        }
+
+        let uids = self.load_related_uids(parent_uid, field_name);
+        if let Some(cache) = cache {
+            cache.insert_related_uids(parent_uid, field_name, uids.clone());
+        }
+        uids
+    }
+
+    fn load_resolved_value(&self, uid: u64, field_name: &str) -> Option<Value> {
+        if field_name == "id" {
+            return Some(Value::String(uid.to_string()));
+        }
+
+        let key = Codec::encode_data_key(uid, field_name);
+        match self.storage.get(&self.db_name, &key) {
+            Ok(Some(bytes)) => Self::parse_resolved_value(&bytes),
+            _ => {
+                let edge_uids = self.load_related_uids(uid, field_name);
+                if edge_uids.is_empty() {
+                    None
+                } else {
+                    Some(Value::List(
+                        edge_uids
+                            .into_iter()
+                            .map(|u| Value::String(u.to_string()))
+                            .collect(),
+                    ))
+                }
+            }
+        }
+    }
+
+    fn resolve_cached(
+        &self,
+        uid: u64,
+        field_name: &str,
+        cache: Option<&RequestCache>,
+    ) -> Option<Value> {
+        if let Some(cache) = cache {
+            if let Some(value) = cache.get_resolved(uid, field_name) {
+                return value;
+            }
+
+            if cache.get_loaded_object(uid).is_none() {
+                let loaded_fields = self.load_object_fields(uid);
+                cache.insert_loaded_object(uid, loaded_fields);
+            }
+
+            if let Some(value) = cache.get_resolved(uid, field_name) {
+                return value;
+            }
+        }
+
+        let value = self.load_resolved_value(uid, field_name);
+        if let Some(cache) = cache {
+            cache.insert_resolved(uid, field_name, value.clone());
+        }
+        value
+    }
+
+    fn compare_optional_values(a: &Option<Value>, b: &Option<Value>) -> std::cmp::Ordering {
+        match (a, b) {
+            (Some(Value::Number(na)), Some(Value::Number(nb))) => na
+                .as_f64()
+                .partial_cmp(&nb.as_f64())
+                .unwrap_or(std::cmp::Ordering::Equal),
+            (Some(Value::String(sa)), Some(Value::String(sb))) => sa.cmp(sb),
+            (None, Some(_)) => std::cmp::Ordering::Less,
+            (Some(_), None) => std::cmp::Ordering::Greater,
+            _ => std::cmp::Ordering::Equal,
+        }
+    }
+
+    fn sort_uids_by_field(
+        &self,
+        uids: &mut [u64],
+        field_name: &str,
+        asc: bool,
+        cache: Option<&RequestCache>,
+    ) {
+        let sort_values: std::collections::HashMap<u64, Option<Value>> = uids
+            .iter()
+            .copied()
+            .map(|uid| (uid, self.resolve_cached(uid, field_name, cache)))
+            .collect();
+
+        uids.sort_by(|a, b| {
+            let cmp = Self::compare_optional_values(
+                sort_values.get(a).unwrap_or(&None),
+                sort_values.get(b).unwrap_or(&None),
+            );
+            if asc {
+                cmp
+            } else {
+                cmp.reverse()
+            }
+        });
+    }
+
+    fn encode_sortable_f64(value: f64) -> [u8; 8] {
+        let bits = value.to_bits();
+        let sortable = if bits & (1 << 63) != 0 {
+            !bits
+        } else {
+            bits ^ (1 << 63)
+        };
+        sortable.to_be_bytes()
+    }
+
+    fn encode_order_index_value(value: &serde_json::Value, descending: bool) -> Option<Vec<u8>> {
+        let mut encoded = match value {
+            serde_json::Value::String(s) => s.as_bytes().to_vec(),
+            serde_json::Value::Number(n) => {
+                let numeric = if let Some(i) = n.as_i64() {
+                    i as f64
+                } else if let Some(u) = n.as_u64() {
+                    u as f64
+                } else {
+                    n.as_f64()?
+                };
+                Self::encode_sortable_f64(numeric).to_vec()
+            }
+            serde_json::Value::Bool(b) => vec![u8::from(*b)],
+            _ => return None,
+        };
+
+        if descending {
+            for byte in &mut encoded {
+                *byte = !*byte;
+            }
+        }
+
+        Some(encoded)
+    }
+
+    fn write_order_index(
+        &self,
+        type_name: &str,
+        uid: u64,
+        field: &str,
+        value: &serde_json::Value,
+    ) -> Result<(), String> {
+        let Some(asc_value) = Self::encode_order_index_value(value, false) else {
+            return Ok(());
+        };
+        let desc_value = Self::encode_order_index_value(value, true).expect("descending encoding");
+
+        let asc_key = Codec::encode_order_index_key(type_name, field, false, &asc_value, uid);
+        let desc_key = Codec::encode_order_index_key(type_name, field, true, &desc_value, uid);
+        self.storage
+            .insert(&self.db_name, &asc_key, &[])
+            .map_err(|e| e.to_string())?;
+        self.storage
+            .insert(&self.db_name, &desc_key, &[])
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    fn remove_order_index(
+        &self,
+        type_name: &str,
+        uid: u64,
+        field: &str,
+        value: &serde_json::Value,
+    ) -> Result<(), String> {
+        let Some(asc_value) = Self::encode_order_index_value(value, false) else {
+            return Ok(());
+        };
+        let desc_value = Self::encode_order_index_value(value, true).expect("descending encoding");
+
+        let asc_key = Codec::encode_order_index_key(type_name, field, false, &asc_value, uid);
+        let desc_key = Codec::encode_order_index_key(type_name, field, true, &desc_value, uid);
+        self.storage
+            .remove(&self.db_name, &asc_key)
+            .map_err(|e| e.to_string())?;
+        self.storage
+            .remove(&self.db_name, &desc_key)
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    fn sorted_index_scan(
+        &self,
+        type_name: &str,
+        field: &str,
+        asc: bool,
+        filter: &std::collections::HashMap<String, Value>,
+        filter_im: &indexmap::IndexMap<async_graphql::Name, Value>,
+        first: Option<usize>,
+        after: Option<String>,
+        offset: Option<usize>,
+        candidate_set: Option<&std::collections::HashSet<u64>>,
+        cache: Option<&RequestCache>,
+    ) -> Option<Vec<u64>> {
+        let descending = !asc;
+        let prefix = Codec::encode_order_index_prefix(type_name, field, descending);
+        let (main_ks, _) = self.storage.get_database(&self.db_name)?;
+
+        if main_ks.count_prefix(&prefix).ok()? == 0 {
+            self.rebuild_order_index_for_field(type_name, field).ok()?;
+            if main_ks.count_prefix(&prefix).ok()? == 0 {
+                return None;
+            }
+        }
+
+        let mut matched = Vec::new();
+        let mut seen_after = after.is_none();
+        let mut skipped = 0usize;
+
+        for (key, _val) in main_ks.prefix(&prefix) {
+            if !key.starts_with(&prefix) {
+                break;
+            }
+            let Some(uid) = Codec::decode_order_index_uid(&key) else {
+                continue;
+            };
+
+            if let Some(candidates) = candidate_set {
+                if !candidates.contains(&uid) {
+                    continue;
+                }
+            }
+
+            if !seen_after {
+                if after.as_deref() == Some(&uid.to_string()) {
+                    seen_after = true;
+                }
+                continue;
+            }
+
+            if !filter.is_empty() && !self.check_filter_recursive_cached(uid, filter_im, cache) {
+                continue;
+            }
+
+            if skipped < offset.unwrap_or(0) {
+                skipped += 1;
+                continue;
+            }
+
+            matched.push(uid);
+            if let Some(limit) = first {
+                if matched.len() >= limit {
+                    break;
+                }
+            }
+        }
+
+        Some(matched)
+    }
+
+    fn rebuild_order_index_for_field(&self, type_name: &str, field: &str) -> Result<(), String> {
+        let (main_ks, _) = self
+            .storage
+            .get_database(&self.db_name)
+            .ok_or_else(|| format!("Database not found: {}", self.db_name))?;
+
+        let type_prefix = Codec::encode_type_prefix(type_name);
+        let upper = crate::storage::sqlite_backend::compute_prefix_upper_bound(&type_prefix)
+            .expect("valid prefix bounds");
+
+        let mut pending = Vec::new();
+        for (key, _val) in main_ks.range(&type_prefix, &upper) {
+            if !key.starts_with(&type_prefix) || key.len() < 8 {
+                break;
+            }
+            let uid = BigEndian::read_u64(&key[key.len() - 8..]);
+            let data_key = Codec::encode_data_key(uid, field);
+            if let Ok(Some(bytes)) = self.storage.get(&self.db_name, &data_key) {
+                let payload = if bytes.len() > 16 {
+                    &bytes[16..]
+                } else {
+                    &bytes
+                };
+                if let Ok(value) = serde_json::from_slice::<serde_json::Value>(payload) {
+                    if let Some(encoded) = Self::encode_order_index_value(&value, false) {
+                        pending.push(Codec::encode_order_index_key(
+                            type_name, field, false, &encoded, uid,
+                        ));
+                    }
+                    if let Some(encoded) = Self::encode_order_index_value(&value, true) {
+                        pending.push(Codec::encode_order_index_key(
+                            type_name, field, true, &encoded, uid,
+                        ));
+                    }
+                }
+            }
+        }
+
+        if pending.is_empty() {
+            return Ok(());
+        }
+
+        let backend = self
+            .storage
+            .backends
+            .get(&self.db_name)
+            .ok_or_else(|| format!("Backend not found: {}", self.db_name))?
+            .clone();
+        backend
+            .write_batch(|conn| {
+                for key in &pending {
+                    main_ks.batch_insert_on_conn(conn, key, &[])?;
+                }
+                Ok(())
+            })
+            .map_err(|e| e.to_string())
+    }
+
     pub fn new(storage: Arc<Storage>, db_name: &str) -> Self {
         Self {
             storage,
@@ -981,9 +1432,14 @@ impl SqliteResolver {
         type_name: &str,
         filter: &std::collections::HashMap<String, Value>,
         uniques: &[String],
+        query_metadata: &std::collections::HashMap<
+            String,
+            crate::engine::resolver::QueryTypeMetadata,
+        >,
     ) -> Option<std::collections::HashSet<u64>> {
         // println!("Scan: get_candidates called for {} with filter {:?}", type_name, filter);
         let mut candidates: Option<std::collections::HashSet<u64>> = None;
+        let type_meta = query_metadata.get(type_name);
 
         for (field, condition) in filter {
             // Skip logical operators — these are handled by check_filter_recursive, not here
@@ -1142,6 +1598,80 @@ impl SqliteResolver {
 
                 if handled_by_pushdown {
                     continue;
+                }
+
+                let is_operator_map = map.keys().any(|k| {
+                    [
+                        "eq",
+                        "gt",
+                        "lt",
+                        "ge",
+                        "le",
+                        "contains",
+                        "between",
+                        "near",
+                        "within",
+                        "intersects",
+                        "in",
+                        "ne",
+                        "allofterms",
+                        "anyofterms",
+                        "alloftext",
+                        "anyoftext",
+                    ]
+                    .contains(&k.as_str())
+                });
+
+                if !is_operator_map {
+                    if let Some(meta) = type_meta {
+                        if let Some(target_type) = meta.relations.get(field) {
+                            if let Some(inverse) =
+                                meta.inverses.iter().find(|info| info.field == *field)
+                            {
+                                let nested_filter: std::collections::HashMap<String, Value> = map
+                                    .iter()
+                                    .map(|(k, v)| (k.to_string(), v.clone()))
+                                    .collect();
+                                let child_uniques = query_metadata
+                                    .get(target_type)
+                                    .map(|m| m.uniques.as_slice())
+                                    .unwrap_or(&[]);
+                                let child_uids = self.scan_nodes_internal(
+                                    target_type,
+                                    nested_filter,
+                                    std::collections::HashMap::new(),
+                                    None,
+                                    None,
+                                    None,
+                                    child_uniques,
+                                    None,
+                                    query_metadata,
+                                    None,
+                                );
+
+                                let mut field_uids = std::collections::HashSet::new();
+                                for child_uid in child_uids {
+                                    for parent_uid in
+                                        self.load_related_uids(child_uid, &inverse.inverse_field)
+                                    {
+                                        field_uids.insert(parent_uid);
+                                    }
+                                }
+
+                                if let Some(current) = candidates {
+                                    candidates = Some(
+                                        current
+                                            .into_iter()
+                                            .filter(|u| field_uids.contains(u))
+                                            .collect(),
+                                    );
+                                } else {
+                                    candidates = Some(field_uids);
+                                }
+                                continue;
+                            }
+                        }
+                    }
                 }
                 // Handle "allofterms"
                 if let Some(Value::String(terms_str)) = map.get("allofterms") {
@@ -1309,11 +1839,12 @@ impl SqliteResolver {
         }
         candidates
     }
-    // Updated check_filter_recursive to support Deep Filtering (Relation Traversal)
-    pub fn check_filter_recursive(
+
+    fn check_filter_recursive_cached(
         &self,
         uid: u64,
         filter: &indexmap::IndexMap<async_graphql::Name, Value>,
+        cache: Option<&RequestCache>,
     ) -> bool {
         for (key, condition) in filter {
             match key.as_str() {
@@ -1321,7 +1852,7 @@ impl SqliteResolver {
                     if let Value::List(list) = condition {
                         for sub in list {
                             if let Value::Object(map) = sub {
-                                if !self.check_filter_recursive(uid, map) {
+                                if !self.check_filter_recursive_cached(uid, map, cache) {
                                     return false;
                                 }
                             }
@@ -1333,7 +1864,7 @@ impl SqliteResolver {
                         let mut any = false;
                         for sub in list {
                             if let Value::Object(map) = sub {
-                                if self.check_filter_recursive(uid, map) {
+                                if self.check_filter_recursive_cached(uid, map, cache) {
                                     any = true;
                                     break;
                                 }
@@ -1346,29 +1877,15 @@ impl SqliteResolver {
                 }
                 "not" => {
                     if let Value::Object(map) = condition {
-                        if self.check_filter_recursive(uid, map) {
+                        if self.check_filter_recursive_cached(uid, map, cache) {
                             return false;
                         }
                     }
                 }
                 field_name => {
-                    let d_key = Codec::encode_data_key(uid, field_name);
-                    let stored_val =
-                        if let Ok(Some(bytes)) = self.storage.get(&self.db_name, &d_key) {
-                            let payload = if bytes.len() > 16 {
-                                &bytes[16..]
-                            } else {
-                                &bytes
-                            };
-                            serde_json::from_slice::<Value>(payload).ok()
-                        } else {
-                            None
-                        };
+                    let stored_val = self.resolve_cached(uid, field_name, cache);
 
-                    // relation traversal check
-                    // If condition is an Object and key is NOT a known operator (eq, gt...), it might be a Relation Filter
                     if let Value::Object(sub_filter) = condition {
-                        // Check if this is a standard operator map (eq, gt) OR a nested filter
                         let is_operator_map = sub_filter.keys().any(|k| {
                             [
                                 "eq",
@@ -1392,12 +1909,12 @@ impl SqliteResolver {
                         });
 
                         if !is_operator_map {
-                            // It's a Nested Relation Filter!
-                            // stored_val should be a UID (String/Number) or List of UIDs
                             match stored_val {
                                 Some(Value::String(s)) => {
                                     if let Ok(child_uid) = s.parse::<u64>() {
-                                        if !self.check_filter_recursive(child_uid, sub_filter) {
+                                        if !self.check_filter_recursive_cached(
+                                            child_uid, sub_filter, cache,
+                                        ) {
                                             return false;
                                         }
                                     } else {
@@ -1406,7 +1923,9 @@ impl SqliteResolver {
                                 }
                                 Some(Value::Number(n)) => {
                                     if let Some(child_uid) = n.as_u64() {
-                                        if !self.check_filter_recursive(child_uid, sub_filter) {
+                                        if !self.check_filter_recursive_cached(
+                                            child_uid, sub_filter, cache,
+                                        ) {
                                             return false;
                                         }
                                     } else {
@@ -1414,16 +1933,12 @@ impl SqliteResolver {
                                     }
                                 }
                                 Some(Value::List(list)) => {
-                                    // 1:M Relation - "Some" semantics (match if ANY child matches)
                                     let mut match_found = false;
                                     for item in list {
-                                        let u_opt = match item {
-                                            Value::String(s) => s.parse::<u64>().ok(),
-                                            Value::Number(n) => n.as_u64(),
-                                            _ => None,
-                                        };
-                                        if let Some(child_uid) = u_opt {
-                                            if self.check_filter_recursive(child_uid, sub_filter) {
+                                        if let Some(child_uid) = Self::value_to_uid(&item) {
+                                            if self.check_filter_recursive_cached(
+                                                child_uid, sub_filter, cache,
+                                            ) {
                                                 match_found = true;
                                                 break;
                                             }
@@ -1433,7 +1948,7 @@ impl SqliteResolver {
                                         return false;
                                     }
                                 }
-                                _ => return false, // Relation field is null or invalid
+                                _ => return false,
                             }
                             continue;
                         }
@@ -1446,6 +1961,15 @@ impl SqliteResolver {
             }
         }
         true
+    }
+
+    // Updated check_filter_recursive to support Deep Filtering (Relation Traversal)
+    pub fn check_filter_recursive(
+        &self,
+        uid: u64,
+        filter: &indexmap::IndexMap<async_graphql::Name, Value>,
+    ) -> bool {
+        self.check_filter_recursive_cached(uid, filter, None)
     }
 
     pub fn create_node_internal(
@@ -1603,6 +2127,27 @@ impl SqliteResolver {
                     val_buf.extend_from_slice(&ts_bytes);
                     val_buf.extend_from_slice(&val_bytes);
                     main.batch_upsert_lww_on_conn(conn, &key, &val_buf, &ts_bytes)?;
+
+                    if let Some(encoded_value) = Self::encode_order_index_value(value, false) {
+                        let asc_key = Codec::encode_order_index_key(
+                            type_name,
+                            field,
+                            false,
+                            &encoded_value,
+                            uid,
+                        );
+                        main.batch_insert_on_conn(conn, &asc_key, &[])?;
+                    }
+                    if let Some(encoded_value) = Self::encode_order_index_value(value, true) {
+                        let desc_key = Codec::encode_order_index_key(
+                            type_name,
+                            field,
+                            true,
+                            &encoded_value,
+                            uid,
+                        );
+                        main.batch_insert_on_conn(conn, &desc_key, &[])?;
+                    }
                 }
 
                 for (target, inverse_field, is_list) in &deferred_inverses {
@@ -1757,6 +2302,31 @@ impl SqliteResolver {
                         val_buf.extend_from_slice(&ts_bytes);
                         val_buf.extend_from_slice(&val_bytes);
                         main_clone.batch_upsert_lww_on_conn(conn, &key, &val_buf, &ts_bytes)?;
+
+                        if let Some(encoded_value) =
+                            Self::encode_order_index_value(&normalized, false)
+                        {
+                            let asc_key = Codec::encode_order_index_key(
+                                &record.type_name,
+                                field,
+                                false,
+                                &encoded_value,
+                                uid,
+                            );
+                            main_clone.batch_insert_on_conn(conn, &asc_key, &[])?;
+                        }
+                        if let Some(encoded_value) =
+                            Self::encode_order_index_value(&normalized, true)
+                        {
+                            let desc_key = Codec::encode_order_index_key(
+                                &record.type_name,
+                                field,
+                                true,
+                                &encoded_value,
+                                uid,
+                            );
+                            main_clone.batch_insert_on_conn(conn, &desc_key, &[])?;
+                        }
                     }
 
                     // @hasInverse edge writing
@@ -1937,6 +2507,18 @@ impl SqliteResolver {
                     }
                 }
             }
+
+            let data_key = Codec::encode_data_key(uid, field);
+            if let Ok(Some(bytes)) = self.storage.get(&self.db_name, &data_key) {
+                let payload = if bytes.len() > 16 {
+                    &bytes[16..]
+                } else {
+                    &bytes
+                };
+                if let Ok(val) = serde_json::from_slice::<serde_json::Value>(payload) {
+                    self.remove_order_index(type_name, uid, field, &val)?;
+                }
+            }
         }
         // 1. Unlink Inverses
         for info in inverses {
@@ -2079,6 +2661,7 @@ impl SqliteResolver {
             val_buf.extend_from_slice(&ts_bytes);
             val_buf.extend_from_slice(&val_bytes);
             batch_items.push((uid, field.clone(), val_buf));
+            self.write_order_index(type_name, uid, field, value)?;
         }
 
         self.storage
@@ -2215,6 +2798,17 @@ impl SqliteResolver {
                     }
                 }
             }
+
+            if let Ok(Some(bytes)) = self.storage.get(&self.db_name, &data_key) {
+                let payload = if bytes.len() > 16 {
+                    &bytes[16..]
+                } else {
+                    &bytes
+                };
+                if let Ok(val) = serde_json::from_slice::<serde_json::Value>(payload) {
+                    self.remove_order_index(type_name, uid, field, &val)?;
+                }
+            }
         }
         // 1. Handle Inverses (Unlink)
         for info in inverses {
@@ -2310,17 +2904,41 @@ impl SqliteResolver {
                 }
             }
         }
-        // 3. Remove Type Index
+        // 3. Remove Ordered Secondary Indexes
+        let data_prefix = Codec::encode_data_prefix(uid);
+        if let Some((main_ks, _)) = self.storage.get_database(&self.db_name) {
+            for (key, bytes) in main_ks.prefix(&data_prefix) {
+                if !key.starts_with(&data_prefix) || key.len() <= data_prefix.len() {
+                    break;
+                }
+                let field = match std::str::from_utf8(&key[data_prefix.len()..]) {
+                    Ok(f) => f,
+                    Err(_) => continue,
+                };
+                if field == "_type" {
+                    continue;
+                }
+                let payload = if bytes.len() > 16 {
+                    &bytes[16..]
+                } else {
+                    &bytes
+                };
+                if let Ok(val) = serde_json::from_slice::<serde_json::Value>(payload) {
+                    self.remove_order_index(type_name, uid, field, &val)?;
+                }
+            }
+        }
+        // 4. Remove Type Index
         let type_key = Codec::encode_type_index_key(type_name, uid);
         self.storage
             .remove(&self.db_name, &type_key)
             .map_err(|e| e.to_string())?;
 
-        // 4. Remove Vector Data (Soft Delete)
+        // 5. Remove Vector Data (Soft Delete)
         // We delete indiscriminately; if no vector existed, it's a safe no-op.
         self.storage.delete_vector(uid).map_err(|e| e.to_string())?;
 
-        // 5. Remove Data Keys (Scan Prefix)
+        // 6. Remove Data Keys (Scan Prefix)
         let prefix = Codec::encode_data_prefix(uid);
         let (main_ks, _) = self
             .storage
@@ -2444,6 +3062,518 @@ impl SqliteResolver {
     }
 }
 
+impl SqliteResolver {
+    fn resolve_list_internal(
+        &self,
+        parent_uid: u64,
+        field_name: &str,
+        filter: std::collections::HashMap<String, Value>,
+        sort: std::collections::HashMap<String, Value>,
+        first: Option<usize>,
+        after: Option<String>,
+        offset: Option<usize>,
+        near_vector: Option<Vec<f64>>,
+        cache: Option<&RequestCache>,
+    ) -> Result<Vec<u64>, String> {
+        let start = std::time::Instant::now();
+        let mut uids = self.related_uids_cached(parent_uid, field_name, cache);
+        let load_time = start.elapsed();
+
+        if let Some(ref vec) = near_vector {
+            let mut uid_dists = Vec::new();
+            for uid in &uids {
+                if let Some(Value::List(floats)) = self.resolve_cached(*uid, "embedding", cache) {
+                    let embed: Vec<f64> = floats
+                        .iter()
+                        .filter_map(|v| match v {
+                            Value::Number(n) => n.as_f64(),
+                            _ => None,
+                        })
+                        .collect();
+
+                    if embed.len() == vec.len() {
+                        let dot: f64 = embed.iter().zip(vec.iter()).map(|(a, b)| a * b).sum();
+                        let norm_a: f64 = embed.iter().map(|a| a * a).sum::<f64>().sqrt();
+                        let norm_b: f64 = vec.iter().map(|b| b * b).sum::<f64>().sqrt();
+
+                        if norm_a > 0.0 && norm_b > 0.0 {
+                            let sim = dot / (norm_a * norm_b);
+                            uid_dists.push((*uid, 1.0 - sim));
+                        } else {
+                            uid_dists.push((*uid, f64::MAX));
+                        }
+                    }
+                }
+            }
+
+            uid_dists.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+            uids = uid_dists.into_iter().map(|(u, _)| u).collect();
+        }
+
+        if !filter.is_empty() {
+            let mut filter_im = indexmap::IndexMap::new();
+            for (k, v) in &filter {
+                filter_im.insert(async_graphql::Name::new(k), v.clone());
+            }
+            uids.retain(|uid| self.check_filter_recursive_cached(*uid, &filter_im, cache));
+        }
+
+        if !sort.is_empty() {
+            if let Some((field, direction)) = sort.iter().next() {
+                let asc = match direction {
+                    Value::String(s) => s == "ASC",
+                    Value::Enum(n) => n.as_str() == "ASC",
+                    _ => true,
+                };
+                self.sort_uids_by_field(&mut uids, field, asc, cache);
+            }
+        }
+
+        if let Some(cursor_uid_str) = after {
+            if let Ok(cursor_uid) = cursor_uid_str.parse::<u64>() {
+                if let Some(pos) = uids.iter().position(|u| *u == cursor_uid) {
+                    uids = uids.into_iter().skip(pos + 1).collect();
+                }
+            }
+        }
+
+        if let Some(skip_count) = offset {
+            if skip_count > 0 {
+                uids = uids.into_iter().skip(skip_count).collect();
+            }
+        }
+
+        if let Some(limit) = first {
+            uids.truncate(limit);
+        }
+
+        if let Some(cache) = cache {
+            self.preload_objects_for_uids(&uids, cache);
+        }
+
+        let total = start.elapsed();
+        if crate::debug_logging() && total.as_millis() > 10 {
+            eprintln!(
+                "[RESOLVER] resolve_list {}.{} parent={} base={} filter={} sort={} total={}ms load={}ms near_vector={}",
+                self.db_name,
+                field_name,
+                parent_uid,
+                uids.len(),
+                !filter.is_empty(),
+                !sort.is_empty(),
+                total.as_millis(),
+                load_time.as_millis(),
+                near_vector.is_some(),
+            );
+        }
+
+        Ok(uids)
+    }
+
+    fn scan_nodes_internal(
+        &self,
+        type_name: &str,
+        filter: std::collections::HashMap<String, Value>,
+        sort: std::collections::HashMap<String, Value>,
+        first: Option<usize>,
+        after: Option<String>,
+        offset: Option<usize>,
+        uniques: &[String],
+        near_vector: Option<Vec<f64>>,
+        query_metadata: &std::collections::HashMap<
+            String,
+            crate::engine::resolver::QueryTypeMetadata,
+        >,
+        cache: Option<&RequestCache>,
+    ) -> Vec<u64> {
+        let start = std::time::Instant::now();
+        let mut uids = Vec::new();
+        let mut filter_im = indexmap::IndexMap::new();
+        for (k, v) in &filter {
+            filter_im.insert(async_graphql::Name::new(k), v.clone());
+        }
+
+        let mut text_search: Option<(String, String, String, bool)> = None;
+        for (field, val) in &filter {
+            if let Value::Object(obj) = val {
+                if let Some(Value::String(s)) = obj.get("allofterms") {
+                    text_search = Some((field.clone(), "term".to_string(), s.clone(), true));
+                    break;
+                }
+                if let Some(Value::String(s)) = obj.get("anyofterms") {
+                    text_search = Some((field.clone(), "term".to_string(), s.clone(), false));
+                    break;
+                }
+                if let Some(Value::String(s)) = obj.get("alloftext") {
+                    text_search = Some((field.clone(), "fulltext".to_string(), s.clone(), true));
+                    break;
+                }
+                if let Some(Value::String(s)) = obj.get("anyoftext") {
+                    text_search = Some((field.clone(), "fulltext".to_string(), s.clone(), false));
+                    break;
+                }
+            }
+        }
+
+        let has_text_search = text_search.is_some();
+        let candidate_start = std::time::Instant::now();
+        let candidate_set = if near_vector.is_none() && !has_text_search {
+            self.get_candidates(type_name, &filter, uniques, query_metadata)
+        } else {
+            None
+        };
+        let candidate_time = candidate_start.elapsed();
+        let used_candidates = candidate_set.is_some();
+
+        if near_vector.is_none() && !has_text_search && !sort.is_empty() {
+            if let Some((field, direction)) = sort.iter().next() {
+                let asc = match direction {
+                    Value::String(s) => s == "ASC",
+                    Value::Enum(n) => n.as_str() == "ASC",
+                    _ => true,
+                };
+                if let Some(sorted_uids) = self.sorted_index_scan(
+                    type_name,
+                    field,
+                    asc,
+                    &filter,
+                    &filter_im,
+                    first,
+                    after.clone(),
+                    offset,
+                    candidate_set.as_ref(),
+                    cache,
+                ) {
+                    return sorted_uids;
+                }
+            }
+        }
+
+        if let Some(ref vec) = near_vector {
+            let k = first.unwrap_or(50) * 4;
+            let search_results =
+                if let Some((field, _strat, query, require_all)) = text_search.clone() {
+                    self.search_hybrid(&query, &field, vec, k, require_all)
+                } else {
+                    self.search_vectors(vec, k)
+                };
+
+            for (uid, _dist) in search_results {
+                if self.node_exists(type_name, uid)
+                    && self.get_node_type(uid).as_deref() == Some(type_name)
+                    && (filter.is_empty()
+                        || self.check_filter_recursive_cached(uid, &filter_im, cache))
+                {
+                    uids.push(uid);
+                }
+            }
+        } else if let Some((field, strat, query, require_all)) = text_search {
+            let k = first.unwrap_or(50) * 4;
+            let results = self.search_text_bm25(&query, &field, &strat, k, require_all);
+
+            for (uid, _score) in results {
+                if self.node_exists(type_name, uid)
+                    && self.get_node_type(uid).as_deref() == Some(type_name)
+                    && self.check_filter_recursive_cached(uid, &filter_im, cache)
+                {
+                    uids.push(uid);
+                }
+            }
+        } else if let Some(candidates) = candidate_set.clone() {
+            use rayon::prelude::*;
+
+            let mut matched_uids: Vec<u64> = candidates
+                .par_iter()
+                .filter(|uid| {
+                    filter.is_empty()
+                        || self.check_filter_recursive_cached(**uid, &filter_im, cache)
+                })
+                .cloned()
+                .collect();
+
+            uids.append(&mut matched_uids);
+            if sort.is_empty() {
+                uids.sort();
+            }
+        } else {
+            let prefix = Codec::encode_type_prefix(type_name);
+            let needs_sorting = !sort.is_empty();
+            let mut skipped = 0usize;
+            let skip_target = offset.unwrap_or(0);
+
+            let start_key = if !needs_sorting {
+                if let Some(cursor) = after.clone() {
+                    let uid = cursor.parse::<u64>().unwrap_or(0);
+                    if uid == u64::MAX {
+                        return vec![];
+                    }
+                    Codec::encode_type_index_key(type_name, uid + 1)
+                } else {
+                    prefix.clone()
+                }
+            } else {
+                prefix.clone()
+            };
+
+            if let Some((main_ks, _)) = self.storage.get_database(&self.db_name) {
+                let upper = crate::storage::sqlite_backend::compute_prefix_upper_bound(&prefix)
+                    .expect("valid prefix bounds");
+                for (key, _val) in main_ks.range(&start_key, &upper) {
+                    if !key.starts_with(&prefix) {
+                        break;
+                    }
+                    if key.len() < 8 {
+                        continue;
+                    }
+
+                    let uid = BigEndian::read_u64(&key[key.len() - 8..]);
+                    if !filter.is_empty()
+                        && !self.check_filter_recursive_cached(uid, &filter_im, cache)
+                    {
+                        continue;
+                    }
+
+                    if !needs_sorting && near_vector.is_none() {
+                        if skipped < skip_target {
+                            skipped += 1;
+                            continue;
+                        }
+                        uids.push(uid);
+                        if let Some(limit) = first {
+                            if uids.len() >= limit {
+                                break;
+                            }
+                        }
+                    } else {
+                        uids.push(uid);
+                    }
+                }
+            }
+        }
+
+        if !sort.is_empty() {
+            if let Some((field, direction)) = sort.iter().next() {
+                let asc = match direction {
+                    Value::String(s) => s == "ASC",
+                    _ => true,
+                };
+                self.sort_uids_by_field(&mut uids, field, asc, cache);
+            }
+        } else if near_vector.is_none() && used_candidates {
+            uids.sort();
+        }
+
+        if let Some(cursor_uid_str) = after {
+            if let Ok(cursor_uid) = cursor_uid_str.parse::<u64>() {
+                if let Some(pos) = uids.iter().position(|u| *u == cursor_uid) {
+                    uids = uids.into_iter().skip(pos + 1).collect();
+                }
+            }
+        }
+
+        if !(sort.is_empty() && near_vector.is_none() && candidate_set.is_none()) {
+            if let Some(skip_count) = offset {
+                if skip_count > 0 {
+                    uids = uids.into_iter().skip(skip_count).collect();
+                }
+            }
+        }
+
+        if let Some(limit) = first {
+            uids.truncate(limit);
+        }
+
+        if let Some(cache) = cache {
+            self.preload_objects_for_uids(&uids, cache);
+        }
+
+        let total = start.elapsed();
+        if crate::debug_logging() && total.as_millis() > 10 {
+            eprintln!(
+                "[RESOLVER] scan_nodes {}.{} filter={} sort={} first={:?} offset={:?} candidates={} candidate_ms={} result_count={} total_ms={} near_vector={} text_search={}",
+                self.db_name,
+                type_name,
+                !filter.is_empty(),
+                !sort.is_empty(),
+                first,
+                offset,
+                used_candidates,
+                candidate_time.as_millis(),
+                uids.len(),
+                total.as_millis(),
+                near_vector.is_some(),
+                has_text_search,
+            );
+        }
+
+        uids
+    }
+
+    fn count_nodes_internal(
+        &self,
+        type_name: &str,
+        filter: std::collections::HashMap<String, Value>,
+        uniques: &[String],
+        near_vector: Option<Vec<f64>>,
+        query_metadata: &std::collections::HashMap<
+            String,
+            crate::engine::resolver::QueryTypeMetadata,
+        >,
+        cache: Option<&RequestCache>,
+    ) -> usize {
+        let start = std::time::Instant::now();
+        let mut filter_im = indexmap::IndexMap::new();
+        for (k, v) in &filter {
+            filter_im.insert(async_graphql::Name::new(k), v.clone());
+        }
+
+        let mut text_search: Option<(String, String, String, bool)> = None;
+        for (field, val) in &filter {
+            if let Value::Object(obj) = val {
+                if let Some(Value::String(s)) = obj.get("allofterms") {
+                    text_search = Some((field.clone(), "term".to_string(), s.clone(), true));
+                    break;
+                }
+                if let Some(Value::String(s)) = obj.get("anyofterms") {
+                    text_search = Some((field.clone(), "term".to_string(), s.clone(), false));
+                    break;
+                }
+                if let Some(Value::String(s)) = obj.get("alloftext") {
+                    text_search = Some((field.clone(), "fulltext".to_string(), s.clone(), true));
+                    break;
+                }
+                if let Some(Value::String(s)) = obj.get("anyoftext") {
+                    text_search = Some((field.clone(), "fulltext".to_string(), s.clone(), false));
+                    break;
+                }
+            }
+        }
+
+        let has_text_search = text_search.is_some();
+        let candidate_start = std::time::Instant::now();
+        let candidate_set = if near_vector.is_none() && !has_text_search {
+            self.get_candidates(type_name, &filter, uniques, query_metadata)
+        } else {
+            None
+        };
+        let candidate_time = candidate_start.elapsed();
+
+        if let Some(ref vec) = near_vector {
+            let search_results =
+                if let Some((field, _strat, query, require_all)) = text_search.clone() {
+                    self.search_hybrid(&query, &field, vec, 10_000, require_all)
+                } else {
+                    self.search_vectors(vec, 10_000)
+                };
+
+            let count = search_results
+                .into_iter()
+                .filter(|(uid, _)| {
+                    self.node_exists(type_name, *uid)
+                        && self.get_node_type(*uid).as_deref() == Some(type_name)
+                        && (filter.is_empty()
+                            || self.check_filter_recursive_cached(*uid, &filter_im, cache))
+                })
+                .count();
+            if crate::debug_logging() && start.elapsed().as_millis() > 10 {
+                eprintln!(
+                    "[RESOLVER] count_nodes {}.{} candidates=false candidate_ms={} count={} total_ms={} near_vector=true text_search={}",
+                    self.db_name,
+                    type_name,
+                    candidate_time.as_millis(),
+                    count,
+                    start.elapsed().as_millis(),
+                    has_text_search,
+                );
+            }
+            return count;
+        }
+
+        if let Some((field, strat, query, require_all)) = text_search {
+            let count = self
+                .search_text_bm25(&query, &field, &strat, 10_000, require_all)
+                .into_iter()
+                .filter(|(uid, _)| {
+                    self.node_exists(type_name, *uid)
+                        && self.get_node_type(*uid).as_deref() == Some(type_name)
+                        && self.check_filter_recursive_cached(*uid, &filter_im, cache)
+                })
+                .count();
+            if crate::debug_logging() && start.elapsed().as_millis() > 10 {
+                eprintln!(
+                    "[RESOLVER] count_nodes {}.{} candidates=false candidate_ms={} count={} total_ms={} near_vector=false text_search=true",
+                    self.db_name,
+                    type_name,
+                    candidate_time.as_millis(),
+                    count,
+                    start.elapsed().as_millis(),
+                );
+            }
+            return count;
+        }
+
+        if let Some(candidates) = candidate_set {
+            let count = candidates
+                .into_iter()
+                .filter(|uid| {
+                    filter.is_empty() || self.check_filter_recursive_cached(*uid, &filter_im, cache)
+                })
+                .count();
+            if crate::debug_logging() && start.elapsed().as_millis() > 10 {
+                eprintln!(
+                    "[RESOLVER] count_nodes {}.{} candidates=true candidate_ms={} count={} total_ms={} near_vector=false text_search=false",
+                    self.db_name,
+                    type_name,
+                    candidate_time.as_millis(),
+                    count,
+                    start.elapsed().as_millis(),
+                );
+            }
+            return count;
+        }
+
+        let prefix = Codec::encode_type_prefix(type_name);
+        if filter.is_empty() {
+            if let Some((main_ks, _)) = self.storage.get_database(&self.db_name) {
+                return main_ks.count_prefix(&prefix).unwrap_or(0);
+            }
+            return 0;
+        }
+
+        let mut count = 0usize;
+        if let Some((main_ks, _)) = self.storage.get_database(&self.db_name) {
+            let upper = crate::storage::sqlite_backend::compute_prefix_upper_bound(&prefix)
+                .expect("valid prefix bounds");
+            for (key, _val) in main_ks.range(&prefix, &upper) {
+                if !key.starts_with(&prefix) {
+                    break;
+                }
+                if key.len() < 8 {
+                    continue;
+                }
+
+                let uid = BigEndian::read_u64(&key[key.len() - 8..]);
+                if self.check_filter_recursive_cached(uid, &filter_im, cache) {
+                    count += 1;
+                }
+            }
+        }
+
+        if crate::debug_logging() && start.elapsed().as_millis() > 10 {
+            eprintln!(
+                "[RESOLVER] count_nodes {}.{} candidates=false candidate_ms={} count={} total_ms={} near_vector=false text_search=false",
+                self.db_name,
+                type_name,
+                candidate_time.as_millis(),
+                count,
+                start.elapsed().as_millis(),
+            );
+        }
+
+        count
+    }
+}
+
 impl Resolver for SqliteResolver {
     fn bulk_check_permission(
         &self,
@@ -2508,231 +3638,42 @@ impl Resolver for SqliteResolver {
         offset: Option<usize>,
         near_vector: Option<Vec<f64>>,
     ) -> Result<Vec<u64>, String> {
-        // 1. Resolve the List Field from Storage
-        // First check the legacy data key (for directly-assigned lists)
-        let key = Codec::encode_data_key(parent_uid, field_name);
+        self.resolve_list_internal(
+            parent_uid,
+            field_name,
+            filter,
+            sort,
+            first,
+            after,
+            offset,
+            near_vector,
+            None,
+        )
+    }
 
-        let mut uids: Vec<u64> = if let Ok(Some(bytes)) = self.storage.get(&self.db_name, &key) {
-            let payload = if bytes.len() > 16 {
-                &bytes[16..]
-            } else {
-                &bytes
-            };
-            if let Ok(val) = serde_json::from_slice::<Value>(payload) {
-                match val {
-                    Value::List(list) => {
-                        let mut result = Vec::new();
-                        for item in list {
-                            match item {
-                                Value::String(s) => {
-                                    if let Ok(u) = s.parse::<u64>() {
-                                        result.push(u);
-                                    }
-                                }
-                                Value::Number(n) => {
-                                    if let Some(u) = n.as_u64() {
-                                        result.push(u);
-                                    }
-                                }
-                                Value::Object(map) => {
-                                    if let Some(uid_val) = map.get("uid").or(map.get("id")) {
-                                        match uid_val {
-                                            Value::String(s) => {
-                                                if let Ok(u) = s.parse::<u64>() {
-                                                    result.push(u);
-                                                }
-                                            }
-                                            Value::Number(n) => {
-                                                if let Some(u) = n.as_u64() {
-                                                    result.push(u);
-                                                }
-                                            }
-                                            _ => {}
-                                        }
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-                        result
-                    }
-                    Value::String(s) => {
-                        if let Ok(u) = s.parse::<u64>() {
-                            vec![u]
-                        } else {
-                            vec![]
-                        }
-                    }
-                    Value::Number(n) => {
-                        if let Some(u) = n.as_u64() {
-                            vec![u]
-                        } else {
-                            vec![]
-                        }
-                    }
-                    Value::Object(map) => {
-                        if let Some(uid_val) = map.get("uid").or(map.get("id")) {
-                            match uid_val {
-                                Value::String(s) => {
-                                    if let Ok(u) = s.parse::<u64>() {
-                                        vec![u]
-                                    } else {
-                                        vec![]
-                                    }
-                                }
-                                Value::Number(n) => {
-                                    if let Some(u) = n.as_u64() {
-                                        vec![u]
-                                    } else {
-                                        vec![]
-                                    }
-                                }
-                                _ => vec![],
-                            }
-                        } else {
-                            vec![]
-                        }
-                    }
-                    _ => vec![],
-                }
-            } else {
-                vec![]
-            }
-        } else {
-            vec![]
-        };
-
-        // Also scan edge index keys (for inverse-linked lists)
-        let edge_prefix = Codec::encode_edge_prefix(parent_uid, field_name);
-
-        if let Some((main_ks, _)) = self.storage.get_database(&self.db_name) {
-            let iter = main_ks.prefix(&edge_prefix);
-
-            for (key, _val) in iter {
-                if !key.starts_with(&edge_prefix) {
-                    break;
-                }
-                if let Some(source_uid) = Codec::decode_edge_source_uid(&key) {
-                    uids.push(source_uid);
-                }
-            }
-        }
-
-        // 2. Vector Sort/Filter (Strategy B: Fetch & Sort)
-        if let Some(ref vec) = near_vector {
-            // We have the set of relevant UIDs.
-            // We want to sort them by distance to `vec`.
-            // We need to fetch the `embedding` field for each.
-            // What field name holds the embedding? Default: "embedding" per schema.
-            // Ideally we should know the vector field name from metadata, but schema.rs passes logic.
-            // Let's assume field is named "embedding".
-            // We can check `resolve(uid, "embedding")`.
-
-            let mut uid_dists = Vec::new();
-            for uid in &uids {
-                if let Some(val) = self.resolve(*uid, "embedding") {
-                    if let Value::List(floats) = val {
-                        let embed: Vec<f64> = floats
-                            .iter()
-                            .filter_map(|v| match v {
-                                Value::Number(n) => n.as_f64(),
-                                _ => None,
-                            })
-                            .collect();
-
-                        // Compute Cosine Distance
-                        // Check dims
-                        if embed.len() == vec.len() {
-                            // Simple Euclidean or Cosine? HNSW usually Cosine/Dot.
-                            // Let's use Cosine Similarity -> Distance = 1 - Sim
-                            let dot: f64 = embed.iter().zip(vec.iter()).map(|(a, b)| a * b).sum();
-                            let norm_a: f64 = embed.iter().map(|a| a * a).sum::<f64>().sqrt();
-                            let norm_b: f64 = vec.iter().map(|b| b * b).sum::<f64>().sqrt();
-
-                            if norm_a > 0.0 && norm_b > 0.0 {
-                                let sim = dot / (norm_a * norm_b);
-                                let dist = 1.0 - sim;
-                                uid_dists.push((*uid, dist));
-                            } else {
-                                uid_dists.push((*uid, f64::MAX));
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Sort by Distance ASC
-            uid_dists.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-
-            // Update uids
-            uids = uid_dists.into_iter().map(|(u, _)| u).collect();
-        }
-
-        // 3. Filter (Standard)
-        if !filter.is_empty() {
-            let mut filter_im = indexmap::IndexMap::new();
-            for (k, v) in &filter {
-                filter_im.insert(async_graphql::Name::new(k), v.clone());
-            }
-            uids.retain(|uid| self.check_filter_recursive(*uid, &filter_im));
-        }
-
-        // 4. Sort (Explicit sort overrides Vector sort)
-        if !sort.is_empty() {
-            if let Some((field, direction)) = sort.iter().next() {
-                let asc = match direction {
-                    Value::String(s) => s == "ASC",
-                    Value::Enum(n) => n.as_str() == "ASC",
-                    _ => true,
-                };
-
-                uids.sort_by(|a, b| {
-                    let val_a = self.resolve(*a, field);
-                    let val_b = self.resolve(*b, field);
-
-                    let cmp = match (val_a, val_b) {
-                        (Some(Value::Number(na)), Some(Value::Number(nb))) => na
-                            .as_f64()
-                            .partial_cmp(&nb.as_f64())
-                            .unwrap_or(std::cmp::Ordering::Equal),
-                        (Some(Value::String(sa)), Some(Value::String(sb))) => sa.cmp(&sb),
-                        (None, Some(_)) => std::cmp::Ordering::Less,
-                        (Some(_), None) => std::cmp::Ordering::Greater,
-                        _ => std::cmp::Ordering::Equal,
-                    };
-
-                    if asc {
-                        cmp
-                    } else {
-                        cmp.reverse()
-                    }
-                });
-            }
-        }
-
-        // 5. Pagination
-        if let Some(cursor_uid_str) = after {
-            // We assume cursor is UID based (like scan_nodes fallback) or simple list indexing?
-            // Since we have the whole list, we perform cursor pagination relative to valid UIDs.
-            // If cursor key is UID (primary key):
-            if let Ok(cursor_uid) = cursor_uid_str.parse::<u64>() {
-                if let Some(pos) = uids.iter().position(|u| *u == cursor_uid) {
-                    uids = uids.into_iter().skip(pos + 1).collect();
-                }
-            }
-        }
-
-        if let Some(skip_count) = offset {
-            if skip_count > 0 {
-                uids = uids.into_iter().skip(skip_count).collect();
-            }
-        }
-
-        if let Some(limit) = first {
-            uids.truncate(limit);
-        }
-
-        Ok(uids)
+    fn resolve_list_with_cache(
+        &self,
+        parent_uid: u64,
+        field_name: &str,
+        filter: std::collections::HashMap<String, Value>,
+        sort: std::collections::HashMap<String, Value>,
+        first: Option<usize>,
+        after: Option<String>,
+        offset: Option<usize>,
+        near_vector: Option<Vec<f64>>,
+        cache: &RequestCache,
+    ) -> Result<Vec<u64>, String> {
+        self.resolve_list_internal(
+            parent_uid,
+            field_name,
+            filter,
+            sort,
+            first,
+            after,
+            offset,
+            near_vector,
+            Some(cache),
+        )
     }
 
     fn search_vectors(&self, query: &[f64], k: usize) -> Vec<(u64, f64)> {
@@ -2750,49 +3691,16 @@ impl Resolver for SqliteResolver {
     }
 
     fn resolve(&self, uid: u64, field_name: &str) -> Option<Value> {
-        if field_name == "id" {
-            return Some(Value::String(uid.to_string()));
-        }
+        self.resolve_cached(uid, field_name, None)
+    }
 
-        let key = Codec::encode_data_key(uid, field_name);
-        let mut resolved_val = None;
-        match self.storage.get(&self.db_name, &key) {
-            Ok(Some(bytes)) => {
-                // Data values have a 16-byte timestamp prefix — skip it
-                if bytes.len() > 16 {
-                    resolved_val = serde_json::from_slice(&bytes[16..]).ok();
-                } else {
-                    resolved_val = serde_json::from_slice(&bytes).ok();
-                }
-            }
-            _ => {
-                // FALLBACK: Check Edge Index (for Inverse Relationships)
-                // If this field is a relationship (e.g., `posts` on `User`), it might only exist as edge keys.
-                // We scan for edges starting with prefix derived from (uid, field_name).
-                let edge_prefix = Codec::encode_edge_prefix(uid, field_name);
-                if let Some((main_ks, _)) = self.storage.get_database(&self.db_name) {
-                    let mut edge_uids = Vec::new();
-                    let iter = main_ks.prefix(&edge_prefix);
-                    for (key, _val) in iter {
-                        if !key.starts_with(&edge_prefix) {
-                            break;
-                        }
-                        if let Some(target_uid) = Codec::decode_edge_source_uid(&key) {
-                            edge_uids.push(target_uid);
-                        }
-                    }
-                    if !edge_uids.is_empty() {
-                        // Return as List of strings (IDs)
-                        let list: Vec<Value> = edge_uids
-                            .into_iter()
-                            .map(|u| Value::String(u.to_string()))
-                            .collect();
-                        resolved_val = Some(Value::List(list));
-                    }
-                }
-            }
-        }
-        resolved_val
+    fn resolve_with_cache(
+        &self,
+        uid: u64,
+        field_name: &str,
+        cache: &RequestCache,
+    ) -> Option<Value> {
+        self.resolve_cached(uid, field_name, Some(cache))
     }
 
     fn find_uid(&self, index_name: &str, value: &str) -> Option<u64> {
@@ -2873,263 +3781,96 @@ impl Resolver for SqliteResolver {
         offset: Option<usize>,
         uniques: &[String],
         near_vector: Option<Vec<f64>>,
+        query_metadata: &std::collections::HashMap<
+            String,
+            crate::engine::resolver::QueryTypeMetadata,
+        >,
     ) -> Vec<u64> {
-        // println!("Scan: scan_nodes called for {}. Filter: {:?}, Sort: {:?}, NearVector: {:?}", type_name, filter, sort, near_vector.is_some());
+        self.scan_nodes_internal(
+            type_name,
+            filter,
+            sort,
+            first,
+            after,
+            offset,
+            uniques,
+            near_vector,
+            query_metadata,
+            None,
+        )
+    }
 
-        let mut uids = Vec::new();
-        let mut filter_im = indexmap::IndexMap::new();
-        for (k, v) in &filter {
-            filter_im.insert(async_graphql::Name::new(k), v.clone());
-        }
+    fn scan_nodes_with_cache(
+        &self,
+        type_name: &str,
+        filter: std::collections::HashMap<String, Value>,
+        sort: std::collections::HashMap<String, Value>,
+        first: Option<usize>,
+        after: Option<String>,
+        offset: Option<usize>,
+        uniques: &[String],
+        near_vector: Option<Vec<f64>>,
+        query_metadata: &std::collections::HashMap<
+            String,
+            crate::engine::resolver::QueryTypeMetadata,
+        >,
+        cache: &RequestCache,
+    ) -> Vec<u64> {
+        self.scan_nodes_internal(
+            type_name,
+            filter,
+            sort,
+            first,
+            after,
+            offset,
+            uniques,
+            near_vector,
+            query_metadata,
+            Some(cache),
+        )
+    }
 
-        // Strategy:
-        // 1. If `near_vector` is present, it DRIVES the scan (Simulated Vector Index Scan).
-        // 2. If `uniques` provided (Identity Map), use that.
-        // 3. Else Full Scan.
+    fn count_nodes(
+        &self,
+        type_name: &str,
+        filter: std::collections::HashMap<String, Value>,
+        uniques: &[String],
+        near_vector: Option<Vec<f64>>,
+        query_metadata: &std::collections::HashMap<
+            String,
+            crate::engine::resolver::QueryTypeMetadata,
+        >,
+    ) -> usize {
+        self.count_nodes_internal(
+            type_name,
+            filter,
+            uniques,
+            near_vector,
+            query_metadata,
+            None,
+        )
+    }
 
-        // Detect Text Search Predicates
-        let mut text_search: Option<(String, String, String, bool)> = None; // (field, strategy, query, require_all)
-        for (field, val) in &filter {
-            if let Value::Object(obj) = val {
-                if let Some(q) = obj.get("allofterms") {
-                    if let Value::String(s) = q {
-                        // Use "term" strategy for allofterms, require_all=true
-                        text_search = Some((field.clone(), "term".to_string(), s.clone(), true));
-                        break;
-                    }
-                }
-                if let Some(q) = obj.get("anyofterms") {
-                    if let Value::String(s) = q {
-                        // Use "term" strategy for anyofterms, require_all=false
-                        text_search = Some((field.clone(), "term".to_string(), s.clone(), false));
-                        break;
-                    }
-                }
-                if let Some(q) = obj.get("alloftext") {
-                    if let Value::String(s) = q {
-                        text_search =
-                            Some((field.clone(), "fulltext".to_string(), s.clone(), true));
-                        break;
-                    }
-                }
-                if let Some(q) = obj.get("anyoftext") {
-                    if let Value::String(s) = q {
-                        text_search =
-                            Some((field.clone(), "fulltext".to_string(), s.clone(), false));
-                        break;
-                    }
-                }
-            }
-        }
-
-        let candidate_set = if near_vector.is_none() && text_search.is_none() {
-            self.get_candidates(type_name, &filter, uniques)
-        } else {
-            None
-        };
-        let used_candidates = candidate_set.is_some();
-
-        if let Some(ref vec) = near_vector {
-            // Case 1: Hybrid Search (Vector + Text) or Vector Search
-            let k = first.unwrap_or(50) * 4;
-
-            let search_results = if let Some((field, _strat, query, require_all)) = text_search {
-                // Hybrid
-                self.search_hybrid(&query, &field, vec, k, require_all)
-            } else {
-                // Pure Vector
-                self.search_vectors(vec, k)
-            };
-
-            for (uid, _dist) in search_results {
-                // Verify Type & Apply Filters
-                if self.node_exists(type_name, uid) {
-                    if let Some(stored_type) = self.get_node_type(uid) {
-                        if stored_type == type_name {
-                            if filter.is_empty() || self.check_filter_recursive(uid, &filter_im) {
-                                uids.push(uid);
-                            }
-                        }
-                    }
-                }
-            }
-            // Results are already sorted by Score/Distance (ASC/DESC depending on impl)
-        } else if let Some((field, strat, query, require_all)) = text_search {
-            // Case 2: Pure Text Search (BM25)
-            let k = first.unwrap_or(50) * 4;
-            let results = self.search_text_bm25(&query, &field, &strat, k, require_all);
-
-            for (uid, _score) in results {
-                if self.node_exists(type_name, uid) {
-                    if let Some(stored_type) = self.get_node_type(uid) {
-                        if stored_type == type_name {
-                            if self.check_filter_recursive(uid, &filter_im) {
-                                uids.push(uid);
-                            }
-                        }
-                    }
-                }
-            }
-            // BM25 results are sorted by score (DESC) usually.
-        } else if let Some(candidates) = candidate_set {
-            // Candidate Set Optimization
-            // Try parallelize if set is large enough?
-            // For now, always parallelize as user requested it explicitly.
-            use rayon::prelude::*;
-
-            // Collect into Vec for Rayon (HashSet is not parallel iterator by default usually, or needs explicit support)
-            // Rayon supports HashSet parallel iter if we import it.
-            // But strict order for vector collection?
-
-            let mut matched_uids: Vec<u64> = candidates
-                .par_iter()
-                .filter(|uid| {
-                    let matches_filter = if filter.is_empty() {
-                        true
-                    } else {
-                        self.check_filter_recursive(**uid, &filter_im)
-                    };
-                    matches_filter
-                })
-                .cloned()
-                .collect();
-
-            uids.append(&mut matched_uids);
-
-            // Candidate set has no order guarantees. We MUST sort if pagination/sorting is active.
-            // If no explicit sort, we should probably sort by UID for consistency?
-            // Existing logic for full scan yields sorted by key (UID).
-            if sort.is_empty() {
-                uids.sort();
-                // Handle pagination below
-            }
-        } else {
-            // FULL SCAN FALLBACK
-            let prefix = Codec::encode_type_prefix(type_name);
-            let needs_sorting = !sort.is_empty();
-
-            // If we have a candidate set, we iterate THAT instead of the DB prefix scan
-            // UNLESS we need to sort, in which case we still might generally fetch all, but we can filter the candidate set.
-
-            let start_key = if !needs_sorting {
-                if let Some(cursor) = after.clone() {
-                    let uid = cursor.parse::<u64>().unwrap_or(0);
-                    if uid == u64::MAX {
-                        return vec![];
-                    }
-                    Codec::encode_type_index_key(type_name, uid + 1)
-                } else {
-                    prefix.clone()
-                }
-            } else {
-                prefix.clone()
-            };
-
-            if let Some((main_ks, _)) = self.storage.get_database(&self.db_name) {
-                let upper = crate::storage::sqlite_backend::compute_prefix_upper_bound(&prefix)
-                    .expect("valid prefix bounds");
-                let iter = main_ks.range(&start_key, &upper);
-                if crate::debug_logging() {
-                    println!(
-                        "Scan: Starting Full Scan for type: {}. Prefix/StartKey: {:?}",
-                        type_name, start_key
-                    );
-                }
-                for (key, _val) in iter {
-                    if !key.starts_with(&prefix) {
-                        break;
-                    }
-                    if key.len() >= 8 {
-                        let uid = BigEndian::read_u64(&key[key.len() - 8..]);
-
-                        if filter.is_empty() || self.check_filter_recursive(uid, &filter_im) {
-                            uids.push(uid);
-                            // If NO sorting, we can break early
-                            if !needs_sorting && near_vector.is_none() {
-                                if let Some(limit) = first {
-                                    if uids.len() >= limit {
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                if crate::debug_logging() {
-                    println!("Scan: Completed. Found {} uids", uids.len());
-                }
-            }
-        }
-
-        // Apply Sorting (if explicit sort OR if implicit ID sort required)
-        if !sort.is_empty() {
-            // In-Memory Sort
-            if let Some((field, direction)) = sort.iter().next() {
-                let asc = match direction {
-                    Value::String(s) => s == "ASC",
-                    _ => true,
-                };
-
-                uids.sort_by(|a, b| {
-                    let val_a = self.resolve(*a, field);
-                    let val_b = self.resolve(*b, field);
-
-                    let cmp = match (val_a, val_b) {
-                        (Some(Value::Number(na)), Some(Value::Number(nb))) => na
-                            .as_f64()
-                            .partial_cmp(&nb.as_f64())
-                            .unwrap_or(std::cmp::Ordering::Equal),
-                        (Some(Value::String(sa)), Some(Value::String(sb))) => sa.cmp(&sb),
-                        (None, Some(_)) => std::cmp::Ordering::Less,
-                        (Some(_), None) => std::cmp::Ordering::Greater,
-                        _ => std::cmp::Ordering::Equal,
-                    };
-
-                    if asc {
-                        cmp
-                    } else {
-                        cmp.reverse()
-                    }
-                });
-            }
-        } else if near_vector.is_none() {
-            // If NOT vector search, and NO explicit sort, we sort by UID usually?
-            // Actually Full Scan builds `uids` in order (if not filtering via candidates).
-            // But Candidate set is unordered.
-            // To be safe, we sort if came from candidates.
-            if used_candidates {
-                uids.sort();
-            }
-        }
-
-        // Pagination
-        // Vector search: `after` cursor is tricky (cursor needs to be offset or UID-based?)
-        // Standard GraphQL: Cursor is usually opaque.
-        // For Vector Search, we usually don't support `after` efficiently without keeping state.
-        // We will support `after` simply by filtering `uids` if `after` is a UID.
-        // BUT if `after` is used with Vector Search, it implies "Item X was the last one".
-        // If sorting by Distance, checking "UID > X" is meaningless.
-        // We need to find X in the list and skip past it.
-
-        if let Some(cursor_uid_str) = after {
-            if let Ok(cursor_uid) = cursor_uid_str.parse::<u64>() {
-                if let Some(pos) = uids.iter().position(|u| *u == cursor_uid) {
-                    uids = uids.into_iter().skip(pos + 1).collect();
-                }
-            }
-        }
-
-        if let Some(skip_count) = offset {
-            if skip_count > 0 {
-                uids = uids.into_iter().skip(skip_count).collect();
-            }
-        }
-
-        if let Some(limit) = first {
-            uids.truncate(limit);
-        }
-
-        uids
+    fn count_nodes_with_cache(
+        &self,
+        type_name: &str,
+        filter: std::collections::HashMap<String, Value>,
+        uniques: &[String],
+        near_vector: Option<Vec<f64>>,
+        query_metadata: &std::collections::HashMap<
+            String,
+            crate::engine::resolver::QueryTypeMetadata,
+        >,
+        cache: &RequestCache,
+    ) -> usize {
+        self.count_nodes_internal(
+            type_name,
+            filter,
+            uniques,
+            near_vector,
+            query_metadata,
+            Some(cache),
+        )
     }
 
     fn update_node(

@@ -157,10 +157,7 @@ VardaDB supports a rich type system including:
 *   **JSON**: `CustomJson` (Any JSON), `CustomJsonObject`.
 *   **Colors**: `HexColorCode`, `RGB`, `RGBA`, `HSL`, `HSLA`.
 
-### 2. Query Planning
-The **Query Planner** (`src/engine/planner.rs`) acts as the brain of the engine. It parses incoming GraphQL queries into an **ExecutionPlan**. Currently, it focuses on AST parsing and validation, but it is architected to support future optimizations like query cost analysis and depth limiting.
-
-### 3. Storage (SQLite)
+### 2. Storage (SQLite)
 VardaDB uses **SQLite** (via `rusqlite`) configured as a high-performance Key-Value store.
 *   **Instant Recovery**: Thanks to WAL mode, startup is near-instant, avoiding the recovery delays typical of LSM-tree engines.
 *   **Durability**: Data is persisted to disk (`varda_db_data/`) with atomic checkpoints.
@@ -169,7 +166,7 @@ VardaDB uses **SQLite** (via `rusqlite`) configured as a high-performance Key-Va
     *   **Header-based Routing**: Use the `x-varda-db` (or `db`, `ns`) header to route GraphQL requests to specific databases.
     *   **Dynamic Loading**: Databases and their schemas are loaded lazily on the first request.
 
-### 4. Geo Support
+### 3. Geo Support
 Built-in geospatial capabilities allow you to build location-aware apps.
 *   **Types**: `GeoPoint`, `Polygon`, `MultiPolygon`.
 *   **Filters**:
@@ -177,24 +174,24 @@ Built-in geospatial capabilities allow you to build location-aware apps.
     *   `within`: Find points inside a polygon.
     *   `contains`: Find polygons that contain a point.
 
-### 5. Caching
+### 4. Caching
 The **QueryCache** (`src/engine/cache.rs`) implements an in-memory Bounded LRU (Least Recently Used) cache.
 *   **Strategy**: Hashes Query + Variables to store the JSON response.
 *   **Capacity**: Fixed size (default 100) to prevent memory exhaustion.
 *   **Invalidation**: Currently implements a "Clear All" strategy on any Mutation to guarantee extensive data consistency.
 
-### 6. Realtime
+### 5. Realtime
 VardaDB supports realtime capability groundwork through its event bus system (`src/realtime`).
 *   Currently, likely used for **Live Query** codegen or internal event subscriptions.
 
-### 7. Conflict Resolution (Last-Write-Wins)
+### 6. Conflict Resolution (Last-Write-Wins)
 VardaDB implements a robust **Last-Write-Wins (LWW)** consistency model, inspired by **Evolu**, to handle distributed data synchronization and conflicts.
 *   **Atomic Upsert**: Leveraging SQLite's `ON CONFLICT` and `UPSERT` capabilities, LWW comparisons are performed atomically at the database level.
 *   **Timestamp-Based**: Every storage operation (Put/Delete) is associated with a 16-byte HLC timestamp.
 *   **Idempotency**: "Stale" writes (writes with an older timestamp than what is currently stored) are safely ignored without error.
 *   **Convergence**: This ensures that all replicas eventually converge to the same state, provided they receive the same set of updates, regardless of order.
 
-### 8. CLI / Management
+### 7. CLI / Management
 VardaDB provides a built-in CLI for managing databases. The server must be running for these commands to work (as they use the HTTP Management API).
 
 *   **List Databases**:
@@ -222,7 +219,7 @@ VardaDB provides a built-in CLI for managing databases. The server must be runni
     cargo run -- db apply --name my_db --schema schema.graphql
     ```
 
-### 9. Interactive Shell (REPL)
+### 8. Interactive Shell (REPL)
 For a psql-like experience, use the `cli` command. This opens an interactive shell where you can switch databases and run queries.
 
 ```bash
@@ -243,7 +240,7 @@ vardadb(default)> use sales
 vardadb(sales)> { queryUser { name } }
 ```
 
-### 10. Local LLM Inference with MLX-RS
+### 9. Local LLM Inference with MLX-RS
 VardaDB includes native local LLM support through **MLX-RS**, the Rust equivalent of Python's `mlx-lm`. This powers the built-in `mlx` provider so models can run directly inside the Rust runtime without relying on a separate Python service.
 
 By default, the LLM configuration uses:

@@ -1,6 +1,8 @@
 use async_graphql::dynamic::{self};
 use tokio::sync::Semaphore;
 
+use crate::engine::resolver::RequestCache;
+
 static MUTATION_SEMAPHORE: Semaphore = Semaphore::const_new(64);
 
 // This is our "Engine" Schema, which currently wraps async-graphql
@@ -64,6 +66,7 @@ impl Schema {
         &self,
         request: impl Into<async_graphql::Request>,
     ) -> async_graphql::Response {
+        let request = request.into().data(RequestCache::default());
         self.inner.execute(request).await
     }
 
@@ -572,6 +575,21 @@ impl Schema {
         }
 
         let metadata_arc = std::sync::Arc::new(metadata_map.clone());
+        let query_metadata_arc = std::sync::Arc::new(
+            metadata_map
+                .iter()
+                .map(|(type_name, meta)| {
+                    (
+                        type_name.clone(),
+                        crate::engine::resolver::QueryTypeMetadata {
+                            uniques: meta.uniques.clone(),
+                            inverses: meta.inverses.clone(),
+                            relations: meta.relations.clone(),
+                        },
+                    )
+                })
+                .collect::<std::collections::HashMap<_, _>>(),
+        );
 
         // Pass 2: Generate Schema Artifacts
         for def in &doc.definitions {
@@ -741,6 +759,7 @@ impl Schema {
                                             let resolver = ctx
                                                 .data::<Box<dyn Resolver + Send + Sync>>()
                                                 .unwrap();
+                                            let request_cache = ctx.data_opt::<RequestCache>();
 
                                             if is_rel {
                                                 // 1. Parse Arguments for Relation
@@ -786,16 +805,31 @@ impl Schema {
                                                 }
 
                                                 // 2. Call resolve_list
-                                                match resolver.resolve_list(
-                                                    *uid,
-                                                    &field_key,
-                                                    filter_map,
-                                                    sort_map,
-                                                    first,
-                                                    after,
-                                                    offset,
-                                                    near_vector,
-                                                ) {
+                                                let resolved_list = match request_cache {
+                                                    Some(cache) => resolver
+                                                        .resolve_list_with_cache(
+                                                            *uid,
+                                                            &field_key,
+                                                            filter_map,
+                                                            sort_map,
+                                                            first,
+                                                            after,
+                                                            offset,
+                                                            near_vector,
+                                                            cache,
+                                                        ),
+                                                    None => resolver.resolve_list(
+                                                        *uid,
+                                                        &field_key,
+                                                        filter_map,
+                                                        sort_map,
+                                                        first,
+                                                        after,
+                                                        offset,
+                                                        near_vector,
+                                                    ),
+                                                };
+                                                match resolved_list {
                                                     Ok(uids) => {
                                                         let mut fvs = Vec::new();
                                                         for u in uids {
@@ -830,9 +864,13 @@ impl Schema {
                                                 }
                                             } else {
                                                 // Scalar logic
-                                                if let Some(val) =
-                                                    resolver.resolve(*uid, &field_key)
-                                                {
+                                                let resolved = match request_cache {
+                                                    Some(cache) => resolver.resolve_with_cache(
+                                                        *uid, &field_key, cache,
+                                                    ),
+                                                    None => resolver.resolve(*uid, &field_key),
+                                                };
+                                                if let Some(val) = resolved {
                                                     if _f_type_name == "GeoPoint"
                                                         || _f_type_name == "Polygon"
                                                     {
@@ -1077,6 +1115,7 @@ impl Schema {
                         let filter_type_name = format!("{}Filter", type_name);
 
                         let uniques = meta.uniques.clone();
+                        let query_metadata = query_metadata_arc.clone();
                         let has_vector = meta.vector_config.is_some();
                         let mut list_field = dynamic::Field::new(
                             list_query_name,
@@ -1084,10 +1123,12 @@ impl Schema {
                             move |ctx| {
                                 let t_name = type_name_for_list.clone();
                                 let uniques = uniques.clone();
+                                let query_metadata = query_metadata.clone();
                                 dynamic::FieldFuture::new(async move {
                                     use crate::engine::resolver::Resolver;
                                     let resolver =
                                         ctx.data::<Box<dyn Resolver + Send + Sync>>().unwrap();
+                                    let request_cache = ctx.data_opt::<RequestCache>();
                                     let mut filter_map = std::collections::HashMap::new();
                                     if let Ok(filter_arg) = ctx.args.try_get("filter") {
                                         filter_map = filter_arg.deserialize()?;
@@ -1126,16 +1167,31 @@ impl Schema {
                                         }
                                     }
 
-                                    let uids = resolver.scan_nodes(
-                                        &t_name,
-                                        filter_map,
-                                        sort_map,
-                                        first,
-                                        after,
-                                        offset,
-                                        &uniques,
-                                        near_vector,
-                                    );
+                                    let uids = match request_cache {
+                                        Some(cache) => resolver.scan_nodes_with_cache(
+                                            &t_name,
+                                            filter_map,
+                                            sort_map,
+                                            first,
+                                            after,
+                                            offset,
+                                            &uniques,
+                                            near_vector,
+                                            query_metadata.as_ref(),
+                                            cache,
+                                        ),
+                                        None => resolver.scan_nodes(
+                                            &t_name,
+                                            filter_map,
+                                            sort_map,
+                                            first,
+                                            after,
+                                            offset,
+                                            &uniques,
+                                            near_vector,
+                                            query_metadata.as_ref(),
+                                        ),
+                                    };
                                     let result: Vec<dynamic::FieldValue> = uids
                                         .into_iter()
                                         .map(|uid| dynamic::FieldValue::owned_any(uid))
@@ -1146,7 +1202,7 @@ impl Schema {
                         )
                         .argument(dynamic::InputValue::new(
                             "filter",
-                            dynamic::TypeRef::named(filter_type_name),
+                            dynamic::TypeRef::named(filter_type_name.clone()),
                         ))
                         .argument(dynamic::InputValue::new(
                             "sort",
@@ -1173,6 +1229,58 @@ impl Schema {
                         }
 
                         query_fields.push(list_field);
+
+                        let count_query_name = format!("count{}", type_name);
+                        let type_name_for_count = type_name.clone();
+                        let uniques_for_count = unique_fields.clone();
+                        let query_metadata_for_count = query_metadata_arc.clone();
+                        let count_field = dynamic::Field::new(
+                            count_query_name,
+                            dynamic::TypeRef::named_nn("Int64"),
+                            move |ctx| {
+                                let t_name = type_name_for_count.clone();
+                                let uniques = uniques_for_count.clone();
+                                let query_metadata = query_metadata_for_count.clone();
+                                dynamic::FieldFuture::new(async move {
+                                    use crate::engine::resolver::Resolver;
+                                    let resolver =
+                                        ctx.data::<Box<dyn Resolver + Send + Sync>>().unwrap();
+                                    let request_cache = ctx.data_opt::<RequestCache>();
+                                    let mut filter_map = std::collections::HashMap::new();
+                                    if let Ok(filter_arg) = ctx.args.try_get("filter") {
+                                        filter_map = filter_arg.deserialize()?;
+                                    }
+
+                                    let count = match request_cache {
+                                        Some(cache) => resolver.count_nodes_with_cache(
+                                            &t_name,
+                                            filter_map,
+                                            &uniques,
+                                            None,
+                                            query_metadata.as_ref(),
+                                            cache,
+                                        ),
+                                        None => resolver.count_nodes(
+                                            &t_name,
+                                            filter_map,
+                                            &uniques,
+                                            None,
+                                            query_metadata.as_ref(),
+                                        ),
+                                    };
+
+                                    Ok(Some(dynamic::FieldValue::value(
+                                        async_graphql::Value::Number((count as i64).into()),
+                                    )))
+                                })
+                            },
+                        )
+                        .argument(dynamic::InputValue::new(
+                            "filter",
+                            dynamic::TypeRef::named(filter_type_name.clone()),
+                        ));
+
+                        query_fields.push(count_field);
 
                         // Define Relation Filter Type *Explicitly* here if needed or rely on dynamic
                         // The loop below handles fields.
@@ -2493,7 +2601,7 @@ impl Schema {
         resolver: Box<dyn crate::engine::resolver::Resolver + Send + Sync>,
     ) -> String {
         let req = async_graphql::Request::new(query).data(resolver);
-        let resp = self.inner.execute(req).await;
+        let resp = self.execute(req).await;
         serde_json::to_string(&resp).unwrap_or_else(|_| "{}".to_string())
     }
 
@@ -2502,7 +2610,9 @@ impl Schema {
         query: &str,
         resolver: Box<dyn crate::engine::resolver::Resolver + Send + Sync>,
     ) -> impl futures_util::Stream<Item = async_graphql::Response> {
-        let req = async_graphql::Request::new(query).data(resolver);
+        let req = async_graphql::Request::new(query)
+            .data(resolver)
+            .data(RequestCache::default());
         self.inner.execute_stream(req)
     }
 
