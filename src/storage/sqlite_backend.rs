@@ -241,14 +241,16 @@ use std::sync::Arc;
 /// Cache key for filter_by_field_value results.
 #[derive(Clone, Hash, Eq, PartialEq)]
 struct FilterCacheKey {
+    type_name: String,
     field_name: String,
     op: String,
     target: String,
 }
 
 impl FilterCacheKey {
-    fn new(field_name: &str, op: &str, target: &rusqlite::types::Value) -> Self {
+    fn new(type_name: &str, field_name: &str, op: &str, target: &rusqlite::types::Value) -> Self {
         Self {
+            type_name: type_name.to_string(),
             field_name: field_name.to_string(),
             op: op.to_string(),
             target: format!("{:?}", target),
@@ -624,6 +626,115 @@ impl SqliteTable {
         Ok(())
     }
 
+    /// Encode f64 as 8 sortable bytes (same algorithm used when writing the 0x09 index).
+    fn encode_sortable_f64(value: f64) -> [u8; 8] {
+        let bits = value.to_bits();
+        let sortable = if bits & (1 << 63) != 0 {
+            !bits
+        } else {
+            bits ^ (1 << 63)
+        };
+        sortable.to_be_bytes()
+    }
+
+    /// Convert a rusqlite Value into the byte encoding used in the 0x09 order index.
+    /// Returns None for Null and Blob (which are not indexed).
+    fn sqlite_value_to_order_index_bytes(val: &rusqlite::types::Value) -> Option<Vec<u8>> {
+        match val {
+            rusqlite::types::Value::Text(s) => Some(s.as_bytes().to_vec()),
+            rusqlite::types::Value::Integer(i) => {
+                Some(Self::encode_sortable_f64(*i as f64).to_vec())
+            }
+            rusqlite::types::Value::Real(f) => Some(Self::encode_sortable_f64(*f).to_vec()),
+            _ => None,
+        }
+    }
+
+    /// Equality lookup using the 0x09 ascending order index.
+    ///
+    /// Executes a prefix scan on:
+    ///   [0x09][type][0x00][field][0x00][0x00][enc_v][0x00]
+    ///
+    /// Every key with this prefix encodes exactly one UID in its final 8 bytes.
+    /// Time complexity: O(log N + K) where K = number of matching rows.
+    fn filter_via_order_index_eq(
+        &self,
+        type_name: &str,
+        field_name: &str,
+        enc_v: &[u8],
+    ) -> Vec<u64> {
+        use crate::storage::codec::Codec;
+
+        let mut prefix = Codec::encode_order_index_prefix(type_name, field_name, false);
+        prefix.extend_from_slice(enc_v);
+        prefix.push(0x00);
+
+        self.prefix(&prefix)
+            .into_iter()
+            .filter_map(|(k, _)| Codec::decode_order_index_uid(&k))
+            .filter(|uid| *uid != 0)
+            .collect()
+    }
+
+    /// Range scan using the 0x09 ascending order index.
+    ///
+    /// All ascending entries for (type, field) live in the key range:
+    ///   [ encode_order_index_prefix(type, field, false),
+    ///     encode_order_index_prefix(type, field, true) )
+    ///
+    /// For a boundary value enc_v the "boundary prefix" is:
+    ///   [0x09][type][0x00][field][0x00][0x00][enc_v][0x00]
+    ///
+    /// Operator mapping:
+    ///   >=  lower = boundary,                    upper = desc_prefix
+    ///   >   lower = upper_bound(boundary),       upper = desc_prefix
+    ///   <=  lower = asc_prefix,                  upper = upper_bound(boundary)
+    ///   <   lower = asc_prefix,                  upper = boundary
+    ///
+    /// `less_than`: true for < / <=, false for > / >=
+    /// `inclusive`: true for <= / >=, false for < / >
+    fn filter_via_order_index_range(
+        &self,
+        type_name: &str,
+        field_name: &str,
+        enc_v: &[u8],
+        less_than: bool,
+        inclusive: bool,
+    ) -> Vec<u64> {
+        use crate::storage::codec::Codec;
+
+        let asc_prefix = Codec::encode_order_index_prefix(type_name, field_name, false);
+        let desc_prefix = Codec::encode_order_index_prefix(type_name, field_name, true);
+
+        let mut boundary = asc_prefix.clone();
+        boundary.extend_from_slice(enc_v);
+        boundary.push(0x00);
+
+        let (lower, upper) = if less_than {
+            let lower = asc_prefix;
+            let upper = if inclusive {
+                compute_prefix_upper_bound(&boundary).unwrap_or(desc_prefix)
+            } else {
+                boundary
+            };
+            (lower, upper)
+        } else {
+            let lower = if inclusive {
+                boundary
+            } else {
+                compute_prefix_upper_bound(&boundary).unwrap_or(desc_prefix.clone())
+            };
+            let upper = desc_prefix;
+            (lower, upper)
+        };
+
+        self.range(&lower, &upper)
+            .into_iter()
+            .filter_map(|(k, _)| Codec::decode_order_index_uid(&k))
+            .filter(|uid| *uid != 0)
+            .collect()
+    }
+
     /// Filter pushdown: scan the main table for keys matching a specific field name
     /// and apply a comparison operator on the JSON value stored in the blob.
     ///
@@ -640,36 +751,104 @@ impl SqliteTable {
     /// `target` is a properly typed SQLite value matching what json_extract returns
     pub fn filter_by_field_value(
         &self,
+        type_name: &str,
         field_name: &str,
         op: &str,
         target: rusqlite::types::Value,
     ) -> Vec<u64> {
         let start = std::time::Instant::now();
 
-        // Check cache first
-        let cache_key = FilterCacheKey::new(field_name, op, &target);
+        let cache_key = FilterCacheKey::new(type_name, field_name, op, &target);
         {
             let mut cache = self.filter_cache.lock().unwrap();
             if let Some(cached) = cache.get(&cache_key) {
                 let elapsed = start.elapsed();
                 if elapsed.as_millis() > 10 || crate::debug_logging() {
-                    eprintln!("[STORAGE] filter_by_field_value CACHE HIT table={} field={} op={} result_count={} elapsed_ms={}",
-                        self.name, field_name, op, cached.len(), elapsed.as_millis());
+                    eprintln!(
+                        "[STORAGE] filter_by_field_value CACHE HIT \
+                         table={} type={} field={} op={} result_count={} elapsed_ms={}",
+                        self.name,
+                        type_name,
+                        field_name,
+                        op,
+                        cached.len(),
+                        elapsed.as_millis()
+                    );
                 }
                 return cached.clone();
             }
         }
 
-        // Build the field suffix as bytes for matching
+        let result_vec = if !type_name.is_empty() {
+            match Self::sqlite_value_to_order_index_bytes(&target) {
+                Some(enc_v) => match op {
+                    "=" => {
+                        let order_results =
+                            self.filter_via_order_index_eq(type_name, field_name, &enc_v);
+                        if order_results.is_empty() {
+                            self.filter_via_table_scan_impl(field_name, op, target)
+                        } else {
+                            order_results
+                        }
+                    }
+                    ">" => self
+                        .filter_via_order_index_range(type_name, field_name, &enc_v, false, false),
+                    ">=" => self
+                        .filter_via_order_index_range(type_name, field_name, &enc_v, false, true),
+                    "<" => self
+                        .filter_via_order_index_range(type_name, field_name, &enc_v, true, false),
+                    "<=" => {
+                        self.filter_via_order_index_range(type_name, field_name, &enc_v, true, true)
+                    }
+                    "!=" => {
+                        let mut lt = self.filter_via_order_index_range(
+                            type_name, field_name, &enc_v, true, false,
+                        );
+                        let gt = self.filter_via_order_index_range(
+                            type_name, field_name, &enc_v, false, false,
+                        );
+                        lt.extend(gt);
+                        lt.sort_unstable();
+                        lt.dedup();
+                        lt
+                    }
+                    _ => self.filter_via_table_scan_impl(field_name, op, target),
+                },
+                None => self.filter_via_table_scan_impl(field_name, op, target),
+            }
+        } else {
+            self.filter_via_table_scan_impl(field_name, op, target)
+        };
+
+        let mut cache = self.filter_cache.lock().unwrap();
+        cache.put(cache_key, result_vec.clone());
+
+        let elapsed = start.elapsed();
+        if elapsed.as_millis() > 10 || crate::debug_logging() {
+            eprintln!(
+                "[STORAGE] filter_by_field_value \
+                 table={} type={} field={} op={} result_count={} elapsed_ms={}",
+                self.name,
+                type_name,
+                field_name,
+                op,
+                result_vec.len(),
+                elapsed.as_millis()
+            );
+        }
+        result_vec
+    }
+
+    fn filter_via_table_scan_impl(
+        &self,
+        field_name: &str,
+        op: &str,
+        target: rusqlite::types::Value,
+    ) -> Vec<u64> {
         let field_bytes = field_name.as_bytes();
         let field_len = field_bytes.len();
-
-        // Data prefix byte
         let data_prefix: u8 = 0x01;
-
-        // Key structure: [0x01][UID:8][field_name]
-        // Value structure: [timestamp:16][json_payload]
-        // json_extract(substr(value,17), '$') returns the typed JSON value
+        let expected_key_len = 1 + 8 + field_len;
 
         let conn = match self.backend.get_reader() {
             Ok(c) => c,
@@ -684,8 +863,6 @@ impl SqliteTable {
              AND json_extract(CAST(substr(value, 17) AS TEXT), '$') {} ?4",
             self.name, op
         );
-
-        let expected_key_len = 1 + 8 + field_len;
 
         let result = (|| -> Result<Vec<u64>, rusqlite::Error> {
             let mut stmt = conn.prepare_cached(&sql)?;
@@ -712,20 +889,7 @@ impl SqliteTable {
         })();
 
         self.backend.return_reader(conn);
-        let elapsed = start.elapsed();
-        let result_vec = result.unwrap_or_default();
-
-        // Cache the result
-        {
-            let mut cache = self.filter_cache.lock().unwrap();
-            cache.put(cache_key, result_vec.clone());
-        }
-
-        if elapsed.as_millis() > 10 || crate::debug_logging() {
-            eprintln!("[STORAGE] filter_by_field_value table={} field={} op={} result_count={} elapsed_ms={}",
-                self.name, field_name, op, result_vec.len(), elapsed.as_millis());
-        }
-        result_vec
+        result.unwrap_or_default()
     }
 
     /// Filter pushdown for `contains` (string LIKE %target%)
@@ -781,12 +945,32 @@ impl SqliteTable {
     /// Filter pushdown for `in` (value IN set)
     pub fn filter_by_field_in(
         &self,
+        type_name: &str,
         field_name: &str,
         target_values: &[rusqlite::types::Value],
     ) -> Vec<u64> {
         if target_values.is_empty() {
             return vec![];
         }
+
+        if !type_name.is_empty() {
+            let encoded: Vec<Option<Vec<u8>>> = target_values
+                .iter()
+                .map(|v| Self::sqlite_value_to_order_index_bytes(v))
+                .collect();
+
+            if encoded.iter().all(|e| e.is_some()) {
+                let mut uids: Vec<u64> = Vec::new();
+                for enc_v in encoded.into_iter().flatten() {
+                    let mut these = self.filter_via_order_index_eq(type_name, field_name, &enc_v);
+                    uids.append(&mut these);
+                }
+                uids.sort_unstable();
+                uids.dedup();
+                return uids;
+            }
+        }
+
         let field_bytes = field_name.as_bytes();
         let field_len = field_bytes.len();
         let data_prefix: u8 = 0x01;
@@ -815,7 +999,6 @@ impl SqliteTable {
 
         let result = (|| -> Result<Vec<u64>, rusqlite::Error> {
             let mut stmt = conn.prepare(&sql)?;
-            // Build params: [data_prefix, key_len, field_bytes, ...target_values]
             let mut all_params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
             all_params.push(Box::new(vec![data_prefix]));
             all_params.push(Box::new(expected_key_len as i64));

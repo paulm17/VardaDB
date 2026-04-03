@@ -1516,7 +1516,7 @@ impl SqliteResolver {
                 // SQL filter pushdown for eq on non-unique fields
                 if let Some((main_ks, _)) = self.storage.get_database(&self.db_name) {
                     let sqlite_val = Self::json_to_sqlite_value(val);
-                    let uids = main_ks.filter_by_field_value(field, "=", sqlite_val);
+                    let uids = main_ks.filter_by_field_value(type_name, field, "=", sqlite_val);
                     // Even if empty, this is the definitive answer from SQL pushdown
                     let set: std::collections::HashSet<u64> = uids.into_iter().collect();
                     if let Some(current) = candidates {
@@ -1546,7 +1546,8 @@ impl SqliteResolver {
                     if let Some(sql_op) = sql_op {
                         if let Some((main_ks, _)) = self.storage.get_database(&self.db_name) {
                             let sqlite_val = Self::json_to_sqlite_value(target);
-                            let uids = main_ks.filter_by_field_value(field, sql_op, sqlite_val);
+                            let uids =
+                                main_ks.filter_by_field_value(type_name, field, sql_op, sqlite_val);
                             let set: std::collections::HashSet<u64> = uids.into_iter().collect();
                             if let Some(current) = candidates {
                                 candidates = Some(current.intersection(&set).copied().collect());
@@ -1581,7 +1582,8 @@ impl SqliteResolver {
                             let target_values: Vec<rusqlite::types::Value> =
                                 list.iter().map(|v| Self::json_to_sqlite_value(v)).collect();
                             if let Some((main_ks, _)) = self.storage.get_database(&self.db_name) {
-                                let uids = main_ks.filter_by_field_in(field, &target_values);
+                                let uids =
+                                    main_ks.filter_by_field_in(type_name, field, &target_values);
                                 let set: std::collections::HashSet<u64> =
                                     uids.into_iter().collect();
                                 if let Some(current) = candidates {

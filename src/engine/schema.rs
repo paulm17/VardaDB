@@ -2461,6 +2461,10 @@ impl Schema {
             .field(dynamic::InputValue::new(
                 "in",
                 dynamic::TypeRef::named_list(dynamic::TypeRef::STRING),
+            ))
+            .field(dynamic::InputValue::new(
+                "ne",
+                dynamic::TypeRef::named(dynamic::TypeRef::STRING),
             ));
 
         let int_filter = dynamic::InputObject::new("IntFilter")
@@ -2491,6 +2495,10 @@ impl Schema {
             .field(dynamic::InputValue::new(
                 "in",
                 dynamic::TypeRef::named_list(dynamic::TypeRef::INT),
+            ))
+            .field(dynamic::InputValue::new(
+                "ne",
+                dynamic::TypeRef::named(dynamic::TypeRef::INT),
             ));
 
         let float_filter = dynamic::InputObject::new("FloatFilter")
@@ -2521,11 +2529,21 @@ impl Schema {
             .field(dynamic::InputValue::new(
                 "in",
                 dynamic::TypeRef::named_list(dynamic::TypeRef::FLOAT),
+            ))
+            .field(dynamic::InputValue::new(
+                "ne",
+                dynamic::TypeRef::named(dynamic::TypeRef::FLOAT),
             ));
 
-        let bool_filter = dynamic::InputObject::new("BooleanFilter").field(
-            dynamic::InputValue::new("eq", dynamic::TypeRef::named(dynamic::TypeRef::BOOLEAN)),
-        );
+        let bool_filter = dynamic::InputObject::new("BooleanFilter")
+            .field(dynamic::InputValue::new(
+                "eq",
+                dynamic::TypeRef::named(dynamic::TypeRef::BOOLEAN),
+            ))
+            .field(dynamic::InputValue::new(
+                "ne",
+                dynamic::TypeRef::named(dynamic::TypeRef::BOOLEAN),
+            ));
 
         let int64_filter = dynamic::InputObject::new("Int64Filter")
             .field(dynamic::InputValue::new(
@@ -2551,6 +2569,10 @@ impl Schema {
             .field(dynamic::InputValue::new(
                 "in",
                 dynamic::TypeRef::named_list("Int64"),
+            ))
+            .field(dynamic::InputValue::new(
+                "ne",
+                dynamic::TypeRef::named("Int64"),
             ));
 
         let datetime_filter = dynamic::InputObject::new("DateTimeFilter")
@@ -2577,6 +2599,10 @@ impl Schema {
             .field(dynamic::InputValue::new(
                 "in",
                 dynamic::TypeRef::named_list("DateTime"),
+            ))
+            .field(dynamic::InputValue::new(
+                "ne",
+                dynamic::TypeRef::named("DateTime"),
             ));
 
         schema_builder = schema_builder.register(string_filter);

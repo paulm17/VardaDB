@@ -311,8 +311,14 @@ impl Storage {
             std::thread::spawn(|| {
                 std::thread::sleep(std::time::Duration::from_secs(5));
                 unsafe {
-                    libc::signal(libc::SIGINT, crash_handler as libc::sighandler_t);
-                    libc::signal(libc::SIGTERM, crash_handler as libc::sighandler_t);
+                    libc::signal(
+                        libc::SIGINT,
+                        crash_handler as *const () as libc::sighandler_t,
+                    );
+                    libc::signal(
+                        libc::SIGTERM,
+                        crash_handler as *const () as libc::sighandler_t,
+                    );
                 }
             });
             Mutex::new(Vec::new())
