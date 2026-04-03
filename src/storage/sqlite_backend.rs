@@ -139,7 +139,7 @@ impl SqliteBackend {
             let mut pool = self.reader_pool.lock().unwrap();
             if let Some(conn) = pool.pop() {
                 let elapsed = start.elapsed();
-                if elapsed.as_millis() > 5 || crate::debug_logging() {
+                if elapsed.as_millis() > 5 && crate::debug_logging() {
                     eprintln!(
                         "[STORAGE] get_reader (pool hit) path={} elapsed_ms={}",
                         self.path.display(),
@@ -155,7 +155,7 @@ impl SqliteBackend {
         let conn = Connection::open(&self.path)?;
         Self::apply_pragmas(&conn)?;
         let elapsed = start.elapsed();
-        if elapsed.as_millis() > 5 || crate::debug_logging() {
+        if elapsed.as_millis() > 5 && crate::debug_logging() {
             eprintln!(
                 "[STORAGE] get_reader (new conn) path={} elapsed_ms={}",
                 self.path.display(),
@@ -394,7 +394,7 @@ impl SqliteTable {
         };
         self.backend.return_reader(conn);
         let elapsed = start.elapsed();
-        if elapsed.as_millis() > 10 || crate::debug_logging() {
+        if elapsed.as_millis() > 10 && crate::debug_logging() {
             eprintln!(
                 "[STORAGE] prefix table={} prefix_len={} result_count={} elapsed_ms={}",
                 self.name,
@@ -434,7 +434,7 @@ impl SqliteTable {
         };
         self.backend.return_reader(conn);
         let elapsed = start.elapsed();
-        if elapsed.as_millis() > 10 || crate::debug_logging() {
+        if elapsed.as_millis() > 10 && crate::debug_logging() {
             eprintln!(
                 "[STORAGE] range table={} lower_len={} upper_len={} result_count={} elapsed_ms={}",
                 self.name,
@@ -498,7 +498,7 @@ impl SqliteTable {
         };
         self.backend.return_reader(conn);
         let elapsed = start.elapsed();
-        if elapsed.as_millis() > 10 || crate::debug_logging() {
+        if elapsed.as_millis() > 10 && crate::debug_logging() {
             eprintln!(
                 "[STORAGE] iter table={} result_count={} elapsed_ms={}",
                 self.name,
@@ -763,7 +763,7 @@ impl SqliteTable {
             let mut cache = self.filter_cache.lock().unwrap();
             if let Some(cached) = cache.get(&cache_key) {
                 let elapsed = start.elapsed();
-                if elapsed.as_millis() > 10 || crate::debug_logging() {
+                if elapsed.as_millis() > 10 && crate::debug_logging() {
                     eprintln!(
                         "[STORAGE] filter_by_field_value CACHE HIT \
                          table={} type={} field={} op={} result_count={} elapsed_ms={}",
@@ -824,7 +824,7 @@ impl SqliteTable {
         cache.put(cache_key, result_vec.clone());
 
         let elapsed = start.elapsed();
-        if elapsed.as_millis() > 10 || crate::debug_logging() {
+        if elapsed.as_millis() > 10 && crate::debug_logging() {
             eprintln!(
                 "[STORAGE] filter_by_field_value \
                  table={} type={} field={} op={} result_count={} elapsed_ms={}",
