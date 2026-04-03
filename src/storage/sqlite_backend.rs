@@ -1,7 +1,10 @@
 use byteorder::ByteOrder;
+use lru::LruCache;
 use rusqlite::ffi::{sqlite3_auto_extension, sqlite3_reset_auto_extension};
 use rusqlite::OptionalExtension;
 use rusqlite::{params, Connection};
+use std::hash::Hash;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use tracing::{error, info};
@@ -235,6 +238,24 @@ impl Drop for SqliteBackend {
 
 use std::sync::Arc;
 
+/// Cache key for filter_by_field_value results.
+#[derive(Clone, Hash, Eq, PartialEq)]
+struct FilterCacheKey {
+    field_name: String,
+    op: String,
+    target: String,
+}
+
+impl FilterCacheKey {
+    fn new(field_name: &str, op: &str, target: &rusqlite::types::Value) -> Self {
+        Self {
+            field_name: field_name.to_string(),
+            op: op.to_string(),
+            target: format!("{:?}", target),
+        }
+    }
+}
+
 /// A handle to a named table in the SQLite database.
 /// Logical equivalent of `fjall::Keyspace`.
 /// Clone is cheap (just Arc + String).
@@ -246,6 +267,8 @@ pub struct SqliteTable {
     has_ts: bool,
     insert_sql: String,
     upsert_lww_sql: String,
+    /// LRU cache for filter_by_field_value results (1024 entries max)
+    filter_cache: Arc<Mutex<LruCache<FilterCacheKey, Vec<u64>>>>,
 }
 
 impl SqliteTable {
@@ -261,6 +284,7 @@ impl SqliteTable {
             has_ts: false,
             insert_sql,
             upsert_lww_sql,
+            filter_cache: Arc::new(Mutex::new(LruCache::new(NonZeroUsize::new(1024).unwrap()))),
         }
     }
 
@@ -282,6 +306,7 @@ impl SqliteTable {
             has_ts: true,
             insert_sql,
             upsert_lww_sql,
+            filter_cache: Arc::new(Mutex::new(LruCache::new(NonZeroUsize::new(1024).unwrap()))),
         }
     }
     pub fn name(&self) -> &str {
@@ -620,6 +645,21 @@ impl SqliteTable {
         target: rusqlite::types::Value,
     ) -> Vec<u64> {
         let start = std::time::Instant::now();
+
+        // Check cache first
+        let cache_key = FilterCacheKey::new(field_name, op, &target);
+        {
+            let mut cache = self.filter_cache.lock().unwrap();
+            if let Some(cached) = cache.get(&cache_key) {
+                let elapsed = start.elapsed();
+                if elapsed.as_millis() > 10 || crate::debug_logging() {
+                    eprintln!("[STORAGE] filter_by_field_value CACHE HIT table={} field={} op={} result_count={} elapsed_ms={}",
+                        self.name, field_name, op, cached.len(), elapsed.as_millis());
+                }
+                return cached.clone();
+            }
+        }
+
         // Build the field suffix as bytes for matching
         let field_bytes = field_name.as_bytes();
         let field_len = field_bytes.len();
@@ -674,8 +714,15 @@ impl SqliteTable {
         self.backend.return_reader(conn);
         let elapsed = start.elapsed();
         let result_vec = result.unwrap_or_default();
+
+        // Cache the result
+        {
+            let mut cache = self.filter_cache.lock().unwrap();
+            cache.put(cache_key, result_vec.clone());
+        }
+
         if elapsed.as_millis() > 10 || crate::debug_logging() {
-            eprintln!("[STORAGE] filter_by_field_value table={} field={} op={} result_count={} elapsed_ms={}", 
+            eprintln!("[STORAGE] filter_by_field_value table={} field={} op={} result_count={} elapsed_ms={}",
                 self.name, field_name, op, result_vec.len(), elapsed.as_millis());
         }
         result_vec
