@@ -131,9 +131,18 @@ impl SqliteBackend {
 
     /// Get a reader connection from the pool (or create a new one).
     pub fn get_reader(&self) -> anyhow::Result<Connection> {
+        let start = std::time::Instant::now();
         {
             let mut pool = self.reader_pool.lock().unwrap();
             if let Some(conn) = pool.pop() {
+                let elapsed = start.elapsed();
+                if elapsed.as_millis() > 5 || crate::debug_logging() {
+                    eprintln!(
+                        "[STORAGE] get_reader (pool hit) path={} elapsed_ms={}",
+                        self.path.display(),
+                        elapsed.as_millis()
+                    );
+                }
                 return Ok(conn);
             }
         }
@@ -141,8 +150,15 @@ impl SqliteBackend {
         // but it doesn't hurt to ensure it or just let the connection open.
         // Actually sqlite3_auto_extension applies to all subsequent db connections.
         let conn = Connection::open(&self.path)?;
-        dbg_info!(db_path = %self.path.display(), "SqliteBackend: opened new reader connection");
         Self::apply_pragmas(&conn)?;
+        let elapsed = start.elapsed();
+        if elapsed.as_millis() > 5 || crate::debug_logging() {
+            eprintln!(
+                "[STORAGE] get_reader (new conn) path={} elapsed_ms={}",
+                self.path.display(),
+                elapsed.as_millis()
+            );
+        }
         Ok(conn)
     }
 
@@ -301,6 +317,7 @@ impl SqliteTable {
     /// Prefix scan: returns all (key, value) pairs where key starts with `prefix`.
     /// Results are ordered by key.
     pub fn prefix(&self, prefix: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)> {
+        let start = std::time::Instant::now();
         let upper = compute_prefix_upper_bound(prefix);
         let conn = match self.backend.get_reader() {
             Ok(c) => c,
@@ -349,11 +366,22 @@ impl SqliteTable {
             }
         };
         self.backend.return_reader(conn);
+        let elapsed = start.elapsed();
+        if elapsed.as_millis() > 10 || crate::debug_logging() {
+            eprintln!(
+                "[STORAGE] prefix table={} prefix_len={} result_count={} elapsed_ms={}",
+                self.name,
+                prefix.len(),
+                result.len(),
+                elapsed.as_millis()
+            );
+        }
         result
     }
 
     /// Range scan: returns all (key, value) pairs where `lower <= key < upper`.
     pub fn range(&self, lower: &[u8], upper: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)> {
+        let start = std::time::Instant::now();
         let conn = match self.backend.get_reader() {
             Ok(c) => c,
             Err(e) => {
@@ -378,6 +406,17 @@ impl SqliteTable {
             Err(_) => vec![],
         };
         self.backend.return_reader(conn);
+        let elapsed = start.elapsed();
+        if elapsed.as_millis() > 10 || crate::debug_logging() {
+            eprintln!(
+                "[STORAGE] range table={} lower_len={} upper_len={} result_count={} elapsed_ms={}",
+                self.name,
+                lower.len(),
+                upper.len(),
+                result.len(),
+                elapsed.as_millis()
+            );
+        }
         result
     }
 
@@ -409,6 +448,7 @@ impl SqliteTable {
 
     /// Iterate over all entries in the table, ordered by key.
     pub fn iter(&self) -> Vec<(Vec<u8>, Vec<u8>)> {
+        let start = std::time::Instant::now();
         let conn = match self.backend.get_reader() {
             Ok(c) => c,
             Err(e) => {
@@ -430,6 +470,15 @@ impl SqliteTable {
             Err(_) => vec![],
         };
         self.backend.return_reader(conn);
+        let elapsed = start.elapsed();
+        if elapsed.as_millis() > 10 || crate::debug_logging() {
+            eprintln!(
+                "[STORAGE] iter table={} result_count={} elapsed_ms={}",
+                self.name,
+                result.len(),
+                elapsed.as_millis()
+            );
+        }
         result
     }
 
@@ -570,6 +619,7 @@ impl SqliteTable {
         op: &str,
         target: rusqlite::types::Value,
     ) -> Vec<u64> {
+        let start = std::time::Instant::now();
         // Build the field suffix as bytes for matching
         let field_bytes = field_name.as_bytes();
         let field_len = field_bytes.len();
@@ -622,7 +672,13 @@ impl SqliteTable {
         })();
 
         self.backend.return_reader(conn);
-        result.unwrap_or_default()
+        let elapsed = start.elapsed();
+        let result_vec = result.unwrap_or_default();
+        if elapsed.as_millis() > 10 || crate::debug_logging() {
+            eprintln!("[STORAGE] filter_by_field_value table={} field={} op={} result_count={} elapsed_ms={}", 
+                self.name, field_name, op, result_vec.len(), elapsed.as_millis());
+        }
+        result_vec
     }
 
     /// Filter pushdown for `contains` (string LIKE %target%)
