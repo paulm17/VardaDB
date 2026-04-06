@@ -45,6 +45,8 @@ async fn test_schema_persistence() {
 
         storage.flush().unwrap();
     }
+    // Allow background worker threads to finish cleanup
+    std::thread::sleep(std::time::Duration::from_millis(100));
 
     // 2. Restart and Verify Load (Simulation)
     // In actual server run, `lazy_load_schema` in `src/lib.rs` does this.

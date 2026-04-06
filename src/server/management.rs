@@ -2,7 +2,7 @@ use crate::bridge::redb_resolver::RedbResolver;
 use crate::realtime::bus::EventBus;
 use crate::storage::backend::Storage;
 use async_trait::async_trait;
-use management::{DatabaseManager, DbStatus};
+use management::{BackupInfo, DatabaseManager, DbStatus};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -147,5 +147,37 @@ impl DatabaseManager for ManagementState {
             Ok(_) => Ok(()),
             Err(e) => Err(e.to_string()),
         }
+    }
+
+    async fn create_backup(&self) -> Result<String, String> {
+        let backup_dir = self.storage_path.join("backups");
+        self.storage
+            .create_backup(&backup_dir)
+            .map_err(|e| e.to_string())
+    }
+
+    async fn restore_from_backup(&self, backup_id: &str) -> Result<(), String> {
+        let backup_path = self.storage_path.join("backups").join(backup_id);
+        if !backup_path.exists() {
+            return Err(format!("Backup '{}' not found", backup_id));
+        }
+        self.storage
+            .restore_from_backup(&backup_path)
+            .map_err(|e| e.to_string())
+    }
+
+    async fn list_backups(&self) -> Result<Vec<BackupInfo>, String> {
+        let backup_dir = self.storage_path.join("backups");
+        self.storage
+            .list_backups(&backup_dir)
+            .map(|backups| {
+                backups.into_iter().map(|b| BackupInfo {
+                    id: b.id,
+                    timestamp: b.timestamp,
+                    version: b.version,
+                    size_bytes: b.size_bytes,
+                }).collect()
+            })
+            .map_err(|e| e.to_string())
     }
 }

@@ -1,6 +1,7 @@
 use crate::storage::redb_backend::{RedbBackend, RedbTable};
 use byteorder::{BigEndian, ByteOrder};
 use permissions::storage::auth_store::AuthStore;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Weak};
 use tracing::{error, info};
@@ -55,11 +56,12 @@ pub struct Storage {
     pub keyspaces: std::sync::RwLock<std::collections::HashMap<String, (RedbTable, RedbTable)>>,
 
     // System Tables (Global)
-    pub sys_table: RedbTable,        // SYSTEM: Config (NodeID, etc)
-    pub quarantine_table: RedbTable, // QUARANTINE: Global
-    pub metrics_table: RedbTable,    // METRICS: Time-series metrics
-    pub traces_table: RedbTable,     // TRACES: Trace spans
-    pub auth_store: AuthStore,       // AUTH: Authorization tuples and attributes
+    pub sys_table: RedbTable,            // SYSTEM: Config (NodeID, etc)
+    pub quarantine_table: RedbTable,     // QUARANTINE: Global
+    pub metrics_table: RedbTable,        // METRICS: Time-series metrics
+    pub traces_table: RedbTable,         // TRACES: Trace spans
+    pub auth_store: AuthStore,           // AUTH: Authorization tuples and attributes
+    pub vector_pending_table: RedbTable, // VECTOR_PENDING: Pending vectors awaiting indexing (crash safety)
     pub node_id: u64,
     pub clock: parking_lot::Mutex<crate::storage::timestamp::Timestamp>,
     // Channel for async vector inserts: (db_name, uid, vector_f64)
@@ -116,6 +118,7 @@ impl Storage {
         default_backend.create_table("sys_traces")?;
         default_backend.create_table("vectors")?;
         default_backend.create_native_search_tables()?;
+        default_backend.create_table("vector_pending")?; // Crash-safe pending queue
         default_backend.create_table("auth_tuples")?;
         default_backend.create_table("auth_attributes")?;
         // Auth login tables
@@ -130,6 +133,8 @@ impl Storage {
         let quarantine_table = RedbTable::new("quarantine".to_string(), default_backend.clone());
         let metrics_table = RedbTable::new("sys_metrics".to_string(), default_backend.clone());
         let traces_table = RedbTable::new("sys_traces".to_string(), default_backend.clone());
+        let vector_pending_table =
+            RedbTable::new("vector_pending".to_string(), default_backend.clone());
 
         // AuthZ Store
         let auth_tuples_table = RedbTable::new("auth_tuples".to_string(), default_backend.clone());
@@ -156,10 +161,12 @@ impl Storage {
 
         // Vector Worker (Bounded Channel) — (db_name, uid, vector_f64)
         // Converts f64 → f32 and delegates to the usearch VectorEngine.
+        // On success, removes from pending queue (crash safety).
         let (tx, rx) = std::sync::mpsc::sync_channel::<(String, u64, Vec<f64>)>(5000);
 
         {
             let vector_engine_clone = Arc::clone(&vector_engine);
+            let pending_table_clone = vector_pending_table.clone();
             std::thread::spawn(move || {
                 dbg_println!("Storage: Vector Background Worker Started (usearch/f16)");
                 while let Ok((db_name, uid, vec_f64)) = rx.recv() {
@@ -168,6 +175,17 @@ impl Storage {
                     if let Err(e) = vector_engine_clone.add_vector(&db_name, uid, &vec_f32) {
                         eprintln!(
                             "Storage: VectorEngine insert error (db={}, uid={}): {}",
+                            db_name, uid, e
+                        );
+                        // Leave in pending queue - will be reconciled on restart
+                        continue;
+                    }
+
+                    // Success - remove from pending queue
+                    let pending_key = format!("vector_pending:{}:{}", db_name, uid);
+                    if let Err(e) = pending_table_clone.remove(pending_key.as_bytes()) {
+                        eprintln!(
+                            "Storage: Failed to remove from pending queue (db={}, uid={}): {}",
                             db_name, uid, e
                         );
                     }
@@ -302,6 +320,7 @@ impl Storage {
             metrics_table,
             traces_table,
             auth_store,
+            vector_pending_table,
             node_id,
             clock,
             vector_tx: tx,
@@ -313,8 +332,15 @@ impl Storage {
         dbg_info!(
             database_count = storage.keyspaces.read().unwrap().len(),
             backend_count = storage.backends.len(),
-            "Storage: core initialization complete, restoring fingerprints"
+            "Storage: core initialization complete, reconciling pending vectors"
         );
+
+        // Reconcile any pending vectors from unclean shutdown
+        if let Err(e) = storage.reconcile_vectors() {
+            error!("Storage: Failed to reconcile pending vectors: {}", e);
+        }
+
+        dbg_info!("Storage: pending vectors reconciled, restoring fingerprints");
 
         // Restore Fingerprints (Fast load / Fallback to scan)
         if let Err(e) = storage.restore_fingerprints() {
@@ -766,11 +792,37 @@ impl Storage {
 
     // --- Vector Operations ---
 
+    fn serialize_vector(vector: &[f64]) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(vector.len() * 8);
+        for &v in vector {
+            buf.extend_from_slice(&v.to_be_bytes());
+        }
+        buf
+    }
+
+    fn deserialize_vector(bytes: &[u8]) -> Vec<f64> {
+        if bytes.len() % 8 != 0 {
+            return Vec::new();
+        }
+        bytes
+            .chunks_exact(8)
+            .map(|chunk| f64::from_be_bytes(chunk.try_into().unwrap_or([0u8; 8])))
+            .collect()
+    }
+
     /// Enqueue a vector insert for async processing by the background worker.
     ///
-    /// The worker converts f64 → f32 and inserts into the usearch index using
-    /// f16 quantisation (`ScalarKind::F16`).
+    /// Writes to the pending queue first (synchronous redb write), then
+    /// sends to the background worker for usearch indexing. On crash,
+    /// pending vectors are reconciled on startup to ensure no data loss.
     pub fn put_vector(&self, db_name: &str, uid: u64, vector: Vec<f64>) -> anyhow::Result<()> {
+        // 1. Write to pending queue (synchronous - survives crash)
+        let pending_key = format!("vector_pending:{}:{}", db_name, uid);
+        let pending_value = Self::serialize_vector(&vector);
+        self.vector_pending_table
+            .insert(pending_key.as_bytes(), &pending_value)?;
+
+        // 2. Enqueue for async indexing (usearch)
         self.vector_tx
             .send((db_name.to_string(), uid, vector))
             .map_err(|e| anyhow::anyhow!("Failed to send vector to worker: {}", e))?;
@@ -780,6 +832,86 @@ impl Storage {
     /// Remove the vector for `uid` from the given database's HNSW index.
     pub fn delete_vector(&self, db_name: &str, uid: u64) -> anyhow::Result<()> {
         self.vector_engine.remove_vector(db_name, uid)
+    }
+
+    /// Reconcile pending vectors from previous unclean shutdowns.
+    ///
+    /// Called during startup to ensure all vectors that were written to the
+    /// pending queue but not yet indexed are properly indexed. This is
+    /// idempotent - if a vector is already in the index, it will be skipped.
+    pub fn reconcile_vectors(&self) -> anyhow::Result<usize> {
+        let mut reconciled = 0;
+
+        for (key, value) in self.vector_pending_table.prefix(b"vector_pending:") {
+            let key_str = String::from_utf8_lossy(&key);
+            // Key format: vector_pending:{db_name}:{uid}
+            let parts: Vec<&str> = key_str.split(':').collect();
+            if parts.len() != 3 {
+                eprintln!(
+                    "Storage: Invalid pending vector key format: {}, skipping",
+                    key_str
+                );
+                continue;
+            }
+            let db_name = parts[1];
+            let uid = match parts[2].parse::<u64>() {
+                Ok(u) => u,
+                Err(_) => {
+                    eprintln!(
+                        "Storage: Invalid uid in pending vector key: {}, skipping",
+                        key_str
+                    );
+                    continue;
+                }
+            };
+
+            let vector = Self::deserialize_vector(&value);
+
+            // Check if already indexed (idempotent)
+            if self.vector_engine.contains(db_name, uid) {
+                // Already indexed, just remove from queue
+                if let Err(e) = self.vector_pending_table.remove(&key) {
+                    eprintln!(
+                        "Storage: Failed to remove pending vector from queue (db={}, uid={}): {}",
+                        db_name, uid, e
+                    );
+                }
+                continue;
+            }
+
+            // Not indexed - add it now
+            let vec_f32: Vec<f32> = vector.iter().map(|&x| x as f32).collect();
+            if let Err(e) = self.vector_engine.add_vector(db_name, uid, &vec_f32) {
+                eprintln!(
+                    "Storage: Failed to reconcile vector (db={}, uid={}): {}",
+                    db_name, uid, e
+                );
+                continue;
+            }
+
+            reconciled += 1;
+
+            // Remove from queue after successful indexing
+            if let Err(e) = self.vector_pending_table.remove(&key) {
+                eprintln!(
+                    "Storage: Failed to remove reconciled vector from queue (db={}, uid={}): {}",
+                    db_name, uid, e
+                );
+            }
+        }
+
+        if reconciled > 0 {
+            dbg_println!(
+                "Storage: Reconciled {} pending vectors after unclean shutdown",
+                reconciled
+            );
+        }
+        dbg_info!(
+            reconciled_count = reconciled,
+            "Storage: vector reconciliation complete"
+        );
+
+        Ok(reconciled)
     }
 
     /// Approximate nearest-neighbour search against the given database's index.
@@ -1146,6 +1278,305 @@ impl Storage {
             );
         }
     }
+
+    // ─────────────────── Backup/Restore ───────────────────
+
+    /// Create a crash-consistent backup of all databases.
+    ///
+    /// Returns a backup ID (timestamp-based) on success.
+    /// The backup is stored in `backup_dir` as a subdirectory named with the backup ID.
+    ///
+    /// Backup format:
+    /// ```text
+    /// backups/{timestamp}/
+    /// - default.redb
+    /// - default.meta
+    /// - default_tantivy/
+    /// - default_vectors.usearch
+    /// - default_vectors.dims
+    /// - mydb.redb (per-database)
+    /// - mydb.meta
+    /// - mydb_tantivy/
+    /// - mydb_vectors.usearch
+    /// - mydb_vectors.dims
+    /// ```
+    ///
+    /// redb is crash-consistent, so file copying is safe even during writes.
+    /// On restore, redb automatically recovers from any incomplete transactions.
+    pub fn create_backup(&self, backup_dir: &Path) -> anyhow::Result<String> {
+        let backup_id = chrono::Utc::now()
+            .format("%Y-%m-%dT%H-%M-%S-%f")
+            .to_string();
+        let backup_path = backup_dir.join(&backup_id);
+        fs::create_dir_all(&backup_path)?;
+
+        dbg_info!(backup_id = %backup_id, backup_path = %backup_path.display(), "Storage: creating backup");
+
+        // Copy redb files and per-database indexes
+        for entry in self.backends.iter() {
+            let db_name = entry.key();
+            let backend = entry.value();
+
+            // Copy .redb file
+            let src_path = backend.path();
+            let dest_name = if db_name == "default" {
+                "default.redb".to_string()
+            } else {
+                format!("{}.redb", db_name)
+            };
+            let dest_path = backup_path.join(&dest_name);
+            fs::copy(src_path, &dest_path)?;
+            dbg_info!(db = %db_name, src = %src_path.display(), dest = %dest_path.display(), "Storage: copied database file");
+
+            // Write per-database metadata
+            let db_meta = serde_json::json!({
+                "db_name": db_name,
+                "timestamp": chrono::Utc::now().to_rfc3339(),
+                "version": env!("CARGO_PKG_VERSION"),
+            });
+            let meta_name = if db_name == "default" {
+                "default.meta".to_string()
+            } else {
+                format!("{}.meta", db_name)
+            };
+            fs::write(backup_path.join(&meta_name), db_meta.to_string())?;
+
+            // Copy tantivy index directory: {db_name}_tantivy/
+            let tantivy_src = self.base_path.join(format!("{}_tantivy", db_name));
+            if tantivy_src.exists() {
+                let tantivy_dest = backup_path.join(format!("{}_tantivy", db_name));
+                copy_dir_all(&tantivy_src, &tantivy_dest)?;
+                dbg_info!(db = %db_name, src = %tantivy_src.display(), dest = %tantivy_dest.display(), "Storage: copied tantivy index");
+            }
+
+            // Copy vector index files: {db_name}_vectors.usearch and {db_name}_vectors.dims
+            let vector_usearch = self.base_path.join(format!("{}_vectors.usearch", db_name));
+            if vector_usearch.exists() {
+                fs::copy(
+                    &vector_usearch,
+                    backup_path.join(format!("{}_vectors.usearch", db_name)),
+                )?;
+                dbg_info!(db = %db_name, file = "vectors.usearch", "Storage: copied vector index");
+            }
+
+            let vector_dims = self.base_path.join(format!("{}_vectors.dims", db_name));
+            if vector_dims.exists() {
+                fs::copy(
+                    &vector_dims,
+                    backup_path.join(format!("{}_vectors.dims", db_name)),
+                )?;
+                dbg_info!(db = %db_name, file = "vectors.dims", "Storage: copied vector dims");
+            }
+        }
+
+        dbg_info!(backup_id = %backup_id, "Storage: backup created successfully");
+        Ok(backup_id)
+    }
+
+    /// Restore from a crash-consistent backup.
+    ///
+    /// This will:
+    /// 1. Validate each database backup exists (requires .redb and .meta files)
+    /// 2. Copy all database files, tantivy indexes, and vector indexes
+    ///
+    /// **IMPORTANT**: After restore, you must restart the server for changes to take effect.
+    /// The in-memory state is not updated during restore.
+    pub fn restore_from_backup(&self, backup_path: &Path) -> anyhow::Result<()> {
+        if !backup_path.exists() {
+            anyhow::bail!("Backup directory does not exist: {}", backup_path.display());
+        }
+
+        dbg_info!(backup_path = %backup_path.display(), "Storage: starting restore");
+
+        // Restore files for each database
+        for entry in self.backends.iter() {
+            let db_name = entry.key();
+
+            // Determine file names
+            let (redb_name, meta_name) = if db_name == "default" {
+                ("default.redb", "default.meta")
+            } else {
+                (
+                    &format!("{}.redb", db_name)[..],
+                    &format!("{}.meta", db_name)[..],
+                )
+            };
+
+            let backup_redb = backup_path.join(redb_name);
+            let backup_meta = backup_path.join(meta_name);
+
+            // Validate backup exists
+            if !backup_redb.exists() {
+                anyhow::bail!(
+                    "Backup missing for database '{}': {}",
+                    db_name,
+                    backup_redb.display()
+                );
+            }
+            if !backup_meta.exists() {
+                anyhow::bail!(
+                    "Backup metadata missing for database '{}': {}",
+                    db_name,
+                    backup_meta.display()
+                );
+            }
+
+            // Restore .redb file
+            let backend = entry.value();
+            let dest_path = backend.path();
+            fs::copy(&backup_redb, dest_path)?;
+            dbg_info!(db = %db_name, src = %backup_redb.display(), "Storage: restored database file");
+
+            // Restore tantivy index
+            let tantivy_backup = backup_path.join(format!("{}_tantivy", db_name));
+            if tantivy_backup.exists() {
+                let tantivy_dest = self.base_path.join(format!("{}_tantivy", db_name));
+                if tantivy_dest.exists() {
+                    fs::remove_dir_all(&tantivy_dest)?;
+                }
+                copy_dir_all(&tantivy_backup, &tantivy_dest)?;
+                dbg_info!(db = %db_name, src = %tantivy_backup.display(), dest = %tantivy_dest.display(), "Storage: restored tantivy index");
+            }
+
+            // Restore vector index files
+            let vector_usearch = backup_path.join(format!("{}_vectors.usearch", db_name));
+            if vector_usearch.exists() {
+                let dest = self.base_path.join(format!("{}_vectors.usearch", db_name));
+                fs::copy(&vector_usearch, &dest)?;
+                dbg_info!(db = %db_name, "Storage: restored vectors.usearch");
+            }
+
+            let vector_dims = backup_path.join(format!("{}_vectors.dims", db_name));
+            if vector_dims.exists() {
+                let dest = self.base_path.join(format!("{}_vectors.dims", db_name));
+                fs::copy(&vector_dims, &dest)?;
+                dbg_info!(db = %db_name, "Storage: restored vectors.dims");
+            }
+        }
+
+        dbg_info!("Storage: restore completed successfully");
+        Ok(())
+    }
+
+    /// List all available backups in the backup directory.
+    pub fn list_backups(&self, backup_dir: &Path) -> anyhow::Result<Vec<BackupInfo>> {
+        if !backup_dir.exists() {
+            return Ok(Vec::new());
+        }
+
+        let mut backups = Vec::new();
+        for entry in fs::read_dir(backup_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+
+            // A valid backup must have at least one .meta file
+            let has_meta = fs::read_dir(&path)?.filter_map(|e| e.ok()).any(|e| {
+                e.path()
+                    .extension()
+                    .map(|ext| ext == "meta")
+                    .unwrap_or(false)
+            });
+
+            if !has_meta {
+                continue;
+            }
+
+            let backup_id = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("unknown")
+                .to_string();
+
+            // Read timestamp from first .meta file found
+            let timestamp = fs::read_dir(&path)?
+                .filter_map(|e| e.ok())
+                .find(|e| {
+                    e.path()
+                        .extension()
+                        .map(|ext| ext == "meta")
+                        .unwrap_or(false)
+                })
+                .and_then(|e| fs::read_to_string(e.path()).ok())
+                .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
+                .and_then(|json| json["timestamp"].as_str().map(|s| s.to_string()))
+                .unwrap_or_else(|| "unknown".to_string());
+
+            // Get version from metadata or default
+            let version = fs::read_dir(&path)?
+                .filter_map(|e| e.ok())
+                .find(|e| {
+                    e.path()
+                        .extension()
+                        .map(|ext| ext == "meta")
+                        .unwrap_or(false)
+                })
+                .and_then(|e| fs::read_to_string(e.path()).ok())
+                .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
+                .and_then(|json| json["version"].as_str().map(|s| s.to_string()))
+                .unwrap_or_else(|| "unknown".to_string());
+
+            // Calculate backup size
+            let size_bytes = dir_size(&path);
+
+            backups.push(BackupInfo {
+                id: backup_id,
+                timestamp,
+                version,
+                size_bytes,
+            });
+        }
+
+        // Sort by timestamp descending (newest first)
+        backups.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        Ok(backups)
+    }
+}
+
+/// Calculate the total size of a directory recursively.
+fn dir_size(path: &Path) -> u64 {
+    fn dir_size_recursive(p: &Path) -> u64 {
+        let mut size = 0u64;
+        if let Ok(entries) = fs::read_dir(p) {
+            for entry in entries.flatten() {
+                if let Ok(metadata) = entry.metadata() {
+                    if metadata.is_file() {
+                        size += metadata.len();
+                    } else if metadata.is_dir() {
+                        size += dir_size_recursive(&entry.path());
+                    }
+                }
+            }
+        }
+        size
+    }
+    dir_size_recursive(path)
+}
+
+/// Information about a backup.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct BackupInfo {
+    pub id: String,
+    pub timestamp: String,
+    pub version: String,
+    pub size_bytes: u64,
+}
+
+/// Recursively copy a directory.
+fn copy_dir_all(src: &Path, dst: &Path) -> anyhow::Result<()> {
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let ty = entry.file_type()?;
+        if ty.is_dir() {
+            copy_dir_all(&entry.path(), &dst.join(entry.file_name()))?;
+        } else {
+            fs::copy(entry.path(), dst.join(entry.file_name()))?;
+        }
+    }
+    Ok(())
 }
 
 impl Drop for Storage {

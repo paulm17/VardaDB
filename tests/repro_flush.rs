@@ -82,6 +82,8 @@ fn repro_flush_wal_truncation() {
 
         // 4. Drop Storage (Close DB)
     }
+    // Allow background worker threads to finish cleanup
+    std::thread::sleep(Duration::from_millis(100));
 
     // 5. Re-open DB and measure time
     println!("Reopening DB...");

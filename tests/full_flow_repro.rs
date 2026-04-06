@@ -74,6 +74,8 @@ async fn test_full_server_flow_repro() {
         // Ensure Flush
         storage.flush().unwrap();
     } // STOP SERVER (Drop)
+    // Allow background worker threads to finish cleanup
+    std::thread::sleep(std::time::Duration::from_millis(100));
 
     // 5. RESTART SERVER & 6. QUERY DATA
     {

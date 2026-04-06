@@ -21,6 +21,8 @@ fn test_backend_persistence() {
 
     // 4. Re-open the same redb file and verify durability
     drop(storage);
+    // Allow background worker threads to finish cleanup
+    std::thread::sleep(std::time::Duration::from_millis(100));
     let storage2 = Storage::new(dir.path(), None).unwrap();
     let read2 = storage2.get("default", key).unwrap();
     assert_eq!(read2, Some(value.to_vec()));

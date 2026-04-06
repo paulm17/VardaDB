@@ -210,6 +210,17 @@ impl VectorEngine {
             .collect()
     }
 
+    /// Check if a vector exists in the index for the given uid.
+    pub fn contains(&self, db_name: &str, uid: u64) -> bool {
+        let slot = self.slot(db_name);
+        let guard = slot.lock();
+        if let Some(db_idx) = guard.as_ref() {
+            db_idx.index.contains(uid)
+        } else {
+            false
+        }
+    }
+
     /// Persist the index for `db_name` to disk.
     pub fn save(&self, db_name: &str) -> anyhow::Result<()> {
         let slot = self.slot(db_name);

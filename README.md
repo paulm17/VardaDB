@@ -35,6 +35,18 @@ cargo build --release
 
 ---
 
+## 🧪 Testing
+
+Run tests with single-threaded execution to avoid database file locking issues:
+
+```bash
+cargo test -- --test-threads=1
+```
+
+The `--test-threads=1` flag is required because redb databases use file-level locks. Running tests in parallel can cause "Database already open" errors when multiple tests try to access the same database file simultaneously.
+
+---
+
 ## 🏃 Usage
 
 ### 1. Standalone Server (CLI)

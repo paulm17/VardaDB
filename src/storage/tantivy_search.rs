@@ -77,11 +77,11 @@ struct DbIndex {
 pub struct SearchEngine {
     base_path: PathBuf,
     indexes: DashMap<String, Arc<DbIndex>>,
-    /// Tracks (db_name, uid, field) pairs that have already been indexed in the
-    /// current uncommitted window.  Prevents the same (uid, field) from being
-    /// added twice when a field has multiple search strategies (e.g. `[term,
-    /// fulltext]`), which would create duplicate Tantivy documents.
-    /// Cleared on every `commit` call.
+    /// Tracks (db_name, uid, field) pairs that have already been indexed.
+    /// Prevents the same (uid, field) from being added twice when a field
+    /// has multiple search strategies (e.g. `[term, fulltext]`), which would
+    /// create duplicate Tantivy documents.
+    /// Cleared when `remove_document` is called for that (uid, field).
     indexed_this_batch: DashMap<(String, u64, String), ()>,
 }
 
@@ -185,6 +185,8 @@ impl SearchEngine {
     /// Uses the composite `doc_id = hash(uid, field)` to uniquely identify this
     /// (uid, field) pair. The `indexed_this_batch` map prevents duplicate
     /// Tantivy documents when a field has multiple search strategies.
+    ///
+    /// Commits immediately for durability - data is persisted before returning.
     pub fn index_document(
         &self,
         db_name: &str,
@@ -192,16 +194,16 @@ impl SearchEngine {
         field: &str,
         text: &str,
     ) -> anyhow::Result<()> {
-        // Deduplicate: if the same (db, uid, field) has already been indexed
-        // in this commit window, skip the add.  This prevents duplicate Tantivy
-        // documents when a field declares multiple search strategies (e.g.
-        // `@search(by: [term, fulltext])`), because both strategies are already
-        // covered by a single document that indexes into both content fields.
+        // Deduplicate: if the same (db, uid, field) has already been indexed,
+        // skip the add. This prevents duplicate Tantivy documents when a field
+        // declares multiple search strategies (e.g. `@search(by: [term, fulltext])`),
+        // because both strategies are already covered by a single document that
+        // indexes into both content fields.
         let batch_key = (db_name.to_string(), uid, field.to_string());
         if self.indexed_this_batch.contains_key(&batch_key) {
             return Ok(());
         }
-        self.indexed_this_batch.insert(batch_key, ());
+        self.indexed_this_batch.insert(batch_key.clone(), ());
 
         let idx = self.get_or_create(db_name)?;
         let cid = composite_doc_id(uid, field);
@@ -212,8 +214,8 @@ impl SearchEngine {
         // they share the same doc_id_field value.
         //
         // The flow for an update is:
-        // 1. remove_document() -> delete_term (marks old doc for deletion)
-        // 2. index_document() -> add new doc (this function)
+        // 1. remove_document() -> delete_term + commit
+        // 2. index_document() -> add new doc + commit (this function)
         // If we also deleted here, the delete_term would apply to BOTH documents.
 
         let mut doc = TantivyDocument::default();
@@ -223,8 +225,11 @@ impl SearchEngine {
         doc.add_text(idx.term_content_field, text);
         doc.add_text(idx.fulltext_content_field, text);
 
-        let writer = idx.writer.lock();
-        writer.add_document(doc)?;
+        {
+            let mut writer = idx.writer.lock();
+            writer.add_document(doc)?;
+            writer.commit()?;
+        }
         Ok(())
     }
 

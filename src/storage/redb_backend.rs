@@ -14,6 +14,15 @@ macro_rules! dbg_info {
 
 /// Low-level redb backend — manages a single redb database file.
 /// Replaces `SqliteBackend`.
+///
+/// # Durability Guarantee
+///
+/// All write transactions use `Durability::Immediate` (the default).
+/// Every commit calls fsync to ensure data is persisted to disk before returning.
+/// This guarantees zero data loss on power failure at the cost of write latency.
+///
+/// DO NOT use `db.begin_write_with_txn_config()` with `Durability::Eventual`
+/// anywhere in this codebase — that would break the durability guarantee.
 pub struct RedbBackend {
     db: Database,
     path: PathBuf,

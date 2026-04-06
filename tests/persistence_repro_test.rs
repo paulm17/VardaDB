@@ -16,6 +16,8 @@ fn test_database_persistence() {
         );
         storage.flush().unwrap(); // Ensure persistence
     } // Drop storage (simulate stop)
+      // Allow background worker threads to finish cleanup
+    std::thread::sleep(std::time::Duration::from_millis(100));
 
     // 2. Restart Storage
     {

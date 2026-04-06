@@ -1,4 +1,4 @@
-use crate::traits::DatabaseManager;
+use crate::traits::{BackupInfo, DatabaseManager};
 use axum::{
     extract::{Path, State},
     http::StatusCode,
@@ -23,6 +23,11 @@ pub struct UpdatePathRequest {
     pub path: String,
 }
 
+#[derive(Deserialize)]
+pub struct RestoreRequest {
+    pub backup_id: String,
+}
+
 #[derive(Serialize)]
 pub struct DbResponse {
     pub name: String,
@@ -34,6 +39,16 @@ pub struct ListDbsResponse {
     pub databases: Vec<crate::traits::DbInfo>,
 }
 
+#[derive(Serialize)]
+pub struct BackupResponse {
+    pub backup_id: String,
+}
+
+#[derive(Serialize)]
+pub struct ListBackupsResponse {
+    pub backups: Vec<BackupInfo>,
+}
+
 pub fn router(manager: Arc<dyn DatabaseManager>) -> Router {
     let state = ManagementState { manager };
     Router::new()
@@ -42,6 +57,8 @@ pub fn router(manager: Arc<dyn DatabaseManager>) -> Router {
         .route("/db/{name}/path", post(update_db_path))
         .route("/db/{name}/schema", post(apply_schema).get(get_schema))
         .route("/db/{name}/status", get(get_db_status))
+        .route("/backup", post(create_backup).get(list_backups))
+        .route("/restore", post(restore_from_backup))
         .with_state(state)
 }
 
@@ -153,5 +170,39 @@ async fn get_schema(
                 Err((StatusCode::INTERNAL_SERVER_ERROR, e))
             }
         }
+    }
+}
+
+async fn create_backup(
+    State(state): State<ManagementState>,
+) -> Result<Json<BackupResponse>, (StatusCode, String)> {
+    match state.manager.create_backup().await {
+        Ok(backup_id) => Ok(Json(BackupResponse { backup_id })),
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e)),
+    }
+}
+
+async fn restore_from_backup(
+    State(state): State<ManagementState>,
+    Json(payload): Json<RestoreRequest>,
+) -> Result<(StatusCode, String), (StatusCode, String)> {
+    match state.manager.restore_from_backup(&payload.backup_id).await {
+        Ok(_) => Ok((StatusCode::OK, "Restore completed successfully. Restart server to apply changes.".to_string())),
+        Err(e) => {
+            if e.contains("not found") {
+                Err((StatusCode::NOT_FOUND, e))
+            } else {
+                Err((StatusCode::INTERNAL_SERVER_ERROR, e))
+            }
+        }
+    }
+}
+
+async fn list_backups(
+    State(state): State<ManagementState>,
+) -> Result<Json<ListBackupsResponse>, (StatusCode, String)> {
+    match state.manager.list_backups().await {
+        Ok(backups) => Ok(Json(ListBackupsResponse { backups })),
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e)),
     }
 }

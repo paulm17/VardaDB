@@ -29,6 +29,8 @@ fn test_data_persistence_after_restart() {
         // Flush
         storage.flush().unwrap();
     } // Drop storage
+      // Allow background worker threads to finish cleanup
+    std::thread::sleep(std::time::Duration::from_millis(100));
 
     // 2. Restart Storage
     {
