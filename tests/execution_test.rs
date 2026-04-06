@@ -44,6 +44,7 @@ async fn test_execution_flow() {
             _uniques: &[String],
             _inverses: &[vardadb::engine::resolver::InverseInfo],
             _search: &std::collections::HashMap<String, Vec<String>>,
+            _facet_fields: &[String],
             _: Option<&VectorConfig>,
         ) -> Result<u64, String> {
             Ok(100)
@@ -101,6 +102,7 @@ async fn test_execution_flow() {
             _: &[String],
             _: &[vardadb::engine::resolver::InverseInfo],
             _search: &std::collections::HashMap<String, Vec<String>>,
+            _facet_fields: &[String],
             _: Option<&VectorConfig>,
         ) -> Result<(), String> {
             Ok(())
@@ -112,6 +114,7 @@ async fn test_execution_flow() {
             _: &[String],
             _: &[vardadb::engine::resolver::InverseInfo],
             _search: &std::collections::HashMap<String, Vec<String>>,
+            _facet_fields: &[String],
         ) -> Result<(), String> {
             Ok(())
         }
@@ -145,6 +148,9 @@ async fn test_execution_flow() {
         }
         fn needs_compaction(&self) -> bool {
             false
+        }
+        fn get_facet_counts(&self, _db_name: &str, _field: &str) -> Vec<(String, u64)> {
+            vec![]
         }
     }
 

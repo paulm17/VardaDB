@@ -2310,6 +2310,7 @@ impl RedbResolver {
         uniques: &[String],
         inverses: &[crate::engine::resolver::InverseInfo],
         search_fields: &std::collections::HashMap<String, Vec<String>>,
+        facet_fields: &[String],
         source: crate::realtime::bus::MutationSource,
         timestamp_override: Option<crate::storage::timestamp::Timestamp>,
     ) -> Result<(), String> {
@@ -2521,6 +2522,21 @@ impl RedbResolver {
             }
         }
 
+        // 5b. Handle Facet Indexing
+        for facet_field in facet_fields {
+            if let Some(value) = fields.get(facet_field) {
+                if let serde_json::Value::String(s) = value {
+                    if let Err(e) =
+                        self.storage
+                            .search_engine
+                            .index_facet(&self.db_name, uid, facet_field, s)
+                    {
+                        eprintln!("Facet Indexing Failed (create_node) for uid={}: {}", uid, e);
+                    }
+                }
+            }
+        }
+
         let total = fn_start.elapsed();
         if crate::debug_logging() && total.as_millis() > 2 {
             eprintln!(
@@ -2540,6 +2556,7 @@ impl RedbResolver {
                 uniques: uniques.to_vec(),
                 inverses: inverses.to_vec(),
                 search_fields: search_fields.clone(),
+                facet_fields: facet_fields.to_vec(),
             }),
             timestamp: Some(timestamp),
             node_id: self.storage.node_id,
@@ -2785,6 +2802,7 @@ impl RedbResolver {
         uniques: &[String],
         inverses: &[crate::engine::resolver::InverseInfo],
         search_fields: &std::collections::HashMap<String, Vec<String>>,
+        facet_fields: &[String],
         source: crate::realtime::bus::MutationSource,
         timestamp_override: Option<crate::storage::timestamp::Timestamp>,
     ) -> Result<(), String> {
@@ -2846,6 +2864,17 @@ impl RedbResolver {
                             }
                         }
                     }
+                }
+            }
+
+            // Remove old facet indexes
+            if facet_fields.contains(&field) {
+                if let Err(e) = self
+                    .storage
+                    .search_engine
+                    .remove_facet(&self.db_name, uid, field)
+                {
+                    eprintln!("Facet remove failed (update_node) for uid={}: {}", uid, e);
                 }
             }
 
@@ -2988,6 +3017,18 @@ impl RedbResolver {
                     }
                 }
             }
+            // Facet indexing
+            if facet_fields.contains(&field) {
+                if let serde_json::Value::String(s) = value {
+                    if let Err(e) =
+                        self.storage
+                            .search_engine
+                            .index_facet(&self.db_name, uid, field, s)
+                    {
+                        eprintln!("Facet Indexing Failed (update_node) for uid={}: {}", uid, e);
+                    }
+                }
+            }
             if uniques.contains(&field) {
                 let index_pred = format!("{}.{}", type_name, field);
                 let val_str = serde_json::to_string(&value).map_err(|e| e.to_string())?;
@@ -3107,6 +3148,7 @@ impl RedbResolver {
                 uniques: uniques.to_vec(),
                 inverses: inverses.to_vec(),
                 search_fields: search_fields.clone(),
+                facet_fields: facet_fields.to_vec(),
             }),
             timestamp: Some(timestamp),
             node_id: self.storage.node_id,
@@ -3121,6 +3163,7 @@ impl RedbResolver {
         uniques: &[String],
         inverses: &[crate::engine::resolver::InverseInfo],
         search_fields: &std::collections::HashMap<String, Vec<String>>,
+        facet_fields: &[String],
         source: crate::realtime::bus::MutationSource,
         timestamp_override: Option<crate::storage::timestamp::Timestamp>,
     ) -> Result<(), String> {
@@ -3159,6 +3202,18 @@ impl RedbResolver {
                 }
             }
         }
+
+        // Remove Facet Indexes
+        for field in facet_fields {
+            if let Err(e) = self
+                .storage
+                .search_engine
+                .remove_facet(&self.db_name, uid, field)
+            {
+                eprintln!("Facet remove failed (delete_node) for uid={}: {}", uid, e);
+            }
+        }
+
         // 1. Handle Inverses (Unlink)
         for info in inverses {
             let data_key = Codec::encode_data_key(uid, &info.field);
@@ -3341,6 +3396,7 @@ impl RedbResolver {
                 uniques: uniques.to_vec(),
                 inverses: inverses.to_vec(),
                 search_fields: search_fields.clone(),
+                facet_fields: facet_fields.to_vec(),
             }),
             timestamp: Some(timestamp),
             node_id: self.storage.node_id,
@@ -3367,6 +3423,7 @@ impl RedbResolver {
                     &metadata.uniques,
                     &metadata.inverses,
                     &metadata.search_fields,
+                    &metadata.facet_fields,
                     source,
                     event.timestamp,
                 )
@@ -3380,6 +3437,7 @@ impl RedbResolver {
                     &metadata.uniques,
                     &metadata.inverses,
                     &metadata.search_fields,
+                    &metadata.facet_fields,
                     source,
                     event.timestamp,
                 )
@@ -3390,6 +3448,7 @@ impl RedbResolver {
                 &metadata.uniques,
                 &metadata.inverses,
                 &metadata.search_fields,
+                &metadata.facet_fields,
                 source,
                 event.timestamp,
             ),
@@ -4078,6 +4137,7 @@ impl Resolver for RedbResolver {
         uniques: &[String],
         inverses: &[crate::engine::resolver::InverseInfo],
         search_fields: &std::collections::HashMap<String, Vec<String>>,
+        facet_fields: &[String],
         vector_config: Option<&crate::engine::resolver::VectorConfig>,
     ) -> Result<u64, String> {
         let op_start = std::time::Instant::now();
@@ -4117,6 +4177,7 @@ impl Resolver for RedbResolver {
             uniques,
             inverses,
             search_fields,
+            facet_fields,
             crate::realtime::bus::MutationSource::Local,
             None,
         )?;
@@ -4250,6 +4311,7 @@ impl Resolver for RedbResolver {
         uniques: &[String],
         inverses: &[crate::engine::resolver::InverseInfo],
         search_fields: &std::collections::HashMap<String, Vec<String>>,
+        facet_fields: &[String],
         vector_config: Option<&crate::engine::resolver::VectorConfig>,
     ) -> Result<(), String> {
         let op_start = std::time::Instant::now();
@@ -4296,6 +4358,7 @@ impl Resolver for RedbResolver {
             uniques,
             inverses,
             search_fields,
+            facet_fields,
             crate::realtime::bus::MutationSource::Local,
             None,
         );
@@ -4319,6 +4382,7 @@ impl Resolver for RedbResolver {
         uniques: &[String],
         inverses: &[crate::engine::resolver::InverseInfo],
         search_fields: &std::collections::HashMap<String, Vec<String>>,
+        facet_fields: &[String],
     ) -> Result<(), String> {
         self.delete_node_internal(
             type_name,
@@ -4326,6 +4390,7 @@ impl Resolver for RedbResolver {
             uniques,
             inverses,
             search_fields,
+            facet_fields,
             crate::realtime::bus::MutationSource::Local,
             None,
         )
@@ -4378,5 +4443,9 @@ impl Resolver for RedbResolver {
             .search_engine
             .get_stats(db_name)
             .map_err(|e| e.to_string())
+    }
+
+    fn get_facet_counts(&self, db_name: &str, field: &str) -> Vec<(String, u64)> {
+        self.storage.search_engine.get_facet_counts(db_name, field)
     }
 }

@@ -39,6 +39,7 @@ impl crate::engine::resolver::Resolver for DummyResolver {
         _uniques: &[String],
         _: &[crate::engine::resolver::InverseInfo],
         _: &std::collections::HashMap<String, Vec<String>>,
+        _: &[String],
         _: Option<&crate::engine::resolver::VectorConfig>,
     ) -> Result<u64, String> {
         Ok(0)
@@ -90,6 +91,7 @@ impl crate::engine::resolver::Resolver for DummyResolver {
         _: &[String],
         _: &[crate::engine::resolver::InverseInfo],
         _: &std::collections::HashMap<String, Vec<String>>,
+        _: &[String],
         _: Option<&crate::engine::resolver::VectorConfig>,
     ) -> Result<(), String> {
         Ok(())
@@ -102,6 +104,7 @@ impl crate::engine::resolver::Resolver for DummyResolver {
         _: &[String],
         _: &[crate::engine::resolver::InverseInfo],
         _: &std::collections::HashMap<String, Vec<String>>,
+        _: &[String],
     ) -> Result<(), String> {
         Ok(())
     }
@@ -128,6 +131,9 @@ impl crate::engine::resolver::Resolver for DummyResolver {
     }
     fn needs_compaction(&self) -> bool {
         false
+    }
+    fn get_facet_counts(&self, _db_name: &str, _field: &str) -> Vec<(String, u64)> {
+        vec![]
     }
     fn bulk_check_permission(
         &self,

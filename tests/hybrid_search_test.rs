@@ -50,7 +50,7 @@ async fn test_hybrid_search() {
     let mut f1 = HashMap::new();
     f1.insert("title".to_string(), GqlValue::String("Rust Database".to_string()));
     let uid1 = resolver
-        .create_node("Article", f1, &[], &[], &search_fields, None)
+        .create_node("Article", f1, &[], &[], &search_fields, &[], None)
         .unwrap();
     storage
         .vector_engine
@@ -61,7 +61,7 @@ async fn test_hybrid_search() {
     let mut f2 = HashMap::new();
     f2.insert("title".to_string(), GqlValue::String("Python Script".to_string()));
     let uid2 = resolver
-        .create_node("Article", f2, &[], &[], &search_fields, None)
+        .create_node("Article", f2, &[], &[], &search_fields, &[], None)
         .unwrap();
     storage
         .vector_engine
@@ -72,7 +72,7 @@ async fn test_hybrid_search() {
     let mut f3 = HashMap::new();
     f3.insert("title".to_string(), GqlValue::String("Rust Script".to_string()));
     let uid3 = resolver
-        .create_node("Article", f3, &[], &[], &search_fields, None)
+        .create_node("Article", f3, &[], &[], &search_fields, &[], None)
         .unwrap();
     let mut v3 = vec![0.0f32; dims];
     v3[0] = 0.9;
@@ -137,7 +137,7 @@ async fn test_alpha_zero_all_bm25() {
     let mut f1 = HashMap::new();
     f1.insert("title".to_string(), GqlValue::String("Rust Database".to_string()));
     let uid1 = resolver
-        .create_node("Article", f1, &[], &[], &search_fields, None)
+        .create_node("Article", f1, &[], &[], &search_fields, &[], None)
         .unwrap();
     storage
         .vector_engine
@@ -148,7 +148,7 @@ async fn test_alpha_zero_all_bm25() {
     let mut f2 = HashMap::new();
     f2.insert("title".to_string(), GqlValue::String("Python Script".to_string()));
     let uid2 = resolver
-        .create_node("Article", f2, &[], &[], &search_fields, None)
+        .create_node("Article", f2, &[], &[], &search_fields, &[], None)
         .unwrap();
     storage
         .vector_engine
@@ -159,7 +159,7 @@ async fn test_alpha_zero_all_bm25() {
     let mut f3 = HashMap::new();
     f3.insert("title".to_string(), GqlValue::String("Rust Script".to_string()));
     let uid3 = resolver
-        .create_node("Article", f3, &[], &[], &search_fields, None)
+        .create_node("Article", f3, &[], &[], &search_fields, &[], None)
         .unwrap();
     storage
         .vector_engine
@@ -199,7 +199,7 @@ async fn test_alpha_one_all_vector() {
     let mut f1 = HashMap::new();
     f1.insert("title".to_string(), GqlValue::String("Rust Database".to_string()));
     let uid1 = resolver
-        .create_node("Article", f1, &[], &[], &search_fields, None)
+        .create_node("Article", f1, &[], &[], &search_fields, &[], None)
         .unwrap();
     storage
         .vector_engine
@@ -210,7 +210,7 @@ async fn test_alpha_one_all_vector() {
     let mut f2 = HashMap::new();
     f2.insert("title".to_string(), GqlValue::String("Python Script".to_string()));
     let uid2 = resolver
-        .create_node("Article", f2, &[], &[], &search_fields, None)
+        .create_node("Article", f2, &[], &[], &search_fields, &[], None)
         .unwrap();
     storage
         .vector_engine

@@ -29,6 +29,7 @@ impl Resolver for MockDynamicResolver {
         _uniques: &[String],
         _: &[vardadb::engine::resolver::InverseInfo],
         _: &std::collections::HashMap<String, Vec<String>>,
+        _facet_fields: &[String],
         _: Option<&vardadb::engine::resolver::VectorConfig>,
     ) -> Result<u64, String> {
         Ok(200)
@@ -81,11 +82,12 @@ impl Resolver for MockDynamicResolver {
         _: &[String],
         _: &[vardadb::engine::resolver::InverseInfo],
         _: &std::collections::HashMap<String, Vec<String>>,
+        _facet_fields: &[String],
         _: Option<&vardadb::engine::resolver::VectorConfig>,
     ) -> Result<(), String> {
         Ok(())
     }
-    fn delete_node(&self, _: &str, _: u64, _: &[String], _: &[crate::engine::resolver::InverseInfo], _: &std::collections::HashMap<String, Vec<String>>) -> Result<(), String> { Ok(()) }
+    fn delete_node(&self, _: &str, _: u64, _: &[String], _: &[vardadb::engine::resolver::InverseInfo], _: &std::collections::HashMap<String, Vec<String>>, _facet_fields: &[String]) -> Result<(), String> { Ok(()) }
     fn node_exists(&self, _: &str, _: u64) -> bool { true }
     fn get_node_type(&self, _: u64) -> Option<String> { None }
     fn subscribe_events(&self) -> vardadb::realtime::bus::EventBus { vardadb::realtime::bus::EventBus::new() }
@@ -101,6 +103,7 @@ impl Resolver for MockDynamicResolver {
     ) -> async_graphql::Result<Vec<(String, String, String, bool)>> {
         Ok(vec![])
     }
+    fn get_facet_counts(&self, _db_name: &str, _field: &str) -> Vec<(String, u64)> { vec![] }
 }
 
 impl MockDynamicResolver {

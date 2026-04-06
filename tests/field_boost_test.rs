@@ -29,7 +29,7 @@ async fn test_field_boost_affects_ranking() {
         GqlValue::String("unrelated content here".to_string()),
     );
     let uid1 = resolver
-        .create_node("Article", f1, &[], &[], &search_fields, None)
+        .create_node("Article", f1, &[], &[], &search_fields, &[], None)
         .unwrap();
 
     // Article 2: title is unrelated, description contains "search term"
@@ -43,7 +43,7 @@ async fn test_field_boost_affects_ranking() {
         GqlValue::String("contains the search term here".to_string()),
     );
     let uid2 = resolver
-        .create_node("Article", f2, &[], &[], &search_fields, None)
+        .create_node("Article", f2, &[], &[], &search_fields, &[], None)
         .unwrap();
 
     // Article 3: both fields contain "search term"
@@ -57,7 +57,7 @@ async fn test_field_boost_affects_ranking() {
         GqlValue::String("search term in description".to_string()),
     );
     resolver
-        .create_node("Article", f3, &[], &[], &search_fields, None)
+        .create_node("Article", f3, &[], &[], &search_fields, &[], None)
         .unwrap();
 
     // -----------------------------------------------------------------------
@@ -170,19 +170,19 @@ async fn test_field_boost_with_and_semantics() {
     let mut f1 = HashMap::new();
     f1.insert("title".to_string(), GqlValue::String("rust programming".to_string()));
     let uid1 = resolver
-        .create_node("Article", f1, &[], &[], &search_fields, None)
+        .create_node("Article", f1, &[], &[], &search_fields, &[], None)
         .unwrap();
 
     let mut f2 = HashMap::new();
     f2.insert("title".to_string(), GqlValue::String("database systems".to_string()));
     let _uid2 = resolver
-        .create_node("Article", f2, &[], &[], &search_fields, None)
+        .create_node("Article", f2, &[], &[], &search_fields, &[], None)
         .unwrap();
 
     let mut f3 = HashMap::new();
     f3.insert("title".to_string(), GqlValue::String("rust database tutorial".to_string()));
     let uid3 = resolver
-        .create_node("Article", f3, &[], &[], &search_fields, None)
+        .create_node("Article", f3, &[], &[], &search_fields, &[], None)
         .unwrap();
 
     // AND semantics: document must contain both "rust" AND "database"

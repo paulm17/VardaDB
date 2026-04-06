@@ -146,6 +146,7 @@ impl R2SyncWorker {
                                     &["id".to_string(), "tusId".to_string()],
                                     &[],
                                     &HashMap::new(),
+                                    &[],
                                     None,
                                 );
                                 tracing::info!("Backed up {} to R2", content_hash);

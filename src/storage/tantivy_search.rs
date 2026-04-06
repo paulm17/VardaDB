@@ -26,14 +26,15 @@ use std::sync::Arc;
 
 use dashmap::DashMap;
 use parking_lot::Mutex;
-use tantivy::collector::TopDocs;
+use tantivy::collector::{FacetCollector, FacetCounts, TopDocs};
 use tantivy::directory::MmapDirectory;
 use tantivy::query::{
-    BooleanQuery, BoostQuery, FuzzyTermQuery, Occur, PhraseQuery, Query, TermQuery,
+    AllQuery, BooleanQuery, BoostQuery, FuzzyTermQuery, Occur, PhraseQuery, Query, TermQuery,
 };
 use tantivy::schema::Value as TantivyValue;
 use tantivy::schema::{
-    Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, FAST, INDEXED, STORED, STRING,
+    Facet, FacetOptions, Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, FAST,
+    INDEXED, STORED, STRING,
 };
 use tantivy::snippet::SnippetGenerator;
 use tantivy::tokenizer::{LowerCaser, SimpleTokenizer, Stemmer, TextAnalyzer};
@@ -100,6 +101,8 @@ struct DbIndex {
     term_content_field: Field,
     /// Indexed with `"fulltext_tokenizer"` (Porter stemming).
     fulltext_content_field: Field,
+    /// Facet field for faceted search.
+    facet_field: Field,
 }
 
 // ---------------------------------------------------------------------------
@@ -130,6 +133,19 @@ impl SearchEngine {
             indexed_this_batch: DashMap::new(),
             pending_deletes: DashMap::new(),
         })
+    }
+
+    /// Returns the number of pending deletes for a database.
+    pub fn pending_delete_count(&self, db_name: &str) -> usize {
+        self.pending_deletes
+            .get(db_name)
+            .map(|v| v.len())
+            .unwrap_or(0)
+    }
+
+    /// Returns true if there are any pending deletes for a database.
+    pub fn has_pending_deletes(&self, db_name: &str) -> bool {
+        self.pending_deletes.contains_key(db_name)
     }
 
     // -----------------------------------------------------------------------
@@ -171,6 +187,9 @@ impl SearchEngine {
             .set_stored();
         let fulltext_content_field = sb.add_text_field("fulltext_content", fulltext_opts);
 
+        // Facet field for faceted search
+        let facet_field = sb.add_facet_field("facet_values", FacetOptions::default());
+
         let schema = sb.build();
 
         // ---- Open or create -----------------------------------------------
@@ -207,6 +226,7 @@ impl SearchEngine {
             field_name_field,
             term_content_field,
             fulltext_content_field,
+            facet_field,
         });
 
         self.indexes
@@ -304,6 +324,118 @@ impl SearchEngine {
                 writer.delete_term(Term::from_field_u64(idx.doc_id_field, cid));
             }
 
+            writer.commit()?;
+        }
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Public: facets
+    // -----------------------------------------------------------------------
+
+    /// Index a facet value for a node.
+    ///
+    /// Facets are stored as `/field_name/value` paths for efficient counting.
+    /// Multiple facets can be indexed for the same uid.
+    pub fn index_facet(
+        &self,
+        db_name: &str,
+        uid: u64,
+        field: &str,
+        value: &str,
+    ) -> anyhow::Result<()> {
+        self.flush_deletes(db_name)?;
+
+        let idx = self.get_or_create(db_name)?;
+        let cid = composite_doc_id(uid, field);
+
+        let facet_path = format!("/{}/{}", field, value);
+        let facet = Facet::from(&facet_path);
+
+        let mut doc = TantivyDocument::default();
+        doc.add_u64(idx.uid_field, uid);
+        doc.add_u64(idx.doc_id_field, cid);
+        doc.add_text(idx.field_name_field, field);
+        doc.add_facet(idx.facet_field, facet);
+
+        {
+            let mut writer = idx.writer.lock();
+            writer.add_document(doc)?;
+            writer.commit()?;
+        }
+        Ok(())
+    }
+
+    /// Get facet counts for a field.
+    ///
+    /// Returns a list of `(value, count)` pairs for all values under the given field prefix.
+    /// The prefix should just be the field name (without slashes).
+    pub fn get_facet_counts(&self, db_name: &str, field: &str) -> Vec<(String, u64)> {
+        let idx = match self.get_or_create(db_name) {
+            Ok(i) => i,
+            Err(e) => {
+                eprintln!(
+                    "SearchEngine::get_facet_counts: failed to open index: {}",
+                    e
+                );
+                return vec![];
+            }
+        };
+
+        {
+            let mut writer = idx.writer.lock();
+            if let Err(e) = writer.commit() {
+                eprintln!(
+                    "SearchEngine: auto-commit before facet counts failed: {}",
+                    e
+                );
+            }
+        }
+
+        let reader = match idx.index.reader() {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("SearchEngine: failed to open reader: {}", e);
+                return vec![];
+            }
+        };
+        let searcher = reader.searcher();
+
+        let facet_collector = FacetCollector::for_field("facet_values");
+
+        let counts: FacetCounts = match searcher.search(&AllQuery, &facet_collector) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("SearchEngine: facet collection failed: {}", e);
+                return vec![];
+            }
+        };
+
+        let facet_prefix_str = format!("/{}/", field);
+
+        counts
+            .get(&facet_prefix_str)
+            .map(|(facet, count)| {
+                let facet_str = facet.to_string();
+                let value = facet_str
+                    .strip_prefix(&facet_prefix_str)
+                    .unwrap_or(&facet_str)
+                    .to_string();
+                (value, count)
+            })
+            .collect()
+    }
+
+    /// Remove facet documents for a specific `(uid, field)` pair.
+    pub fn remove_facet(&self, db_name: &str, uid: u64, field: &str) -> anyhow::Result<()> {
+        let batch_key = (db_name.to_string(), uid, field.to_string());
+        self.indexed_this_batch.remove(&batch_key);
+
+        let idx = self.get_or_create(db_name)?;
+        let cid = composite_doc_id(uid, field);
+        {
+            let mut writer = idx.writer.lock();
+            writer.delete_term(Term::from_field_u64(idx.doc_id_field, cid));
             writer.commit()?;
         }
         Ok(())
@@ -878,70 +1010,5 @@ impl Drop for SearchEngine {
         for entry in self.indexes.iter() {
             let _ = self.commit(entry.key());
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tempfile::TempDir;
-
-    fn create_test_search_engine() -> (TempDir, SearchEngine) {
-        let temp_dir = TempDir::new().expect("failed to create temp dir");
-        let search_engine =
-            SearchEngine::new(temp_dir.path()).expect("failed to create search engine");
-        (temp_dir, search_engine)
-    }
-
-    #[test]
-    fn test_deletes_are_batched() {
-        let (_temp_dir, search_engine) = create_test_search_engine();
-
-        for i in 0..50 {
-            search_engine
-                .remove_document("default", i, "content")
-                .unwrap();
-        }
-
-        assert_eq!(
-            search_engine
-                .pending_deletes
-                .get("default")
-                .map(|v| v.len())
-                .unwrap_or(0),
-            50
-        );
-
-        for i in 50..100 {
-            search_engine
-                .remove_document("default", i, "content")
-                .unwrap();
-        }
-
-        assert!(
-            search_engine
-                .pending_deletes
-                .get("default")
-                .map(|v| v.len())
-                .unwrap_or(0)
-                < 100
-        );
-    }
-
-    #[test]
-    fn test_flush_deletes_clears_pending() {
-        let (_temp_dir, search_engine) = create_test_search_engine();
-
-        for i in 0..10 {
-            search_engine
-                .remove_document("default", i, "content")
-                .unwrap();
-        }
-
-        assert!(search_engine.pending_deletes.contains_key("default"));
-
-        search_engine.flush_deletes("default").unwrap();
-
-        assert!(!search_engine.pending_deletes.contains_key("default"));
     }
 }

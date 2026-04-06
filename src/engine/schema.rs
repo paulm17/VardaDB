@@ -13,6 +13,7 @@ pub struct TypeMetadata {
     pub uniques: Vec<String>,
     pub inverses: Vec<crate::engine::resolver::InverseInfo>,
     pub search_fields: std::collections::HashMap<String, Vec<String>>,
+    pub facet_fields: Vec<String>,
     pub cascade_fields: Vec<(String, String)>,
     pub interface_implementations: Vec<String>, // Interfaces this type implements
     pub validate_fields: std::collections::HashMap<String, Vec<ValidationRule>>,
@@ -197,6 +198,7 @@ impl Schema {
                         let mut inverses: Vec<crate::engine::resolver::InverseInfo> = Vec::new();
                         let mut type_search_fields: std::collections::HashMap<String, Vec<String>> =
                             std::collections::HashMap::new();
+                        let mut facet_fields: Vec<String> = Vec::new();
                         let mut cascade_fields: Vec<(String, String)> = Vec::new();
 
                         let mut vector_config: Option<crate::engine::resolver::VectorConfig> = None;
@@ -247,13 +249,21 @@ impl Schema {
                                             }
                                             _ => {}
                                         }
-                                        // println!("[Debug] Field '{}' search strategy: {:?}", field_name, tokenizers);
                                     }
                                 }
                                 if tokenizers.is_empty() {
                                     tokenizers.push("term".to_string());
                                 }
                                 type_search_fields.insert(field_name.clone(), tokenizers);
+                            }
+                            // Facet
+                            if field
+                                .node
+                                .directives
+                                .iter()
+                                .any(|d| d.node.name.node == "facet")
+                            {
+                                facet_fields.push(field_name.clone());
                             }
                             // Cascade
                             if field
@@ -521,6 +531,7 @@ impl Schema {
                                 uniques: unique_fields,
                                 inverses,
                                 search_fields: type_search_fields,
+                                facet_fields,
                                 cascade_fields,
                                 interface_implementations: interfaces,
                                 validate_fields,
@@ -538,6 +549,7 @@ impl Schema {
                                 uniques: vec![],
                                 inverses: vec![],
                                 search_fields: std::collections::HashMap::new(),
+                                facet_fields: vec![],
                                 cascade_fields: vec![],
                                 interface_implementations: vec![],
                                 validate_fields: std::collections::HashMap::new(),
@@ -560,6 +572,7 @@ impl Schema {
                                 uniques: vec![],
                                 inverses: vec![],
                                 search_fields: std::collections::HashMap::new(),
+                                facet_fields: vec![],
                                 cascade_fields: vec![],
                                 interface_implementations: vec![],
                                 validate_fields: std::collections::HashMap::new(),
@@ -618,6 +631,7 @@ impl Schema {
                         let unique_fields = &meta.uniques;
                         let inverses = &meta.inverses;
                         let type_search_fields = &meta.search_fields;
+                        let type_facet_fields = &meta.facet_fields;
 
                         let mut obj = dynamic::Object::new(type_name.clone());
                         if type_name != "GeoPoint" {
@@ -1422,6 +1436,7 @@ impl Schema {
                         let uniques_update = unique_fields.clone();
                         let inverses_update = inverses.clone();
                         let search_fields_update = type_search_fields.clone();
+                        let facet_fields_update = type_facet_fields.clone();
 
                         let meta_arc_update = metadata_arc.clone();
                         mutation_fields.push(dynamic::Field::new(update_name, dynamic::TypeRef::named(dynamic::TypeRef::BOOLEAN), move |ctx| {
@@ -1429,6 +1444,7 @@ impl Schema {
                              let u_fields = uniques_update.clone();
                              let inv_fields = inverses_update.clone();
                              let s_fields = search_fields_update.clone();
+                             let f_fields = facet_fields_update.clone();
                              let meta_arc = meta_arc_update.clone();
                              dynamic::FieldFuture::new(async move {
                                 let id_arg = ctx.args.try_get("uid")?;
@@ -1471,7 +1487,7 @@ impl Schema {
                                 use crate::engine::resolver::Resolver;
                                 let resolver = ctx.data::<Box<dyn Resolver + Send + Sync>>().unwrap();
                                 let result = tokio::task::block_in_place(|| {
-                                    resolver.update_node(&t_name, uid, fields, &u_fields, &inv_fields, &s_fields, meta.vector_config.as_ref())
+                                    resolver.update_node(&t_name, uid, fields, &u_fields, &inv_fields, &s_fields, &f_fields, meta.vector_config.as_ref())
                                 });
                                 match result {
                                     Ok(_) => Ok(Some(dynamic::FieldValue::value(async_graphql::Value::Boolean(true)))),
@@ -1537,7 +1553,7 @@ impl Schema {
                                             }
                                             // 2. Delete Self
                                             tokio::task::block_in_place(|| {
-                                                resolver.delete_node(type_name, uid, &meta.uniques, &meta.inverses, &meta.search_fields)
+                                                resolver.delete_node(type_name, uid, &meta.uniques, &meta.inverses, &meta.search_fields, &meta.facet_fields)
                                             })?;
                                         }
                                         Ok(())
@@ -3007,6 +3023,7 @@ fn deep_create_node<'a>(
                     &meta.uniques,
                     &meta.inverses,
                     &meta.search_fields,
+                    &meta.facet_fields,
                     meta.vector_config.as_ref(),
                 )
             })

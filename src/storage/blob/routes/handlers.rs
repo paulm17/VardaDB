@@ -214,6 +214,7 @@ pub async fn upload_chunk(
                 &uniques,
                 &empty_inverses,
                 &search_fields,
+                &[],
                 None,
             );
 
@@ -234,6 +235,7 @@ pub async fn upload_chunk(
                 &vec!["id".to_string()],
                 &empty_inverses,
                 &q_search,
+                &[],
                 None,
             );
 

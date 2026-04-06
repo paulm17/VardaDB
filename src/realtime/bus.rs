@@ -20,6 +20,7 @@ pub struct SchemaMetadata {
     pub uniques: Vec<String>,
     pub inverses: Vec<crate::engine::resolver::InverseInfo>,
     pub search_fields: std::collections::HashMap<String, Vec<String>>,
+    pub facet_fields: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

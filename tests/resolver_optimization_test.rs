@@ -39,7 +39,7 @@ async fn test_resolver_optimization() {
     );
     fields0.insert("age".to_string(), GqlValue::Number(20.into()));
     resolver
-        .create_node("User", fields0, &["email".to_string()], &[], &search_map, None)
+        .create_node("User", fields0, &["email".to_string()], &[], &search_map, &[], None)
         .expect("create User 0");
 
     // Users 1-99
@@ -62,6 +62,7 @@ async fn test_resolver_optimization() {
                 &["email".to_string()],
                 &[],
                 &search_map,
+                &[],
                 None,
             )
             .unwrap_or_else(|_| panic!("create User {}", i));
