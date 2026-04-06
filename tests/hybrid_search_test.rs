@@ -107,7 +107,7 @@ async fn test_hybrid_search() {
     // -----------------------------------------------------------------------
     // 3. Hybrid search — "Rust" text + dim-0 vector → uid1 and uid3 in top-2
     // -----------------------------------------------------------------------
-    let hybrid_results = resolver.search_hybrid("Rust", "title", &query_f64, 3, false);
+    let hybrid_results = resolver.search_hybrid("Rust", "title", &query_f64, 3, false, None);
     let hybrid_uids: Vec<u64> = hybrid_results.iter().map(|&(uid, _)| uid).collect();
     assert!(
         hybrid_uids.len() >= 2,
@@ -121,4 +121,109 @@ async fn test_hybrid_search() {
         hybrid_uids.contains(&uid3),
         "Hybrid top results must contain uid3"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_alpha_zero_all_bm25() {
+    let temp_dir = TempDir::new().unwrap();
+    let storage = Arc::new(Storage::new(temp_dir.path(), None).unwrap());
+    let resolver = RedbResolver::new(storage.clone(), "default");
+
+    let dims = 64usize;
+    let mut search_fields = HashMap::new();
+    search_fields.insert("title".to_string(), vec!["fulltext".to_string()]);
+
+    // Article 1: "Rust Database" — text matches "Rust", vector along dim-0
+    let mut f1 = HashMap::new();
+    f1.insert("title".to_string(), GqlValue::String("Rust Database".to_string()));
+    let uid1 = resolver
+        .create_node("Article", f1, &[], &[], &search_fields, None)
+        .unwrap();
+    storage
+        .vector_engine
+        .add_vector("default", uid1, &unit_vec(0, dims))
+        .unwrap();
+
+    // Article 2: "Python Script" — text does NOT match "Rust", vector along dim-1
+    let mut f2 = HashMap::new();
+    f2.insert("title".to_string(), GqlValue::String("Python Script".to_string()));
+    let uid2 = resolver
+        .create_node("Article", f2, &[], &[], &search_fields, None)
+        .unwrap();
+    storage
+        .vector_engine
+        .add_vector("default", uid2, &unit_vec(1, dims))
+        .unwrap();
+
+    // Article 3: "Rust Script" — text matches "Rust", vector along dim-2 (unrelated)
+    let mut f3 = HashMap::new();
+    f3.insert("title".to_string(), GqlValue::String("Rust Script".to_string()));
+    let uid3 = resolver
+        .create_node("Article", f3, &[], &[], &search_fields, None)
+        .unwrap();
+    storage
+        .vector_engine
+        .add_vector("default", uid3, &unit_vec(2, dims))
+        .unwrap();
+
+    // With alpha=0.0, should only use BM25 (text_weight=1.0, vector_weight=0.0)
+    // Query vector points to dim-1 (matches uid2), but alpha=0 means vector is ignored
+    let query_f64 = unit_vec_f64(1, dims);
+    let results = resolver.search_hybrid("Rust", "title", &query_f64, 10, false, Some(0.0));
+
+    // Should get BM25 results (uid1 and uid3 match "Rust"), NOT uid2
+    // With alpha=0.0, vector results contribute 0 weight, so uid2 has score=0
+    // but might still appear in results list with zero score
+    assert!(!results.is_empty(), "Alpha=0.0 should return results");
+
+    // Filter to only keep results with positive scores (meaningful contributions)
+    let positive_results: Vec<(u64, f64)> = results.into_iter().filter(|(_, score)| *score > 0.0).collect();
+    let result_uids: Vec<u64> = positive_results.iter().map(|&(uid, _)| uid).collect();
+
+    assert!(result_uids.contains(&uid1), "Alpha=0.0 must find uid1 (Rust Database)");
+    assert!(result_uids.contains(&uid3), "Alpha=0.0 must find uid3 (Rust Script)");
+    assert!(!result_uids.contains(&uid2), "Alpha=0.0 must NOT find uid2 (Python Script)");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_alpha_one_all_vector() {
+    let temp_dir = TempDir::new().unwrap();
+    let storage = Arc::new(Storage::new(temp_dir.path(), None).unwrap());
+    let resolver = RedbResolver::new(storage.clone(), "default");
+
+    let dims = 64usize;
+    let mut search_fields = HashMap::new();
+    search_fields.insert("title".to_string(), vec!["fulltext".to_string()]);
+
+    // Article 1: "Rust Database" — text matches "Rust", vector along dim-0
+    let mut f1 = HashMap::new();
+    f1.insert("title".to_string(), GqlValue::String("Rust Database".to_string()));
+    let uid1 = resolver
+        .create_node("Article", f1, &[], &[], &search_fields, None)
+        .unwrap();
+    storage
+        .vector_engine
+        .add_vector("default", uid1, &unit_vec(0, dims))
+        .unwrap();
+
+    // Article 2: "Python Script" — text does NOT match "Rust", vector along dim-1
+    let mut f2 = HashMap::new();
+    f2.insert("title".to_string(), GqlValue::String("Python Script".to_string()));
+    let uid2 = resolver
+        .create_node("Article", f2, &[], &[], &search_fields, None)
+        .unwrap();
+    storage
+        .vector_engine
+        .add_vector("default", uid2, &unit_vec(1, dims))
+        .unwrap();
+
+    // With alpha=1.0, should only use vector (text_weight=0.0, vector_weight=1.0)
+    // Query vector points to dim-1 (matches uid2), text search matches uid1
+    let query_f64 = unit_vec_f64(1, dims);
+    let results = resolver.search_hybrid("Rust", "title", &query_f64, 10, false, Some(1.0));
+    let result_uids: Vec<u64> = results.iter().map(|&(uid, _)| uid).collect();
+
+    // Should get vector results (uid2 is nearest to query vector), NOT uid1 from text
+    assert!(!results.is_empty(), "Alpha=1.0 should return vector results");
+    assert_eq!(result_uids[0], uid2, "Alpha=1.0 must prioritize uid2 (nearest vector)");
 }

@@ -36,6 +36,7 @@ async fn test_deep_mutation() {
             _offset: Option<usize>,
             _: &[String],
             _near_vector: Option<Vec<f64>>,
+            _rrf_alpha: Option<f32>,
             _: &HashMap<String, vardadb::engine::resolver::QueryTypeMetadata>,
         ) -> Vec<u64> {
             vec![]
@@ -46,6 +47,7 @@ async fn test_deep_mutation() {
             _: HashMap<String, Value>,
             _: &[String],
             _: Option<Vec<f64>>,
+            _: Option<f32>,
             _: &HashMap<String, vardadb::engine::resolver::QueryTypeMetadata>,
         ) -> usize {
             0
@@ -118,7 +120,7 @@ async fn test_deep_mutation() {
         fn search_vectors(&self, _: &[f64], _: usize) -> Vec<(u64, f64)> {
             vec![]
         }
-        fn search_hybrid(&self, _: &str, _: &str, _: &[f64], _: usize) -> Vec<(u64, f64)> {
+        fn search_hybrid(&self, _: &str, _: &str, _: &[f64], _: usize, _: Option<f32>) -> Vec<(u64, f64)> {
             vec![]
         }
         fn flush(&self) -> Result<(), String> {

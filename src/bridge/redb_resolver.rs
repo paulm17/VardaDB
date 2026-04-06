@@ -944,6 +944,9 @@ impl RedbResolver {
 
     /// Hybrid search combining BM25 (Tantivy) and ANN (usearch) via
     /// Reciprocal Rank Fusion (RRF, k=60).
+    ///
+    /// * `alpha` – Weight for vector search (0.0 = all BM25, 1.0 = all vector).
+    ///             Defaults to 0.5 when None.
     pub fn search_hybrid(
         &self,
         text_query: &str,
@@ -951,7 +954,12 @@ impl RedbResolver {
         vector: &[f64],
         k: usize,
         require_all: bool,
+        alpha: Option<f32>,
     ) -> Vec<(u64, f64)> {
+        let alpha = alpha.unwrap_or(0.5);
+        let text_weight = 1.0 - alpha as f64;
+        let vector_weight = alpha as f64;
+
         // BM25 results (over-fetch then fuse)
         let text_results = self.search_text_bm25(
             text_query,
@@ -970,13 +978,13 @@ impl RedbResolver {
             .vector_engine
             .search(&self.db_name, &vec_f32, k * 2);
 
-        // Reciprocal Rank Fusion
+        // Reciprocal Rank Fusion with weighted alpha
         let mut scores: std::collections::HashMap<u64, f64> = std::collections::HashMap::new();
         for (rank, (uid, _)) in text_results.iter().enumerate() {
-            *scores.entry(*uid).or_default() += 1.0 / (60.0 + rank as f64 + 1.0);
+            *scores.entry(*uid).or_default() += text_weight / (60.0 + rank as f64 + 1.0);
         }
         for (rank, (uid, _)) in vec_results.iter().enumerate() {
-            *scores.entry(*uid).or_default() += 1.0 / (60.0 + rank as f64 + 1.0);
+            *scores.entry(*uid).or_default() += vector_weight / (60.0 + rank as f64 + 1.0);
         }
 
         let mut fused: Vec<(u64, f64)> = scores.into_iter().collect();
@@ -1556,6 +1564,7 @@ impl RedbResolver {
                                     None,
                                     None,
                                     child_uniques,
+                                    None,
                                     None,
                                     query_metadata,
                                     None,
@@ -3428,6 +3437,7 @@ impl RedbResolver {
         offset: Option<usize>,
         uniques: &[String],
         near_vector: Option<Vec<f64>>,
+        rrf_alpha: Option<f32>,
         query_metadata: &std::collections::HashMap<
             String,
             crate::engine::resolver::QueryTypeMetadata,
@@ -3501,7 +3511,7 @@ impl RedbResolver {
             let k = first.unwrap_or(50) * 4;
             let search_results =
                 if let Some((field, _strat, query, require_all)) = text_search.clone() {
-                    self.search_hybrid(&query, &field, vec, k, require_all)
+                    self.search_hybrid(&query, &field, vec, k, require_all, rrf_alpha)
                 } else {
                     self.search_vectors(vec, k)
                 };
@@ -3663,6 +3673,7 @@ impl RedbResolver {
         filter: std::collections::HashMap<String, Value>,
         uniques: &[String],
         near_vector: Option<Vec<f64>>,
+        rrf_alpha: Option<f32>,
         query_metadata: &std::collections::HashMap<
             String,
             crate::engine::resolver::QueryTypeMetadata,
@@ -3709,7 +3720,7 @@ impl RedbResolver {
         if let Some(ref vec) = near_vector {
             let search_results =
                 if let Some((field, _strat, query, require_all)) = text_search.clone() {
-                    self.search_hybrid(&query, &field, vec, 10_000, require_all)
+                    self.search_hybrid(&query, &field, vec, 10_000, require_all, rrf_alpha)
                 } else {
                     self.search_vectors(vec, 10_000)
                 };
@@ -3934,8 +3945,15 @@ impl Resolver for RedbResolver {
         }
     }
 
-    fn search_hybrid(&self, text: &str, field: &str, vector: &[f64], k: usize) -> Vec<(u64, f64)> {
-        self.search_hybrid(text, field, vector, k, false)
+    fn search_hybrid(
+        &self,
+        text: &str,
+        field: &str,
+        vector: &[f64],
+        k: usize,
+        alpha: Option<f32>,
+    ) -> Vec<(u64, f64)> {
+        self.search_hybrid(text, field, vector, k, false, alpha)
     }
 
     fn resolve(&self, uid: u64, field_name: &str) -> Option<Value> {
@@ -4030,6 +4048,7 @@ impl Resolver for RedbResolver {
         offset: Option<usize>,
         uniques: &[String],
         near_vector: Option<Vec<f64>>,
+        rrf_alpha: Option<f32>,
         query_metadata: &std::collections::HashMap<
             String,
             crate::engine::resolver::QueryTypeMetadata,
@@ -4044,6 +4063,7 @@ impl Resolver for RedbResolver {
             offset,
             uniques,
             near_vector,
+            rrf_alpha,
             query_metadata,
             None,
         )
@@ -4059,6 +4079,7 @@ impl Resolver for RedbResolver {
         offset: Option<usize>,
         uniques: &[String],
         near_vector: Option<Vec<f64>>,
+        rrf_alpha: Option<f32>,
         query_metadata: &std::collections::HashMap<
             String,
             crate::engine::resolver::QueryTypeMetadata,
@@ -4074,6 +4095,7 @@ impl Resolver for RedbResolver {
             offset,
             uniques,
             near_vector,
+            rrf_alpha,
             query_metadata,
             Some(cache),
         )
@@ -4085,6 +4107,7 @@ impl Resolver for RedbResolver {
         filter: std::collections::HashMap<String, Value>,
         uniques: &[String],
         near_vector: Option<Vec<f64>>,
+        rrf_alpha: Option<f32>,
         query_metadata: &std::collections::HashMap<
             String,
             crate::engine::resolver::QueryTypeMetadata,
@@ -4095,6 +4118,7 @@ impl Resolver for RedbResolver {
             filter,
             uniques,
             near_vector,
+            rrf_alpha,
             query_metadata,
             None,
         )
@@ -4106,6 +4130,7 @@ impl Resolver for RedbResolver {
         filter: std::collections::HashMap<String, Value>,
         uniques: &[String],
         near_vector: Option<Vec<f64>>,
+        rrf_alpha: Option<f32>,
         query_metadata: &std::collections::HashMap<
             String,
             crate::engine::resolver::QueryTypeMetadata,
@@ -4117,6 +4142,7 @@ impl Resolver for RedbResolver {
             filter,
             uniques,
             near_vector,
+            rrf_alpha,
             query_metadata,
             Some(cache),
         )

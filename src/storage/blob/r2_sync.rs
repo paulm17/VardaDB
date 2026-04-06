@@ -86,6 +86,7 @@ impl R2SyncWorker {
                 None,
                 &["id".to_string(), "tusId".to_string()],
                 None,
+                None,
                 &query_metadata,
             );
 

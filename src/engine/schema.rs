@@ -1167,6 +1167,13 @@ impl Schema {
                                         }
                                     }
 
+                                    let mut rrf_alpha: Option<f32> = None;
+                                    if let Ok(alpha_arg) = ctx.args.try_get("hybridAlpha") {
+                                        if let Ok(alpha) = alpha_arg.f64() {
+                                            rrf_alpha = Some(alpha as f32);
+                                        }
+                                    }
+
                                     let uids = match request_cache {
                                         Some(cache) => resolver.scan_nodes_with_cache(
                                             &t_name,
@@ -1177,6 +1184,7 @@ impl Schema {
                                             offset,
                                             &uniques,
                                             near_vector,
+                                            rrf_alpha,
                                             query_metadata.as_ref(),
                                             cache,
                                         ),
@@ -1189,6 +1197,7 @@ impl Schema {
                                             offset,
                                             &uniques,
                                             near_vector,
+                                            rrf_alpha,
                                             query_metadata.as_ref(),
                                         ),
                                     };
@@ -1226,6 +1235,10 @@ impl Schema {
                                 "nearVector",
                                 dynamic::TypeRef::named_list(dynamic::TypeRef::FLOAT),
                             ));
+                            list_field = list_field.argument(dynamic::InputValue::new(
+                                "hybridAlpha",
+                                dynamic::TypeRef::named(dynamic::TypeRef::FLOAT),
+                            ));
                         }
 
                         query_fields.push(list_field);
@@ -1257,6 +1270,7 @@ impl Schema {
                                             filter_map,
                                             &uniques,
                                             None,
+                                            None,
                                             query_metadata.as_ref(),
                                             cache,
                                         ),
@@ -1264,6 +1278,7 @@ impl Schema {
                                             &t_name,
                                             filter_map,
                                             &uniques,
+                                            None,
                                             None,
                                             query_metadata.as_ref(),
                                         ),
@@ -2011,11 +2026,17 @@ impl Schema {
                             .ok()
                             .and_then(|v| v.u64().ok())
                             .unwrap_or(10) as usize;
+                        let rrf_alpha: Option<f32> = ctx
+                            .args
+                            .try_get("alpha")
+                            .ok()
+                            .and_then(|v| v.f64().ok())
+                            .map(|a| a as f32);
 
                         use crate::engine::resolver::Resolver;
                         let resolver = ctx.data::<Box<dyn Resolver + Send + Sync>>().unwrap();
 
-                        let results = resolver.search_hybrid(&text, &field, &vector, k);
+                        let results = resolver.search_hybrid(&text, &field, &vector, k, rrf_alpha);
                         let list: Vec<dynamic::FieldValue> = results
                             .into_iter()
                             .map(|r| dynamic::FieldValue::owned_any(r))
@@ -2040,6 +2061,10 @@ impl Schema {
             .argument(dynamic::InputValue::new(
                 "k",
                 dynamic::TypeRef::named(dynamic::TypeRef::INT),
+            ))
+            .argument(dynamic::InputValue::new(
+                "alpha",
+                dynamic::TypeRef::named(dynamic::TypeRef::FLOAT),
             )),
         );
         // Define AuthZ types

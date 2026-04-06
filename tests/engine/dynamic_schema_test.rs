@@ -44,6 +44,7 @@ impl Resolver for MockDynamicResolver {
         _offset: Option<usize>,
         _: &[String],
         _near_vector: Option<Vec<f64>>,
+        _rrf_alpha: Option<f32>,
         _: &std::collections::HashMap<String, vardadb::engine::resolver::QueryTypeMetadata>,
     ) -> Vec<u64> {
         vec![]
@@ -54,6 +55,7 @@ impl Resolver for MockDynamicResolver {
         _: std::collections::HashMap<String, Value>,
         _: &[String],
         _: Option<Vec<f64>>,
+        _: Option<f32>,
         _: &std::collections::HashMap<String, vardadb::engine::resolver::QueryTypeMetadata>,
     ) -> usize {
         0
@@ -88,7 +90,7 @@ impl Resolver for MockDynamicResolver {
     fn get_node_type(&self, _: u64) -> Option<String> { None }
     fn subscribe_events(&self) -> vardadb::realtime::bus::EventBus { vardadb::realtime::bus::EventBus::new() }
     fn search_vectors(&self, _: &[f64], _: usize) -> Vec<(u64, f64)> { vec![] }
-    fn search_hybrid(&self, _: &str, _: &str, _: &[f64], _: usize) -> Vec<(u64, f64)> { vec![] }
+    fn search_hybrid(&self, _: &str, _: &str, _: &[f64], _: usize, _: Option<f32>) -> Vec<(u64, f64)> { vec![] }
     fn flush(&self) -> Result<(), String> { Ok(()) }
     fn compact(&self) -> Result<u64, String> { Ok(0) }
     fn needs_compaction(&self) -> bool { false }
