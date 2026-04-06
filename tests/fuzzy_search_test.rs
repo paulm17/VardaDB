@@ -97,6 +97,7 @@ fn test_fuzzy_matching_low_level() {
         10,
         false,
         Some(1),
+        None,
     );
     assert_eq!(results.len(), 1, "Fuzzy 'databse' should find 'database'");
     assert_eq!(results[0].0, 1);
@@ -110,19 +111,20 @@ fn test_fuzzy_matching_low_level() {
         10,
         false,
         Some(2),
+        None,
     );
     assert_eq!(results2.len(), 1, "Fuzzy 'databas' should find 'database'");
     assert_eq!(results2[0].0, 1);
 
     // No fuzzy (distance None): exact match only
     let results3 =
-        search.search_bm25("default", "database", "name", "term", 10, false, None);
+        search.search_bm25("default", "database", "name", "term", 10, false, None, None);
     assert_eq!(results3.len(), 1, "Exact 'database' should find 'database'");
     assert_eq!(results3[0].0, 1);
 
     // No fuzzy with typo should not match
     let results4 =
-        search.search_bm25("default", "databse", "name", "term", 10, false, None);
+        search.search_bm25("default", "databse", "name", "term", 10, false, None, None);
     assert_eq!(
         results4.len(),
         0,

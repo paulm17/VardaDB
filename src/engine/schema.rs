@@ -2427,6 +2427,16 @@ impl Schema {
                 dynamic::TypeRef::named(dynamic::TypeRef::INT),
             ));
 
+        let phrase_filter = dynamic::InputObject::new("PhraseFilter")
+            .field(dynamic::InputValue::new(
+                "terms",
+                dynamic::TypeRef::named_nn(dynamic::TypeRef::STRING),
+            ))
+            .field(dynamic::InputValue::new(
+                "slop",
+                dynamic::TypeRef::named(dynamic::TypeRef::INT),
+            ));
+
         let string_filter = dynamic::InputObject::new("StringFilter")
             .field(dynamic::InputValue::new(
                 "eq",
@@ -2455,6 +2465,10 @@ impl Schema {
             .field(dynamic::InputValue::new(
                 "fuzzy",
                 dynamic::TypeRef::named("FuzzyFilter"),
+            ))
+            .field(dynamic::InputValue::new(
+                "phrase",
+                dynamic::TypeRef::named("PhraseFilter"),
             ))
             .field(dynamic::InputValue::new(
                 "lt",
@@ -2620,6 +2634,7 @@ impl Schema {
             ));
 
         schema_builder = schema_builder.register(fuzzy_filter);
+        schema_builder = schema_builder.register(phrase_filter);
         schema_builder = schema_builder.register(string_filter);
         schema_builder = schema_builder.register(int_filter);
         schema_builder = schema_builder.register(float_filter);

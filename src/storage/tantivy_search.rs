@@ -28,7 +28,7 @@ use dashmap::DashMap;
 use parking_lot::Mutex;
 use tantivy::collector::TopDocs;
 use tantivy::directory::MmapDirectory;
-use tantivy::query::{BooleanQuery, FuzzyTermQuery, Occur, Query, TermQuery};
+use tantivy::query::{BooleanQuery, FuzzyTermQuery, Occur, PhraseQuery, Query, TermQuery};
 use tantivy::schema::Value as TantivyValue;
 use tantivy::schema::{
     Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, FAST, INDEXED, STORED, STRING,
@@ -264,6 +264,10 @@ impl SearchEngine {
     /// * `strategy` – `"term"` (no stemming) or `"fulltext"` (Porter).
     /// * `require_all` – `true` for AND semantics, `false` for OR semantics.
     /// * `fuzzy_distance` – Optional Levenshtein distance (0-2) for fuzzy matching.
+    /// * `phrase_slop` – Optional slop for phrase queries (only used when query is quoted).
+    ///
+    /// If `query_text` is wrapped in double quotes, it is treated as a phrase query
+    /// where terms must appear in exact order (with optional slop for proximity).
     ///
     /// Returns `(uid, bm25_score)` pairs sorted by descending relevance.
     pub fn search_bm25(
@@ -275,6 +279,7 @@ impl SearchEngine {
         k: usize,
         require_all: bool,
         fuzzy_distance: Option<u8>,
+        phrase_slop: Option<u32>,
     ) -> Vec<(u64, f64)> {
         let idx = match self.get_or_create(db_name) {
             Ok(i) => i,
@@ -308,71 +313,73 @@ impl SearchEngine {
             (idx.term_content_field, "term_tokenizer")
         };
 
-        let terms = self.tokenize_with(&idx, tokenizer_name, query_text, content_field);
-        if terms.is_empty() {
-            return vec![];
-        }
-
-        // Field-name filter: results must come from the specific indexed field.
-        // Without this a book with "Rust" in its description would match a
-        // query that targets only the title field.
         let field_filter_term = Term::from_field_text(idx.field_name_field, _field);
         let field_filter: (Occur, Box<dyn Query>) = (
             Occur::Must,
             Box::new(TermQuery::new(field_filter_term, IndexRecordOption::Basic)),
         );
 
-        // Build the content sub-query.
-        //
-        // IMPORTANT: in Tantivy's BooleanQuery, when MUST clauses are present
-        // SHOULD clauses become optional (they only boost the score).  To
-        // enforce "at least one term must match" for OR semantics we wrap the
-        // term queries in a nested BooleanQuery that has NO outer MUST, then
-        // promote that nested query as a second MUST clause.
-        //
-        // For fuzzy queries, we use FuzzyTermQuery which matches terms within
-        // a Levenshtein distance.
-        let content_query: Box<dyn Query> = if require_all {
-            // AND — every term is individually required.
-            let clauses: Vec<(Occur, Box<dyn Query>)> = terms
-                .into_iter()
-                .map(|t| {
-                    if let Some(distance) = fuzzy_distance {
-                        (
-                            Occur::Must,
-                            Box::new(FuzzyTermQuery::new(t, distance, true)) as Box<dyn Query>,
-                        )
-                    } else {
-                        (
-                            Occur::Must,
-                            Box::new(TermQuery::new(t, IndexRecordOption::WithFreqs))
-                                as Box<dyn Query>,
-                        )
-                    }
-                })
-                .collect();
-            Box::new(BooleanQuery::new(clauses))
+        let is_phrase =
+            query_text.starts_with('"') && query_text.ends_with('"') && query_text.len() > 2;
+
+        let content_query: Box<dyn Query> = if is_phrase {
+            let phrase_text = &query_text[1..query_text.len() - 1];
+            let phrase_terms = self.tokenize_with(&idx, tokenizer_name, phrase_text, content_field);
+            if phrase_terms.is_empty() {
+                return vec![];
+            }
+            let mut phrase_query = PhraseQuery::new(phrase_terms);
+            if let Some(slop) = phrase_slop {
+                phrase_query.set_slop(slop);
+            }
+            Box::new(phrase_query)
         } else {
-            // OR — at least one term must match.  A BooleanQuery with only
-            // SHOULD clauses requires at least one to match.
-            let clauses: Vec<(Occur, Box<dyn Query>)> = terms
-                .into_iter()
-                .map(|t| {
-                    if let Some(distance) = fuzzy_distance {
-                        (
-                            Occur::Should,
-                            Box::new(FuzzyTermQuery::new(t, distance, true)) as Box<dyn Query>,
-                        )
-                    } else {
-                        (
-                            Occur::Should,
-                            Box::new(TermQuery::new(t, IndexRecordOption::WithFreqs))
-                                as Box<dyn Query>,
-                        )
-                    }
-                })
-                .collect();
-            Box::new(BooleanQuery::new(clauses))
+            let terms = self.tokenize_with(&idx, tokenizer_name, query_text, content_field);
+            if terms.is_empty() {
+                return vec![];
+            }
+            if require_all {
+                // AND — every term is individually required.
+                let clauses: Vec<(Occur, Box<dyn Query>)> = terms
+                    .into_iter()
+                    .map(|t| {
+                        if let Some(distance) = fuzzy_distance {
+                            (
+                                Occur::Must,
+                                Box::new(FuzzyTermQuery::new(t, distance, true)) as Box<dyn Query>,
+                            )
+                        } else {
+                            (
+                                Occur::Must,
+                                Box::new(TermQuery::new(t, IndexRecordOption::WithFreqs))
+                                    as Box<dyn Query>,
+                            )
+                        }
+                    })
+                    .collect();
+                Box::new(BooleanQuery::new(clauses))
+            } else {
+                // OR — at least one term must match.  A BooleanQuery with only
+                // SHOULD clauses requires at least one to match.
+                let clauses: Vec<(Occur, Box<dyn Query>)> = terms
+                    .into_iter()
+                    .map(|t| {
+                        if let Some(distance) = fuzzy_distance {
+                            (
+                                Occur::Should,
+                                Box::new(FuzzyTermQuery::new(t, distance, true)) as Box<dyn Query>,
+                            )
+                        } else {
+                            (
+                                Occur::Should,
+                                Box::new(TermQuery::new(t, IndexRecordOption::WithFreqs))
+                                    as Box<dyn Query>,
+                            )
+                        }
+                    })
+                    .collect();
+                Box::new(BooleanQuery::new(clauses))
+            }
         };
 
         let query = BooleanQuery::new(vec![field_filter, (Occur::Must, content_query)]);

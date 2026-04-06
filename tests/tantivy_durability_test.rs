@@ -16,7 +16,7 @@ async fn test_index_document_commits_immediately() {
 
     let search2 = SearchEngine::new(&path).unwrap();
 
-    let results = search2.search_bm25("default", "test", "content", "term", 10, false, None);
+    let results = search2.search_bm25("default", "test", "content", "term", 10, false, None, None);
     assert_eq!(results.len(), 1, "Document should survive crash (was committed)");
     assert_eq!(results[0].0, 1);
 }
@@ -38,7 +38,7 @@ async fn test_remove_document_commits_immediately() {
 
     let search2 = SearchEngine::new(&path).unwrap();
 
-    let results = search2.search_bm25("default", "test", "content", "term", 10, false, None);
+    let results = search2.search_bm25("default", "test", "content", "term", 10, false, None, None);
     assert_eq!(results.len(), 0, "Document should be deleted (was committed)");
 }
 
@@ -57,7 +57,7 @@ async fn test_update_survives_crash() {
 
     let search2 = SearchEngine::new(&path).unwrap();
 
-    let results = search2.search_bm25("default", "original", "content", "term", 10, false, None);
+    let results = search2.search_bm25("default", "original", "content", "term", 10, false, None, None);
     assert_eq!(results.len(), 1);
 
     search2.remove_document("default", 1, "content").unwrap();
@@ -69,10 +69,10 @@ async fn test_update_survives_crash() {
 
     let search3 = SearchEngine::new(&path).unwrap();
 
-    let results_original = search3.search_bm25("default", "original", "content", "term", 10, false, None);
+    let results_original = search3.search_bm25("default", "original", "content", "term", 10, false, None, None);
     assert_eq!(results_original.len(), 0, "Original content should be gone");
 
-    let results_updated = search3.search_bm25("default", "updated", "content", "term", 10, false, None);
+    let results_updated = search3.search_bm25("default", "updated", "content", "term", 10, false, None, None);
     assert_eq!(
         results_updated.len(),
         1,
