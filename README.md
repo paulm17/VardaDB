@@ -14,7 +14,7 @@ Designed for local-first applications, edge computing, and high-throughput local
 *   **Advanced Scalar System**: Full parity with standard GraphQL scalars (Date, Time, Email, Url, etc).
 *   **Geospatial Support**: Native `GeoPoint`, `Polygon`, and `MultiPolygon` with spatial filtering (`gl_distance`).
 *   **Full-Text Search**: Built-in term indexing and search capabilities.
-*   **SQLite KV Storage**: High-performance, embedded storage via **rusqlite** with WAL mode for instant recovery.
+*   **ReDB KV Storage**: High-performance, embedded ACID database via **redb** with instant recovery and lock-free reads.
 *   **Query Caching**: Integrated LRU cache for high-speed read comparisons.
 *   **Native MLX-RS Inference**: Built-in local LLM support via **MLX-RS**, the Rust counterpart to Python's `mlx-lm`.
 *   **MCP Server Mode**: Stdio-based Model Context Protocol server for AI tool integration.
@@ -67,13 +67,13 @@ VardaDB can be embedded directly into your Rust applications, bypassing the netw
 ```rust
 use std::sync::Arc;
 use vardadb::storage::backend::Storage;
-use vardadb::bridge::sqlite_resolver::SqliteResolver;
+use vardadb::bridge::redb_resolver::RedbResolver;
 use vardadb::engine::schema::Schema;
 use async_graphql::Request;
 
 let storage = Arc::new(Storage::new("my_db_path").unwrap());
-// SqliteResolver is currently maintained for API compatibility but interfaces with SQLite
-let resolver = SqliteResolver::new(storage.clone());
+// RedbResolver is currently maintained for API compatibility but interfaces with redb
+let resolver = RedbResolver::new(storage.clone());
 let schema = Schema::load_with_resolver("type User {name: String}", resolver).unwrap();
 
 // Execute directly!
@@ -157,14 +157,56 @@ VardaDB supports a rich type system including:
 *   **JSON**: `CustomJson` (Any JSON), `CustomJsonObject`.
 *   **Colors**: `HexColorCode`, `RGB`, `RGBA`, `HSL`, `HSLA`.
 
-### 2. Storage (SQLite)
-VardaDB uses **SQLite** (via `rusqlite`) configured as a high-performance Key-Value store.
-*   **Instant Recovery**: Thanks to WAL mode, startup is near-instant, avoiding the recovery delays typical of LSM-tree engines.
-*   **Durability**: Data is persisted to disk (`varda_db_data/`) with atomic checkpoints.
-*   **Resolution**: The `SqliteResolver` (bridging GraphQL to KV storage) now translates graph traversals into efficient B-Tree lookups.
-*   **Multi-Database**: VardaDB supports multiple independent databases, each stored in its own SQLite file.
+### 2. Storage (ReDB)
+
+VardaDB uses **ReDB** — a pure-Rust, ACID-compliant key-value store designed for high performance and instant recovery.
+
+#### Key Features
+
+*   **Instant Recovery**: ReDB's architecture eliminates recovery delays. Unlike LSM-tree or WAL-based engines, startup is near-instant as there's no log replay or compaction to run.
+*   **ACID Transactions**: Full transactional support with `begin_read()` and `begin_write()` guarantees. All mutations are durable, atomic, and isolated.
+*   **Pure Rust**: Zero external dependencies (no C bindings, no system libraries). ReDB is 100% safe Rust, making it perfect for embedded, edge, and sandboxed environments.
+*   **B-Tree Storage**: Data is stored in B-trees, providing O(log N) lookups and predictable, consistent performance even as datasets grow.
+*   **Lock-Free Reads**: Read operations use structural sharing and versioning — no locks, no blocking, enabling high concurrency for query-heavy workloads.
+*   **Durability**: Data is persisted to disk (`varda_db_data/`) with transactional commits. On crash, only the last committed transaction is visible.
+*   **Resolution**: The `RedbResolver` (bridging GraphQL to KV storage) translates graph traversals into efficient B-Tree lookups.
+*   **Multi-Database**: VardaDB supports multiple independent databases, each stored in its own `.redb` file.
     *   **Header-based Routing**: Use the `x-varda-db` (or `db`, `ns`) header to route GraphQL requests to specific databases.
     *   **Dynamic Loading**: Databases and their schemas are loaded lazily on the first request.
+
+#### Architecture Overview
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                        GraphQL Request                       │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│                   RedbResolver (Bridge Layer)                │
+│  • Parses GraphQL queries                                    │
+│  • Resolves predicates and filters                          │
+│  • Translates graph traversals to KV lookups                │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│                     Storage Layer                            │
+│  ┌─────────────────────────────────────────────────────────┐│
+│  │           ReDB Backend (Pure Rust ACID)                  ││
+│  │  • B-Tree Tables: O(log N) lookups                      ││
+│  │  • Lock-free reads via structural sharing               ││
+│  │  • Transactional writes with full ACID guarantees        ││
+│  │  • Instant recovery (no log replay)                     ││
+│  └─────────────────────────────────────────────────────────┘│
+│  ┌─────────────────────────────────────────────────────────┐│
+│  │             Additional Indexes                            ││
+│  │  • Type Index: Fast type → UID lookups                  ││
+│  │  • Order Index: Sorted field queries (ASC/DESC)         ││
+│  │  • Edge Index: Reverse relationship traversal           ││
+│  └─────────────────────────────────────────────────────────┘│
+└─────────────────────────────────────────────────────────────┘
+```
 
 ### 3. Geo Support
 Built-in geospatial capabilities allow you to build location-aware apps.
@@ -186,7 +228,7 @@ VardaDB supports realtime capability groundwork through its event bus system (`s
 
 ### 6. Conflict Resolution (Last-Write-Wins)
 VardaDB implements a robust **Last-Write-Wins (LWW)** consistency model, inspired by **Evolu**, to handle distributed data synchronization and conflicts.
-*   **Atomic Upsert**: Leveraging SQLite's `ON CONFLICT` and `UPSERT` capabilities, LWW comparisons are performed atomically at the database level.
+*   **Atomic Transactions**: ReDB provides full ACID guarantees. Each write operation is wrapped in a transaction, ensuring atomicity and durability.
 *   **Timestamp-Based**: Every storage operation (Put/Delete) is associated with a 16-byte HLC timestamp.
 *   **Idempotency**: "Stale" writes (writes with an older timestamp than what is currently stored) are safely ignored without error.
 *   **Convergence**: This ensures that all replicas eventually converge to the same state, provided they receive the same set of updates, regardless of order.
@@ -273,8 +315,9 @@ SMTP configuration remains available in `config.toml`, but asynchronous email de
 *   **Operational implication**: Magic links and password reset codes are generated, then logged as unsent.
 *   **Next step**: Reintroduce delivery only through the new runtime boundary, not via the removed legacy queue.
 
-### 4. Persistent Storage (SQLite)
-All identity data, including user records, session tokens, and confirmation flows, is stored in native SQLite tables.
+### 4. Persistent Storage (ReDB)
+
+All identity data, including user records, session tokens, and confirmation flows, is stored in native ReDB tables.
 *   **User Management**: Secure password hashing with Argon2.
 *   **Automatic Pruning**: A recurring background task automatically prunes expired tokens and confirmations.
 
@@ -321,7 +364,7 @@ query {
 ### 4. High-Performance Evaluation
 *   **Recursive Evaluation**: Handles complex nested relationships and userset rewrites with cycle detection.
 *   **Attribute Support**: Dynamic rules using entity attributes (e.g., `status == 'published'`).
-*   **SQLite Backend**: Authorization tuples and attributes are stored in high-performance SQLite tables (`auth_tuples`, `auth_attributes`).
+*   **ReDB Backend**: Authorization tuples and attributes are stored in high-performance ReDB tables (`auth_tuples`, `auth_attributes`).
 
 ---
 
@@ -453,8 +496,8 @@ cargo run -- start
 ## 📁 Project Structure
 
 *   `src/engine`: Core GraphQL logic (Schema, Scalars, Planner).
-*   `src/storage`: Backend storage interfaces (SQLite, LWW Logic).
-*   `src/bridge`: Connectors (SqliteResolver currently maintained for API compatibility) and LWW application.
+*   `src/storage`: Backend storage interfaces (ReDB, LWW Logic).
+*   `src/bridge`: Connectors (RedbResolver currently maintained for API compatibility) and LWW application.
 *   `src/sync`: Zenoh-based replication and schema synchronization.
 *   `auth/`: Standalone identity and authentication crate.
 *   `permissions/`: Zanzibar-style ReBAC authorization engine.

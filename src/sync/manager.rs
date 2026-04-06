@@ -1,4 +1,4 @@
-use crate::bridge::sqlite_resolver::SqliteResolver;
+use crate::bridge::redb_resolver::RedbResolver;
 use crate::config::ZenohConfig;
 use crate::engine::resolver::Resolver;
 use crate::sync::network_layer::NetworkLayer;
@@ -10,7 +10,7 @@ use zenoh::config::Config;
 
 pub struct SyncManager {
     network: Arc<NetworkLayer>,
-    resolver: Arc<SqliteResolver>,
+    resolver: Arc<RedbResolver>,
     prefix: String,
     schema: Arc<RwLock<Arc<crate::engine::schema::Schema>>>,
     cache: Arc<crate::engine::cache::QueryCache>,
@@ -19,7 +19,7 @@ pub struct SyncManager {
 
 impl SyncManager {
     pub async fn new(
-        resolver: Arc<SqliteResolver>,
+        resolver: Arc<RedbResolver>,
         config: ZenohConfig,
         remote_append_path: Option<String>,
         schema: Arc<RwLock<Arc<crate::engine::schema::Schema>>>,

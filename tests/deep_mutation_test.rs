@@ -2,7 +2,7 @@
 async fn test_deep_mutation() {
     // 1. Setup Engine with Mock Resolver
     // We need a Resolver that stores data.
-    // Ideally use SqliteResolver if available, or MockResolver if it supports updates.
+    // Ideally use RedbResolver if available, or MockResolver if it supports updates.
     // The previous mocks (mock.rs) were static.
     // We should use `src/engine/mock.rs` if it has state, or define a simple HashMap resolver here.
 

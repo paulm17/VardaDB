@@ -9,13 +9,13 @@ use std::sync::Arc;
 use crate::realtime::bus::{EventBus, MutationEvent, MutationType};
 
 #[derive(Clone)]
-pub struct SqliteResolver {
+pub struct RedbResolver {
     pub storage: Arc<Storage>,
     pub bus: EventBus,
     pub db_name: String,
 }
 
-impl SqliteResolver {
+impl RedbResolver {
     fn preload_objects_for_uids(&self, uids: &[u64], cache: &RequestCache) {
         if uids.len() < 8 {
             return;
@@ -475,7 +475,7 @@ impl SqliteResolver {
         }
     }
 
-    /// Create a SqliteResolver with a shared EventBus.
+    /// Create a RedbResolver with a shared EventBus.
     /// Use this to ensure all resolver instances publish to the same bus.
     pub fn with_bus(storage: Arc<Storage>, bus: EventBus) -> Self {
         Self {
@@ -2847,7 +2847,7 @@ impl SqliteResolver {
     }
 }
 
-impl SqliteResolver {
+impl RedbResolver {
     fn resolve_list_internal(
         &self,
         parent_uid: u64,
@@ -3359,7 +3359,7 @@ impl SqliteResolver {
     }
 }
 
-impl Resolver for SqliteResolver {
+impl Resolver for RedbResolver {
     fn bulk_check_permission(
         &self,
         ctx: &async_graphql::dynamic::ResolverContext<'_>,

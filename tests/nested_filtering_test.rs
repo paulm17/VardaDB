@@ -1,7 +1,7 @@
 use serde_json::Value;
 use std::sync::Arc;
 use tempfile::tempdir;
-use vardadb::bridge::sqlite_resolver::SqliteResolver;
+use vardadb::bridge::redb_resolver::RedbResolver;
 use vardadb::engine::schema::Schema;
 use vardadb::storage::backend::Storage;
 
@@ -22,7 +22,7 @@ async fn test_nested_filtering() {
         }
     ";
     let schema = Schema::load_from_sdl(sdl).expect("Failed to load schema");
-    let resolver = Box::new(SqliteResolver::new(storage.clone(), "default"));
+    let resolver = Box::new(RedbResolver::new(storage.clone(), "default"));
 
     // 2. Create Users and Posts
     // Create Posts first

@@ -18,7 +18,7 @@ use std::sync::Arc;
 use tempfile::TempDir;
 
 use async_graphql::Value as GqlValue;
-use vardadb::bridge::sqlite_resolver::SqliteResolver;
+use vardadb::bridge::redb_resolver::RedbResolver;
 use vardadb::engine::resolver::Resolver;
 use vardadb::storage::backend::Storage;
 
@@ -36,7 +36,7 @@ fn unit_vec_f64(dim: usize, size: usize) -> Vec<f64> {
 async fn test_hybrid_search() {
     let temp_dir = TempDir::new().unwrap();
     let storage = Arc::new(Storage::new(temp_dir.path(), None).unwrap());
-    let resolver = SqliteResolver::new(storage.clone(), "default");
+    let resolver = RedbResolver::new(storage.clone(), "default");
 
     let dims = 64usize;
     let mut search_fields = HashMap::new();

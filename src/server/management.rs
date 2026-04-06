@@ -1,4 +1,4 @@
-use crate::bridge::sqlite_resolver::SqliteResolver;
+use crate::bridge::redb_resolver::RedbResolver;
 use crate::realtime::bus::EventBus;
 use crate::storage::backend::Storage;
 use async_trait::async_trait;
@@ -23,7 +23,7 @@ impl DatabaseManager for ManagementState {
                 let schema_body = crate::defaults::AGENT_SCHEMA;
                 println!("Injecting Agent Schema into database: {}", name);
 
-                let resolver = SqliteResolver::with_db(
+                let resolver = RedbResolver::with_db(
                     self.storage.clone(),
                     self.event_bus.clone(),
                     name.to_string(),
@@ -112,7 +112,7 @@ impl DatabaseManager for ManagementState {
             return Err(format!("Database '{}' not found", db_name));
         }
 
-        let resolver = SqliteResolver::with_db(
+        let resolver = RedbResolver::with_db(
             self.storage.clone(),
             self.event_bus.clone(),
             db_name.to_string(),

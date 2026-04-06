@@ -1,7 +1,7 @@
 use serde_json::Value as JsonValue;
 use std::sync::Arc;
 use tempfile::TempDir;
-use vardadb::bridge::sqlite_resolver::SqliteResolver;
+use vardadb::bridge::redb_resolver::RedbResolver;
 use vardadb::engine::schema::Schema;
 use vardadb::storage::backend::Storage;
 
@@ -14,7 +14,7 @@ use vardadb::storage::backend::Storage;
 async fn test_multi_vector_satellite_pattern() {
     let temp_dir = TempDir::new().unwrap();
     let storage = Arc::new(Storage::new(temp_dir.path(), None).unwrap());
-    let resolver = Box::new(SqliteResolver::new(storage.clone(), "default"));
+    let resolver = Box::new(RedbResolver::new(storage.clone(), "default"));
 
     let sdl = r#"
         type Document {

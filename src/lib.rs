@@ -148,7 +148,7 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 use tower_http::cors::{Any, CorsLayer};
 
-use crate::bridge::sqlite_resolver::SqliteResolver;
+use crate::bridge::redb_resolver::RedbResolver;
 use crate::realtime::bus::EventBus;
 use metrics::{counter, histogram};
 use tokio::sync::RwLock;
@@ -233,7 +233,7 @@ pub async fn init_system(config: crate::config::VardaConfig) -> (Arc<ServerState
     // Create a shared EventBus that will be used by all resolvers
     let shared_event_bus = EventBus::new();
 
-    let resolver = SqliteResolver::with_bus(storage.clone(), shared_event_bus.clone());
+    let resolver = RedbResolver::with_bus(storage.clone(), shared_event_bus.clone());
 
     let initial_schema = crate::engine::schema::Schema::load_with_resolver(&sdl, resolver.clone())
         .or_else(|e| {
@@ -243,7 +243,7 @@ pub async fn init_system(config: crate::config::VardaConfig) -> (Arc<ServerState
             );
             let default_sdl = "type Health { status: String }";
             let blank_resolver =
-                SqliteResolver::with_bus(storage.clone(), shared_event_bus.clone());
+                RedbResolver::with_bus(storage.clone(), shared_event_bus.clone());
             crate::engine::schema::Schema::load_with_resolver(default_sdl, blank_resolver)
         })
         .expect("Failed to build schema");
@@ -518,7 +518,7 @@ pub async fn run(config: crate::config::VardaConfig) {
             .clone();
 
         // We need a resolver. We can create a new one since it's cheap (just Arc clones internally)
-        let mcp_resolver = Box::new(SqliteResolver::with_bus(
+        let mcp_resolver = Box::new(RedbResolver::with_bus(
             state.storage.clone(),
             state.event_bus.clone(),
         ));
@@ -588,7 +588,7 @@ async fn graphql_handler(
         // Check if DB exists in Storage
         if state.storage.get_database(&db_name).is_some() {
             println!("Lazy loading schema for database: {}", db_name);
-            let resolver = SqliteResolver::new(state.storage.clone(), &db_name);
+            let resolver = RedbResolver::new(state.storage.clone(), &db_name);
 
             let db_schema_path = state
                 .storage_path
@@ -669,7 +669,7 @@ async fn admin_schema_handler(
 ) -> impl IntoResponse {
     println!("Received new schema update...");
     // CRITICAL: Use shared EventBus to ensure SyncManager and subscriptions use the same bus
-    let resolver = SqliteResolver::with_bus(state.storage.clone(), state.event_bus.clone());
+    let resolver = RedbResolver::with_bus(state.storage.clone(), state.event_bus.clone());
 
     match crate::engine::schema::Schema::load_with_resolver(&body, resolver) {
         Ok(new_schema) => {
@@ -836,7 +836,7 @@ async fn subscription_handler(
                 // Re-using lazy load logic properly:
                 if state.storage.get_database(&selected_db).is_some() {
                     println!("Lazy loading schema for database (WS): {}", selected_db);
-                    let resolver = SqliteResolver::new(state.storage.clone(), &selected_db);
+                    let resolver = RedbResolver::new(state.storage.clone(), &selected_db);
                     let db_schema_path = state
                         .storage_path
                         .join(format!("{}_schema.graphql", selected_db));

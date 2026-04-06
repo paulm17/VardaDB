@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use tempfile::TempDir;
-use vardadb::bridge::sqlite_resolver::SqliteResolver;
+use vardadb::bridge::redb_resolver::RedbResolver;
 use vardadb::engine::schema::Schema;
 use vardadb::storage::backend::Storage;
 
@@ -27,7 +27,7 @@ async fn test_vector_api_search() {
     storage.vector_engine.add_vector("default", 102, &v3).unwrap();
 
     // Minimal schema — we just need the `search` root query to be available.
-    let resolver = SqliteResolver::new(storage.clone(), "default");
+    let resolver = RedbResolver::new(storage.clone(), "default");
     let sdl = "type User { name: String }";
     let schema = Schema::load_with_resolver(sdl, resolver.clone()).unwrap();
 
@@ -39,7 +39,7 @@ async fn test_vector_api_search() {
     );
 
     let resp = schema
-        .execute_with_resolver(&query_str, Box::new(SqliteResolver::new(storage.clone(), "default")))
+        .execute_with_resolver(&query_str, Box::new(RedbResolver::new(storage.clone(), "default")))
         .await;
     eprintln!("search response: {}", resp);
 

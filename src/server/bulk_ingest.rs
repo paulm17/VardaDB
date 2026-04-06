@@ -1,4 +1,4 @@
-use crate::bridge::sqlite_resolver::SqliteResolver;
+use crate::bridge::redb_resolver::RedbResolver;
 use crate::ServerState;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -81,7 +81,7 @@ pub async fn start_tcp_listener(state: Arc<ServerState>, port: u16) {
                     };
 
                     // Create resolver targeting the correct database
-                    let resolver = SqliteResolver::with_db(
+                    let resolver = RedbResolver::with_db(
                         state_clone.storage.clone(),
                         state_clone.event_bus.clone(),
                         db_name.clone(),

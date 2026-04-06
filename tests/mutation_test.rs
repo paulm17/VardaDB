@@ -1,7 +1,7 @@
 use serde_json::Value;
 use std::sync::Arc;
 use tempfile::tempdir;
-use vardadb::bridge::sqlite_resolver::SqliteResolver;
+use vardadb::bridge::redb_resolver::RedbResolver;
 use vardadb::engine::schema::Schema;
 use vardadb::storage::backend::Storage;
 
@@ -20,7 +20,7 @@ async fn test_mutation_flow() {
     let schema = Schema::load_from_sdl(sdl).expect("Failed to load schema");
 
     // 2. Create Resolver
-    let resolver = Box::new(SqliteResolver::new(storage.clone(), "default"));
+    let resolver = Box::new(RedbResolver::new(storage.clone(), "default"));
 
     // 3. Execute Mutation: createUser
     let mutation = "
@@ -53,8 +53,8 @@ async fn test_mutation_flow() {
     assert_eq!(user["name"], "Bob");
     assert_eq!(user["age"], 42); // 42 is returned as JSON Number, not String "42"
                                  // Wait, Dgraph returns JSON numbers. Serde parses as Number.
-                                 // But my SqliteResolver currently only handles String storage!
-                                 // src/bridge/sqlite_resolver.rs line 24: assumes String::from_utf8.
+                                 // But my RedbResolver currently only handles String storage!
+                                 // src/bridge/redb_resolver.rs line 24: assumes String::from_utf8.
                                  // If I inserted "42" as string (from JSON input), it comes back as string.
                                  // My input logic in schema.rs: fields.insert(k, v.clone()).
                                  // v is async_graphql::Value.
@@ -62,5 +62,5 @@ async fn test_mutation_flow() {
                                  // if let Value::String(s) = value { ... }
                                  // If age is Int, Value is Number.
                                  // My implementation SKIPS non-String values!
-                                 // I need to update SqliteResolver to handle Number/Int.
+                                 // I need to update RedbResolver to handle Number/Int.
 }

@@ -1,6 +1,6 @@
 use async_graphql::Request;
 use std::sync::Arc;
-use vardadb::bridge::sqlite_resolver::SqliteResolver;
+use vardadb::bridge::redb_resolver::RedbResolver;
 use vardadb::engine::schema::Schema;
 use vardadb::storage::backend::Storage;
 
@@ -29,8 +29,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Schema defined: \n{}", sdl);
 
     // 3. Initialize Engine (Resolver + Schema)
-    // We connect the storage backend to the engine via the SqliteResolver.
-    let resolver = SqliteResolver::new(storage.clone(), "default");
+    // We connect the storage backend to the engine via the RedbResolver.
+    let resolver = RedbResolver::new(storage.clone(), "default");
     let schema = Schema::load_with_resolver(sdl, resolver)?;
     let schema_arc = Arc::new(schema);
 

@@ -1,7 +1,7 @@
 use async_graphql::Request;
 use serde_json::Value;
 use std::sync::Arc;
-use vardadb::bridge::sqlite_resolver::SqliteResolver;
+use vardadb::bridge::redb_resolver::RedbResolver;
 use vardadb::storage::backend::Storage;
 
 #[tokio::test(flavor = "multi_thread")]
@@ -21,7 +21,7 @@ async fn test_geo_support() {
     // Setup Resolver
     let tmp_dir = tempfile::tempdir().unwrap();
     let storage = Arc::new(Storage::new(tmp_dir.path(), None).unwrap());
-    let resolver = SqliteResolver::new(storage.clone(), "default");
+    let resolver = RedbResolver::new(storage.clone(), "default");
     let boxed_resolver: Box<dyn vardadb::engine::resolver::Resolver + Send + Sync> =
         Box::new(resolver.clone());
 
@@ -55,8 +55,8 @@ async fn test_geo_support() {
     // For query, we need a new resolver instance or share the storage?
     // Storage is Arc, so we can reuse or recreate.
     // The previous resolver was consumed by box? Box<T> owns T.
-    // We need another one for the query or clone it (SqliteResolver is Clone).
-    let resolver_query = SqliteResolver::new(storage, "default");
+    // We need another one for the query or clone it (RedbResolver is Clone).
+    let resolver_query = RedbResolver::new(storage, "default");
     let boxed_resolver_query: Box<dyn vardadb::engine::resolver::Resolver + Send + Sync> =
         Box::new(resolver_query);
 

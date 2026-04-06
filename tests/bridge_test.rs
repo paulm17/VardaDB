@@ -1,7 +1,7 @@
 use async_graphql::Value;
 use std::sync::Arc;
 use tempfile::tempdir;
-use vardadb::bridge::sqlite_resolver::SqliteResolver;
+use vardadb::bridge::redb_resolver::RedbResolver;
 use vardadb::engine::resolver::Resolver;
 use vardadb::storage::backend::Storage;
 use vardadb::storage::codec::Codec;
@@ -29,7 +29,7 @@ fn test_bridge_resolution() {
     storage.insert("default", &index_key, &uid_bytes).unwrap();
 
     // 2. Initialize Resolver
-    let resolver = SqliteResolver::new(storage.clone(), "default");
+    let resolver = RedbResolver::new(storage.clone(), "default");
 
     // 3. Test find_uid (Index Scan)
     let found_uid = resolver.find_uid("name", "Alice");

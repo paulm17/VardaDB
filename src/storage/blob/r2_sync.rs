@@ -59,7 +59,7 @@ impl R2SyncWorker {
             // Wait first, to not immediately spin on startup
             sleep(Duration::from_secs(60)).await;
 
-            let resolver = crate::bridge::sqlite_resolver::SqliteResolver::with_bus(
+            let resolver = crate::bridge::redb_resolver::RedbResolver::with_bus(
                 self.state.storage.clone(),
                 self.state.event_bus.clone(),
             );

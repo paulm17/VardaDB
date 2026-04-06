@@ -655,7 +655,7 @@ pub trait PlannerRuntime:
 
 The intended implementation strategy is:
 
-- `SqliteResolver` or a planner-specific wrapper around it implements the adapter traits
+- `RedbResolver` or a planner-specific wrapper around it implements the adapter traits
 - the trait objects are runtime-safe and shared, so the composite runtime must be `Send + Sync`
 - individual trait definitions do not need explicit `Send + Sync` bounds because the composed `PlannerRuntime` already enforces them
 - internal locking, pooling, or connection management remains an implementation detail of the adapter implementation

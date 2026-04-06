@@ -1,7 +1,7 @@
 use async_graphql::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
-use vardadb::bridge::sqlite_resolver::SqliteResolver;
+use vardadb::bridge::redb_resolver::RedbResolver;
 use vardadb::engine::resolver::{Resolver, VectorConfig};
 use vardadb::storage::backend::Storage;
 
@@ -11,7 +11,7 @@ use vardadb::storage::backend::Storage;
 async fn test_manual_vector_indexing() -> anyhow::Result<()> {
     let path = tempfile::tempdir()?;
     let storage = Arc::new(Storage::new(path.path(), Some(1))?);
-    let resolver = SqliteResolver::new(storage.clone(), "default");
+    let resolver = RedbResolver::new(storage.clone(), "default");
 
     let vector_config = VectorConfig {
         field: "embedding".to_string(),

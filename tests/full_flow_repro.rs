@@ -3,7 +3,7 @@ use management::DatabaseManager;
 use std::sync::Arc;
 use tempfile::tempdir;
 use tokio::sync::RwLock;
-use vardadb::bridge::sqlite_resolver::SqliteResolver;
+use vardadb::bridge::redb_resolver::RedbResolver;
 use vardadb::engine::schema::Schema;
 use vardadb::realtime::bus::EventBus;
 use vardadb::server::management::ManagementState;
@@ -96,7 +96,7 @@ async fn test_full_server_flow_repro() {
 
         // Lazy Load Logic from lib.rs (simplified)
         // 1. Resolve Resolver
-        let resolver = SqliteResolver::new(storage.clone(), db_name);
+        let resolver = RedbResolver::new(storage.clone(), db_name);
 
         // 2. Load Schema File (using fixed path logic)
         let schema_file_path = db_path.join(format!("{}_schema.graphql", db_name));

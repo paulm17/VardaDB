@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use tempfile::TempDir;
 
-use vardadb::bridge::sqlite_resolver::SqliteResolver;
+use vardadb::bridge::redb_resolver::RedbResolver;
 use vardadb::engine::schema::Schema;
 use vardadb::realtime::bus::EventBus;
 use vardadb::storage::backend::Storage;
@@ -22,7 +22,7 @@ use crate::{TestResult, TestRunner};
 pub struct TestHarness {
     pub storage: Arc<Storage>,
     pub schema: Schema,
-    pub resolver: SqliteResolver,
+    pub resolver: RedbResolver,
     pub event_bus: EventBus,
     _temp_dir: TempDir, // Kept alive to prevent cleanup
 }
@@ -36,7 +36,7 @@ impl TestHarness {
         );
 
         let event_bus = EventBus::new();
-        let resolver = SqliteResolver::with_bus(storage.clone(), event_bus.clone());
+        let resolver = RedbResolver::with_bus(storage.clone(), event_bus.clone());
         let schema = Schema::load_with_resolver(sdl, resolver.clone())?;
 
         Ok(Self {

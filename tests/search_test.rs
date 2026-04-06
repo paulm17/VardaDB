@@ -1,4 +1,4 @@
-use vardadb::bridge::sqlite_resolver::SqliteResolver;
+use vardadb::bridge::redb_resolver::RedbResolver;
 use vardadb::engine::schema::Schema;
 use vardadb::realtime::bus::EventBus;
 use vardadb::storage::backend::Storage;
@@ -12,7 +12,7 @@ async fn test_search_flow() {
         Storage::new(tmp_dir.path(), Some(1)).expect("Failed to create storage"),
     );
     let event_bus = EventBus::new();
-    let resolver = SqliteResolver::with_bus(storage.clone(), event_bus);
+    let resolver = RedbResolver::with_bus(storage.clone(), event_bus);
 
     let sdl = r#"
     type Book {

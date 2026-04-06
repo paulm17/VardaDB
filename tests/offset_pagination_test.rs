@@ -1,7 +1,7 @@
 use serde_json::Value;
 use std::sync::Arc;
 use tempfile::tempdir;
-use vardadb::bridge::sqlite_resolver::SqliteResolver;
+use vardadb::bridge::redb_resolver::RedbResolver;
 use vardadb::engine::schema::Schema;
 use vardadb::storage::backend::Storage;
 
@@ -10,7 +10,7 @@ async fn test_offset_pagination() {
     let dir = tempdir().unwrap();
     let db_path = dir.path().join("vardadb_test_offset_pagination.db");
     let storage = Arc::new(Storage::new(db_path.parent().unwrap(), None).unwrap());
-    let resolver = Box::new(SqliteResolver::new(storage, "default"));
+    let resolver = Box::new(RedbResolver::new(storage, "default"));
 
     let sdl = "
         type Item {

@@ -2,13 +2,13 @@
 async fn test_specific_schema_implicit_linking() {
     use serde_json::Value as JsonValue;
     use std::sync::Arc;
-    use vardadb::bridge::sqlite_resolver::SqliteResolver;
+    use vardadb::bridge::redb_resolver::RedbResolver;
     use vardadb::engine::schema::Schema;
     use vardadb::storage::backend::Storage;
 
     let tmp_dir = tempfile::tempdir().unwrap();
     let storage = Storage::new(tmp_dir.path(), None).unwrap();
-    let resolver = Box::new(SqliteResolver::new(Arc::new(storage), "default"));
+    let resolver = Box::new(RedbResolver::new(Arc::new(storage), "default"));
 
     // User's exact schema subset
     let sdl = "

@@ -17,7 +17,7 @@ auth-email = ["auth/auth-email"]
 
 [dependencies]
 # Async Runtime
-tokio = { version = "1.36", features = ["full"] }
+tokio = { version = "1.51.0", features = ["full"] }
 tokio-stream = "0.1"
 
 # GraphQL
@@ -30,10 +30,10 @@ async-trait = "0.1"
 # We will verify feature availability.
 
 # Storage (redb)
-redb = "3.1"
+redb = "4.0.0"
 
-# Search & Vector (Phase 4)
-tantivy = "0.22"
+# Search & Vector
+tantivy = "0.22.1"
 usearch = "2.1"
 
 # Performance
@@ -47,7 +47,7 @@ management = { path = "management" }
 auth = { path = "auth" }
 
 # Distribution (Zenoh)
-zenoh = { version = "1.7.2", features = ["unstable"] }
+zenoh = { version = "1.8.0", features = ["unstable"] }
 # Using 1.7.2 as verified in the repo source. Unstable features enabled for advanced APIs.if needed 
 
 # Error Handling
@@ -81,7 +81,7 @@ hex = "0.4.3"
 
 # Server
 axum = { version = "0.8", features = ["ws"] }
-hyper = { version = "1.0", features = ["full"] }
+hyper = { version = "1.9.0", features = ["full"] }
 tower-http = { version = "0.5", features = ["cors"] }
 async-graphql-axum = "7.0"
 moka = { version = "0.12", features = ["sync"] }

@@ -1,7 +1,7 @@
 use async_graphql::Request;
 use serde_json::Value;
 use std::sync::Arc;
-use vardadb::bridge::sqlite_resolver::SqliteResolver;
+use vardadb::bridge::redb_resolver::RedbResolver;
 use vardadb::storage::backend::Storage;
 
 #[tokio::test(flavor = "multi_thread")]
@@ -19,7 +19,7 @@ async fn test_query_parity() {
 
     let tmp_dir = tempfile::tempdir().unwrap();
     let storage = Arc::new(Storage::new(tmp_dir.path(), None).unwrap());
-    let resolver = SqliteResolver::new(storage.clone(), "default");
+    let resolver = RedbResolver::new(storage.clone(), "default");
 
     // 1. Create Data
     let mutations = vec![
