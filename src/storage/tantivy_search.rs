@@ -28,13 +28,25 @@ use dashmap::DashMap;
 use parking_lot::Mutex;
 use tantivy::collector::TopDocs;
 use tantivy::directory::MmapDirectory;
-use tantivy::query::{BooleanQuery, FuzzyTermQuery, Occur, PhraseQuery, Query, TermQuery};
+use tantivy::query::{
+    BooleanQuery, BoostQuery, FuzzyTermQuery, Occur, PhraseQuery, Query, TermQuery,
+};
 use tantivy::schema::Value as TantivyValue;
 use tantivy::schema::{
     Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, FAST, INDEXED, STORED, STRING,
 };
 use tantivy::tokenizer::{LowerCaser, SimpleTokenizer, Stemmer, TextAnalyzer};
 use tantivy::{Index, IndexWriter, TantivyDocument, Term};
+
+/// Field boost configuration for multi-field queries.
+///
+/// Each entry specifies a field name and an optional boost weight.
+/// Boost values >1.0 increase the field's importance, <1.0 decreases it.
+#[derive(Clone, Debug)]
+pub struct FieldBoost {
+    pub field: String,
+    pub boost: f32,
+}
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -388,6 +400,173 @@ impl SearchEngine {
             Ok(td) => td,
             Err(e) => {
                 eprintln!("SearchEngine: search failed: {}", e);
+                return vec![];
+            }
+        };
+
+        let mut results = Vec::with_capacity(top_docs.len());
+        for (score, doc_addr) in top_docs {
+            if let Ok(doc) = searcher.doc::<TantivyDocument>(doc_addr) {
+                if let Some(uid_val) = doc.get_first(idx.uid_field) {
+                    if let Some(uid) = TantivyValue::as_u64(&uid_val) {
+                        results.push((uid, score as f64));
+                    }
+                }
+            }
+        }
+        results
+    }
+
+    /// Multi-field BM25 search with per-field boost weights.
+    ///
+    /// Searches across multiple fields simultaneously, applying boost weights
+    /// to each field's contribution to the final score.
+    ///
+    /// * `fields` – Slice of `FieldBoost` entries specifying field name and boost.
+    /// * `strategy` – `"term"` (no stemming) or `"fulltext"` (Porter).
+    /// * `require_all` – `true` for AND semantics across terms, `false` for OR.
+    /// * `fuzzy_distance` – Optional Levenshtein distance (0-2) for fuzzy matching.
+    /// * `phrase_slop` – Optional slop for phrase queries.
+    ///
+    /// Returns `(uid, bm25_score)` pairs sorted by descending relevance.
+    pub fn search_bm25_multi(
+        &self,
+        db_name: &str,
+        query_text: &str,
+        fields: &[FieldBoost],
+        strategy: &str,
+        k: usize,
+        require_all: bool,
+        fuzzy_distance: Option<u8>,
+        phrase_slop: Option<u32>,
+    ) -> Vec<(u64, f64)> {
+        if fields.is_empty() {
+            return vec![];
+        }
+
+        let idx = match self.get_or_create(db_name) {
+            Ok(i) => i,
+            Err(e) => {
+                eprintln!(
+                    "SearchEngine::search_bm25_multi: failed to open index: {}",
+                    e
+                );
+                return vec![];
+            }
+        };
+
+        {
+            let mut writer = idx.writer.lock();
+            if let Err(e) = writer.commit() {
+                eprintln!("SearchEngine: auto-commit before search failed: {}", e);
+            }
+        }
+
+        let reader = match idx.index.reader() {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("SearchEngine: failed to open reader: {}", e);
+                return vec![];
+            }
+        };
+        let searcher = reader.searcher();
+
+        let (content_field, tokenizer_name) = if strategy == "fulltext" {
+            (idx.fulltext_content_field, "fulltext_tokenizer")
+        } else {
+            (idx.term_content_field, "term_tokenizer")
+        };
+
+        let is_phrase =
+            query_text.starts_with('"') && query_text.ends_with('"') && query_text.len() > 2;
+
+        let mut field_clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
+
+        for fb in fields {
+            let field_filter_term = Term::from_field_text(idx.field_name_field, &fb.field);
+            let field_filter: Box<dyn Query> =
+                Box::new(TermQuery::new(field_filter_term, IndexRecordOption::Basic));
+
+            let content_query: Box<dyn Query> = if is_phrase {
+                let phrase_text = &query_text[1..query_text.len() - 1];
+                let phrase_terms =
+                    self.tokenize_with(&idx, tokenizer_name, phrase_text, content_field);
+                if phrase_terms.is_empty() {
+                    continue;
+                }
+                let mut phrase_query = PhraseQuery::new(phrase_terms);
+                if let Some(slop) = phrase_slop {
+                    phrase_query.set_slop(slop);
+                }
+                Box::new(phrase_query)
+            } else {
+                let terms = self.tokenize_with(&idx, tokenizer_name, query_text, content_field);
+                if terms.is_empty() {
+                    continue;
+                }
+                if require_all {
+                    let clauses: Vec<(Occur, Box<dyn Query>)> = terms
+                        .into_iter()
+                        .map(|t| {
+                            if let Some(distance) = fuzzy_distance {
+                                (
+                                    Occur::Must,
+                                    Box::new(FuzzyTermQuery::new(t, distance, true))
+                                        as Box<dyn Query>,
+                                )
+                            } else {
+                                (
+                                    Occur::Must,
+                                    Box::new(TermQuery::new(t, IndexRecordOption::WithFreqs))
+                                        as Box<dyn Query>,
+                                )
+                            }
+                        })
+                        .collect();
+                    Box::new(BooleanQuery::new(clauses))
+                } else {
+                    let clauses: Vec<(Occur, Box<dyn Query>)> = terms
+                        .into_iter()
+                        .map(|t| {
+                            if let Some(distance) = fuzzy_distance {
+                                (
+                                    Occur::Should,
+                                    Box::new(FuzzyTermQuery::new(t, distance, true))
+                                        as Box<dyn Query>,
+                                )
+                            } else {
+                                (
+                                    Occur::Should,
+                                    Box::new(TermQuery::new(t, IndexRecordOption::WithFreqs))
+                                        as Box<dyn Query>,
+                                )
+                            }
+                        })
+                        .collect();
+                    Box::new(BooleanQuery::new(clauses))
+                }
+            };
+
+            let field_query = BooleanQuery::new(vec![
+                (Occur::Must, field_filter),
+                (Occur::Must, content_query),
+            ]);
+
+            let boosted_query: Box<dyn Query> =
+                Box::new(BoostQuery::new(Box::new(field_query), fb.boost));
+            field_clauses.push((Occur::Should, boosted_query));
+        }
+
+        if field_clauses.is_empty() {
+            return vec![];
+        }
+
+        let multi_query = BooleanQuery::new(field_clauses);
+
+        let top_docs = match searcher.search(&multi_query, &TopDocs::with_limit(k)) {
+            Ok(td) => td,
+            Err(e) => {
+                eprintln!("SearchEngine: multi-field search failed: {}", e);
                 return vec![];
             }
         };

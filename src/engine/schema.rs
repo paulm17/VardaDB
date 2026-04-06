@@ -2437,6 +2437,16 @@ impl Schema {
                 dynamic::TypeRef::named(dynamic::TypeRef::INT),
             ));
 
+        let field_boost_input = dynamic::InputObject::new("FieldBoostInput")
+            .field(dynamic::InputValue::new(
+                "field",
+                dynamic::TypeRef::named_nn(dynamic::TypeRef::STRING),
+            ))
+            .field(dynamic::InputValue::new(
+                "boost",
+                dynamic::TypeRef::named(dynamic::TypeRef::FLOAT),
+            ));
+
         let string_filter = dynamic::InputObject::new("StringFilter")
             .field(dynamic::InputValue::new(
                 "eq",
@@ -2493,6 +2503,10 @@ impl Schema {
             .field(dynamic::InputValue::new(
                 "ne",
                 dynamic::TypeRef::named(dynamic::TypeRef::STRING),
+            ))
+            .field(dynamic::InputValue::new(
+                "fields",
+                dynamic::TypeRef::named_list("FieldBoostInput"),
             ));
 
         let int_filter = dynamic::InputObject::new("IntFilter")
@@ -2635,6 +2649,7 @@ impl Schema {
 
         schema_builder = schema_builder.register(fuzzy_filter);
         schema_builder = schema_builder.register(phrase_filter);
+        schema_builder = schema_builder.register(field_boost_input);
         schema_builder = schema_builder.register(string_filter);
         schema_builder = schema_builder.register(int_filter);
         schema_builder = schema_builder.register(float_filter);

@@ -19,7 +19,7 @@ Do these 4 issues FIRST before any features. Without these, you **will lose data
 |-------|------|--------|------|--------|
 | 01 | Fuzzy matching | 1 week | `src/storage/tantivy_search.rs` | ✅ Done |
 | 02 | Phrase queries | 1-2 weeks | `src/storage/tantivy_search.rs` | ✅ Done |
-| 03 | Field boosting | 1-2 weeks | `src/storage/tantivy_search.rs` | |
+| 03 | Field boosting | 1-2 weeks | `src/storage/tantivy_search.rs` | ✅ Done |
 | 04 | RRF weighting | 1 week | `src/bridge/redb_resolver.rs` | |
 | 05 | Highlighting | 1 week | `src/storage/tantivy_search.rs` | |
 | 06 | BM25 stats | 1 week | `src/storage/tantivy_search.rs` | |

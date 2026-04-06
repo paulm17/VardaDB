@@ -1,6 +1,7 @@
 use crate::engine::resolver::{RequestCache, Resolver};
 use crate::storage::backend::Storage;
 use crate::storage::codec::Codec;
+use crate::storage::tantivy_search::FieldBoost;
 use crate::storage::timestamp::Timestamp;
 use async_graphql::Value;
 use byteorder::{BigEndian, ByteOrder};
@@ -912,6 +913,35 @@ impl RedbResolver {
         )
     }
 
+    /// Multi-field BM25 search with per-field boost weights.
+    ///
+    /// * `fields` – Slice of `FieldBoost` entries specifying field name and boost.
+    /// * `strategy` – `"term"` (no stemming) or `"fulltext"` (Porter).
+    /// * `require_all` – `true` → AND semantics; `false` → OR semantics.
+    /// * `fuzzy_distance` – Optional Levenshtein distance (0-2) for fuzzy matching.
+    /// * `phrase_slop` – Optional slop for phrase queries.
+    pub fn search_text_bm25_multi(
+        &self,
+        query: &str,
+        fields: &[FieldBoost],
+        strategy: &str,
+        k: usize,
+        require_all: bool,
+        fuzzy_distance: Option<u8>,
+        phrase_slop: Option<u32>,
+    ) -> Vec<(u64, f64)> {
+        self.storage.search_engine.search_bm25_multi(
+            &self.db_name,
+            query,
+            fields,
+            strategy,
+            k,
+            require_all,
+            fuzzy_distance,
+            phrase_slop,
+        )
+    }
+
     /// Hybrid search combining BM25 (Tantivy) and ANN (usearch) via
     /// Reciprocal Rank Fusion (RRF, k=60).
     pub fn search_hybrid(
@@ -1557,11 +1587,67 @@ impl RedbResolver {
                 }
                 // Handle "allofterms" — all terms must match (AND), no stemming
                 if let Some(Value::String(terms_str)) = map.get("allofterms") {
-                    let field_uids: std::collections::HashSet<u64> = self
-                        .search_text_bm25(terms_str, field, "term", 100_000, true, None, None)
-                        .into_iter()
-                        .map(|(uid, _)| uid)
-                        .collect();
+                    let field_uids: std::collections::HashSet<u64> =
+                        if let Some(Value::List(fields_list)) = map.get("fields") {
+                            let field_boosts: Vec<FieldBoost> = fields_list
+                                .iter()
+                                .filter_map(|v| {
+                                    if let Value::Object(fmap) = v {
+                                        let field_name = fmap.get("field").and_then(|fv| {
+                                            if let Value::String(s) = fv {
+                                                Some(s.clone())
+                                            } else {
+                                                None
+                                            }
+                                        })?;
+                                        let boost = fmap
+                                            .get("boost")
+                                            .and_then(|bv| {
+                                                if let Value::Number(n) = bv {
+                                                    n.as_f64().map(|f| f as f32)
+                                                } else {
+                                                    Some(1.0)
+                                                }
+                                            })
+                                            .unwrap_or(1.0);
+                                        Some(FieldBoost {
+                                            field: field_name,
+                                            boost,
+                                        })
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .collect();
+                            if field_boosts.is_empty() {
+                                self.search_text_bm25(
+                                    terms_str, field, "term", 100_000, true, None, None,
+                                )
+                                .into_iter()
+                                .map(|(uid, _)| uid)
+                                .collect()
+                            } else {
+                                self.search_text_bm25_multi(
+                                    terms_str,
+                                    &field_boosts,
+                                    "term",
+                                    100_000,
+                                    true,
+                                    None,
+                                    None,
+                                )
+                                .into_iter()
+                                .map(|(uid, _)| uid)
+                                .collect()
+                            }
+                        } else {
+                            self.search_text_bm25(
+                                terms_str, field, "term", 100_000, true, None, None,
+                            )
+                            .into_iter()
+                            .map(|(uid, _)| uid)
+                            .collect()
+                        };
 
                     if let Some(current) = candidates {
                         candidates = Some(
@@ -1577,11 +1663,67 @@ impl RedbResolver {
 
                 // Handle "anyofterms" — any term matches (OR), no stemming
                 if let Some(Value::String(terms_str)) = map.get("anyofterms") {
-                    let field_uids: std::collections::HashSet<u64> = self
-                        .search_text_bm25(terms_str, field, "term", 100_000, false, None, None)
-                        .into_iter()
-                        .map(|(uid, _)| uid)
-                        .collect();
+                    let field_uids: std::collections::HashSet<u64> =
+                        if let Some(Value::List(fields_list)) = map.get("fields") {
+                            let field_boosts: Vec<FieldBoost> = fields_list
+                                .iter()
+                                .filter_map(|v| {
+                                    if let Value::Object(fmap) = v {
+                                        let field_name = fmap.get("field").and_then(|fv| {
+                                            if let Value::String(s) = fv {
+                                                Some(s.clone())
+                                            } else {
+                                                None
+                                            }
+                                        })?;
+                                        let boost = fmap
+                                            .get("boost")
+                                            .and_then(|bv| {
+                                                if let Value::Number(n) = bv {
+                                                    n.as_f64().map(|f| f as f32)
+                                                } else {
+                                                    Some(1.0)
+                                                }
+                                            })
+                                            .unwrap_or(1.0);
+                                        Some(FieldBoost {
+                                            field: field_name,
+                                            boost,
+                                        })
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .collect();
+                            if field_boosts.is_empty() {
+                                self.search_text_bm25(
+                                    terms_str, field, "term", 100_000, false, None, None,
+                                )
+                                .into_iter()
+                                .map(|(uid, _)| uid)
+                                .collect()
+                            } else {
+                                self.search_text_bm25_multi(
+                                    terms_str,
+                                    &field_boosts,
+                                    "term",
+                                    100_000,
+                                    false,
+                                    None,
+                                    None,
+                                )
+                                .into_iter()
+                                .map(|(uid, _)| uid)
+                                .collect()
+                            }
+                        } else {
+                            self.search_text_bm25(
+                                terms_str, field, "term", 100_000, false, None, None,
+                            )
+                            .into_iter()
+                            .map(|(uid, _)| uid)
+                            .collect()
+                        };
 
                     if let Some(current) = candidates {
                         candidates = Some(
@@ -1597,11 +1739,67 @@ impl RedbResolver {
 
                 // Handle "alloftext" — all terms must match (AND), Porter stemming
                 if let Some(Value::String(terms_str)) = map.get("alloftext") {
-                    let field_uids: std::collections::HashSet<u64> = self
-                        .search_text_bm25(terms_str, field, "fulltext", 100_000, true, None, None)
-                        .into_iter()
-                        .map(|(uid, _)| uid)
-                        .collect();
+                    let field_uids: std::collections::HashSet<u64> =
+                        if let Some(Value::List(fields_list)) = map.get("fields") {
+                            let field_boosts: Vec<FieldBoost> = fields_list
+                                .iter()
+                                .filter_map(|v| {
+                                    if let Value::Object(fmap) = v {
+                                        let field_name = fmap.get("field").and_then(|fv| {
+                                            if let Value::String(s) = fv {
+                                                Some(s.clone())
+                                            } else {
+                                                None
+                                            }
+                                        })?;
+                                        let boost = fmap
+                                            .get("boost")
+                                            .and_then(|bv| {
+                                                if let Value::Number(n) = bv {
+                                                    n.as_f64().map(|f| f as f32)
+                                                } else {
+                                                    Some(1.0)
+                                                }
+                                            })
+                                            .unwrap_or(1.0);
+                                        Some(FieldBoost {
+                                            field: field_name,
+                                            boost,
+                                        })
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .collect();
+                            if field_boosts.is_empty() {
+                                self.search_text_bm25(
+                                    terms_str, field, "fulltext", 100_000, true, None, None,
+                                )
+                                .into_iter()
+                                .map(|(uid, _)| uid)
+                                .collect()
+                            } else {
+                                self.search_text_bm25_multi(
+                                    terms_str,
+                                    &field_boosts,
+                                    "fulltext",
+                                    100_000,
+                                    true,
+                                    None,
+                                    None,
+                                )
+                                .into_iter()
+                                .map(|(uid, _)| uid)
+                                .collect()
+                            }
+                        } else {
+                            self.search_text_bm25(
+                                terms_str, field, "fulltext", 100_000, true, None, None,
+                            )
+                            .into_iter()
+                            .map(|(uid, _)| uid)
+                            .collect()
+                        };
 
                     if let Some(current) = candidates {
                         candidates = Some(
@@ -1617,11 +1815,67 @@ impl RedbResolver {
 
                 // Handle "anyoftext" — any term matches (OR), Porter stemming
                 if let Some(Value::String(terms_str)) = map.get("anyoftext") {
-                    let field_uids: std::collections::HashSet<u64> = self
-                        .search_text_bm25(terms_str, field, "fulltext", 100_000, false, None, None)
-                        .into_iter()
-                        .map(|(uid, _)| uid)
-                        .collect();
+                    let field_uids: std::collections::HashSet<u64> =
+                        if let Some(Value::List(fields_list)) = map.get("fields") {
+                            let field_boosts: Vec<FieldBoost> = fields_list
+                                .iter()
+                                .filter_map(|v| {
+                                    if let Value::Object(fmap) = v {
+                                        let field_name = fmap.get("field").and_then(|fv| {
+                                            if let Value::String(s) = fv {
+                                                Some(s.clone())
+                                            } else {
+                                                None
+                                            }
+                                        })?;
+                                        let boost = fmap
+                                            .get("boost")
+                                            .and_then(|bv| {
+                                                if let Value::Number(n) = bv {
+                                                    n.as_f64().map(|f| f as f32)
+                                                } else {
+                                                    Some(1.0)
+                                                }
+                                            })
+                                            .unwrap_or(1.0);
+                                        Some(FieldBoost {
+                                            field: field_name,
+                                            boost,
+                                        })
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .collect();
+                            if field_boosts.is_empty() {
+                                self.search_text_bm25(
+                                    terms_str, field, "fulltext", 100_000, false, None, None,
+                                )
+                                .into_iter()
+                                .map(|(uid, _)| uid)
+                                .collect()
+                            } else {
+                                self.search_text_bm25_multi(
+                                    terms_str,
+                                    &field_boosts,
+                                    "fulltext",
+                                    100_000,
+                                    false,
+                                    None,
+                                    None,
+                                )
+                                .into_iter()
+                                .map(|(uid, _)| uid)
+                                .collect()
+                            }
+                        } else {
+                            self.search_text_bm25(
+                                terms_str, field, "fulltext", 100_000, false, None, None,
+                            )
+                            .into_iter()
+                            .map(|(uid, _)| uid)
+                            .collect()
+                        };
 
                     if let Some(current) = candidates {
                         candidates = Some(
@@ -1643,19 +1897,79 @@ impl RedbResolver {
                             _ => 1,
                         };
 
-                        let field_uids: std::collections::HashSet<u64> = self
-                            .search_text_bm25(
-                                terms_str,
-                                field,
-                                "term",
-                                100_000,
-                                false,
-                                Some(distance),
-                                None,
-                            )
-                            .into_iter()
-                            .map(|(uid, _)| uid)
-                            .collect();
+                        let field_uids: std::collections::HashSet<u64> =
+                            if let Some(Value::List(fields_list)) = map.get("fields") {
+                                let field_boosts: Vec<FieldBoost> = fields_list
+                                    .iter()
+                                    .filter_map(|v| {
+                                        if let Value::Object(fmap) = v {
+                                            let field_name = fmap.get("field").and_then(|fv| {
+                                                if let Value::String(s) = fv {
+                                                    Some(s.clone())
+                                                } else {
+                                                    None
+                                                }
+                                            })?;
+                                            let boost = fmap
+                                                .get("boost")
+                                                .and_then(|bv| {
+                                                    if let Value::Number(n) = bv {
+                                                        n.as_f64().map(|f| f as f32)
+                                                    } else {
+                                                        Some(1.0)
+                                                    }
+                                                })
+                                                .unwrap_or(1.0);
+                                            Some(FieldBoost {
+                                                field: field_name,
+                                                boost,
+                                            })
+                                        } else {
+                                            None
+                                        }
+                                    })
+                                    .collect();
+                                if field_boosts.is_empty() {
+                                    self.search_text_bm25(
+                                        terms_str,
+                                        field,
+                                        "term",
+                                        100_000,
+                                        false,
+                                        Some(distance),
+                                        None,
+                                    )
+                                    .into_iter()
+                                    .map(|(uid, _)| uid)
+                                    .collect()
+                                } else {
+                                    self.search_text_bm25_multi(
+                                        terms_str,
+                                        &field_boosts,
+                                        "term",
+                                        100_000,
+                                        false,
+                                        Some(distance),
+                                        None,
+                                    )
+                                    .into_iter()
+                                    .map(|(uid, _)| uid)
+                                    .collect()
+                                }
+                            } else {
+                                self.search_text_bm25(
+                                    terms_str,
+                                    field,
+                                    "term",
+                                    100_000,
+                                    false,
+                                    Some(distance),
+                                    None,
+                                )
+                                .into_iter()
+                                .map(|(uid, _)| uid)
+                                .collect()
+                            };
 
                         if let Some(current) = candidates {
                             candidates = Some(
@@ -1679,19 +1993,79 @@ impl RedbResolver {
                         };
 
                         let quoted_query = format!("\"{}\"", terms_str);
-                        let field_uids: std::collections::HashSet<u64> = self
-                            .search_text_bm25(
-                                &quoted_query,
-                                field,
-                                "fulltext",
-                                100_000,
-                                true,
-                                None,
-                                slop,
-                            )
-                            .into_iter()
-                            .map(|(uid, _)| uid)
-                            .collect();
+                        let field_uids: std::collections::HashSet<u64> =
+                            if let Some(Value::List(fields_list)) = map.get("fields") {
+                                let field_boosts: Vec<FieldBoost> = fields_list
+                                    .iter()
+                                    .filter_map(|v| {
+                                        if let Value::Object(fmap) = v {
+                                            let field_name = fmap.get("field").and_then(|fv| {
+                                                if let Value::String(s) = fv {
+                                                    Some(s.clone())
+                                                } else {
+                                                    None
+                                                }
+                                            })?;
+                                            let boost = fmap
+                                                .get("boost")
+                                                .and_then(|bv| {
+                                                    if let Value::Number(n) = bv {
+                                                        n.as_f64().map(|f| f as f32)
+                                                    } else {
+                                                        Some(1.0)
+                                                    }
+                                                })
+                                                .unwrap_or(1.0);
+                                            Some(FieldBoost {
+                                                field: field_name,
+                                                boost,
+                                            })
+                                        } else {
+                                            None
+                                        }
+                                    })
+                                    .collect();
+                                if field_boosts.is_empty() {
+                                    self.search_text_bm25(
+                                        &quoted_query,
+                                        field,
+                                        "fulltext",
+                                        100_000,
+                                        true,
+                                        None,
+                                        slop,
+                                    )
+                                    .into_iter()
+                                    .map(|(uid, _)| uid)
+                                    .collect()
+                                } else {
+                                    self.search_text_bm25_multi(
+                                        &quoted_query,
+                                        &field_boosts,
+                                        "fulltext",
+                                        100_000,
+                                        true,
+                                        None,
+                                        slop,
+                                    )
+                                    .into_iter()
+                                    .map(|(uid, _)| uid)
+                                    .collect()
+                                }
+                            } else {
+                                self.search_text_bm25(
+                                    &quoted_query,
+                                    field,
+                                    "fulltext",
+                                    100_000,
+                                    true,
+                                    None,
+                                    slop,
+                                )
+                                .into_iter()
+                                .map(|(uid, _)| uid)
+                                .collect()
+                            };
 
                         if let Some(current) = candidates {
                             candidates = Some(
