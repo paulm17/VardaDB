@@ -885,6 +885,62 @@ impl RedbResolver {
             .map_err(|e| e.to_string())
     }
 
+    fn write_trigram_index(&self, uid: u64, field: &str, text: &str) -> Result<(), String> {
+        let trigrams = crate::engine::tokenizer::Tokenizer::tokenize(text, "trigram");
+        for trigram in trigrams {
+            let key = Codec::encode_trigram_index_key(field, &trigram, uid);
+            self.storage
+                .insert(&self.db_name, &key, &[])
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
+    fn remove_trigram_index(&self, uid: u64, field: &str, text: &str) -> Result<(), String> {
+        let trigrams = crate::engine::tokenizer::Tokenizer::tokenize(text, "trigram");
+        for trigram in trigrams {
+            let key = Codec::encode_trigram_index_key(field, &trigram, uid);
+            self.storage
+                .remove(&self.db_name, &key)
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
+    fn search_contains(
+        &self,
+        field: &str,
+        substring: &str,
+    ) -> Result<std::collections::HashSet<u64>, String> {
+        let trigrams = crate::engine::tokenizer::Tokenizer::tokenize(substring, "trigram");
+        if trigrams.is_empty() {
+            return Ok(std::collections::HashSet::new());
+        }
+
+        let mut candidates: Option<std::collections::HashSet<u64>> = None;
+
+        for trigram in trigrams {
+            let prefix = Codec::encode_trigram_prefix(field, &trigram);
+            let matches: std::collections::HashSet<u64> =
+                if let Some((main_ks, _)) = self.storage.get_database(&self.db_name) {
+                    main_ks
+                        .prefix(&prefix)
+                        .into_iter()
+                        .filter_map(|(key, _)| Codec::decode_trigram_index_uid(&key))
+                        .collect()
+                } else {
+                    std::collections::HashSet::new()
+                };
+
+            candidates = match candidates {
+                None => Some(matches),
+                Some(c) => Some(c.intersection(&matches).copied().collect()),
+            };
+        }
+
+        Ok(candidates.unwrap_or_default())
+    }
+
     /// BM25 ranked search backed by Tantivy.
     ///
     /// * `strategy` – `"term"` (no stemming) or `"fulltext"` (Porter stemmer).
@@ -1475,17 +1531,36 @@ impl RedbResolver {
                     // Handle "contains" operator
                     if op.as_str() == "contains" {
                         if let Value::String(substr) = target {
-                            if let Some((main_ks, _)) = self.storage.get_database(&self.db_name) {
-                                let uids = main_ks.filter_by_field_contains(field, substr);
-                                let set: std::collections::HashSet<u64> =
-                                    uids.into_iter().collect();
-                                if let Some(current) = candidates {
-                                    candidates =
-                                        Some(current.intersection(&set).copied().collect());
-                                } else {
-                                    candidates = Some(set);
+                            // First try trigram index for efficient substring search
+                            let trigram_set = self.search_contains(field, substr);
+                            if let Ok(trigram_uids) = trigram_set {
+                                if !trigram_uids.is_empty() {
+                                    let set: std::collections::HashSet<u64> =
+                                        trigram_uids.into_iter().collect();
+                                    if let Some(current) = candidates {
+                                        candidates =
+                                            Some(current.intersection(&set).copied().collect());
+                                    } else {
+                                        candidates = Some(set);
+                                    }
+                                    handled_by_pushdown = true;
                                 }
-                                handled_by_pushdown = true;
+                            }
+                            // Fall back to SQL contains filter if trigram index is empty
+                            if !handled_by_pushdown {
+                                if let Some((main_ks, _)) = self.storage.get_database(&self.db_name)
+                                {
+                                    let uids = main_ks.filter_by_field_contains(field, substr);
+                                    let set: std::collections::HashSet<u64> =
+                                        uids.into_iter().collect();
+                                    if let Some(current) = candidates {
+                                        candidates =
+                                            Some(current.intersection(&set).copied().collect());
+                                    } else {
+                                        candidates = Some(set);
+                                    }
+                                    handled_by_pushdown = true;
+                                }
                             }
                         }
                     }
@@ -2430,7 +2505,14 @@ impl RedbResolver {
         // 5. Handle Search Indexing after commit.
         for (field, val, tokenizers) in items_to_index {
             for strategy in tokenizers {
-                if let Err(e) = self.write_term_index(uid, &field, &val, &strategy) {
+                if strategy == "trigram" {
+                    if let Err(e) = self.write_trigram_index(uid, &field, &val) {
+                        eprintln!(
+                            "Trigram Indexing Failed (create_node) for uid={}: {}",
+                            uid, e
+                        );
+                    }
+                } else if let Err(e) = self.write_term_index(uid, &field, &val, &strategy) {
                     eprintln!(
                         "Search Indexing Failed (create_node) for uid={}: {}",
                         uid, e
@@ -2757,7 +2839,11 @@ impl RedbResolver {
                         serde_json::from_slice::<serde_json::Value>(payload)
                     {
                         for strategy in tokenizers {
-                            self.remove_term_index(uid, field, &s, strategy)?;
+                            if strategy == "trigram" {
+                                self.remove_trigram_index(uid, field, &s)?;
+                            } else {
+                                self.remove_term_index(uid, field, &s, strategy)?;
+                            }
                         }
                     }
                 }
@@ -2894,7 +2980,11 @@ impl RedbResolver {
             if let Some(tokenizers) = search_fields.get(field) {
                 if let serde_json::Value::String(s) = value {
                     for strategy in tokenizers {
-                        self.write_term_index(uid, field, s, strategy)?;
+                        if strategy == "trigram" {
+                            self.write_trigram_index(uid, field, s)?;
+                        } else {
+                            self.write_term_index(uid, field, s, strategy)?;
+                        }
                     }
                 }
             }
@@ -3049,7 +3139,11 @@ impl RedbResolver {
                     serde_json::from_slice::<serde_json::Value>(payload)
                 {
                     for strategy in tokenizers {
-                        self.remove_term_index(uid, field, &s, strategy)?;
+                        if strategy == "trigram" {
+                            self.remove_trigram_index(uid, field, &s)?;
+                        } else {
+                            self.remove_term_index(uid, field, &s, strategy)?;
+                        }
                     }
                 }
             }
