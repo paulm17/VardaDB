@@ -35,6 +35,7 @@ use tantivy::schema::Value as TantivyValue;
 use tantivy::schema::{
     Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, FAST, INDEXED, STORED, STRING,
 };
+use tantivy::snippet::SnippetGenerator;
 use tantivy::tokenizer::{LowerCaser, SimpleTokenizer, Stemmer, TextAnalyzer};
 use tantivy::{Index, IndexWriter, TantivyDocument, Term};
 
@@ -46,6 +47,18 @@ use tantivy::{Index, IndexWriter, TantivyDocument, Term};
 pub struct FieldBoost {
     pub field: String,
     pub boost: f32,
+}
+
+/// Search result with snippet highlighting.
+///
+/// Contains the document uid, BM25 score, and optional snippet with
+/// highlighted matching terms.
+#[derive(Clone, Debug)]
+pub struct SearchResult {
+    pub uid: u64,
+    pub score: f64,
+    pub snippet: Option<String>,
+    pub highlighted_terms: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -584,9 +597,172 @@ impl SearchEngine {
         results
     }
 
-    // -----------------------------------------------------------------------
-    // Public: lifecycle
-    // -----------------------------------------------------------------------
+    /// BM25 ranked search with snippet generation.
+    ///
+    /// Similar to `search_bm25` but returns search results with highlighted snippets
+    /// showing the matching terms in context.
+    ///
+    /// * `field` – The field name to search within.
+    /// * `strategy` – `"term"` (no stemming) or `"fulltext"` (Porter).
+    /// * `require_all` – `true` for AND semantics, `false` for OR semantics.
+    /// * `fuzzy_distance` – Optional Levenshtein distance (0-2) for fuzzy matching.
+    /// * `phrase_slop` – Optional slop for phrase queries.
+    ///
+    /// Returns `SearchResult` entries with uid, score, and snippet.
+    pub fn search_bm25_with_snippets(
+        &self,
+        db_name: &str,
+        query_text: &str,
+        field: &str,
+        strategy: &str,
+        k: usize,
+        require_all: bool,
+        fuzzy_distance: Option<u8>,
+        phrase_slop: Option<u32>,
+    ) -> Vec<SearchResult> {
+        let idx = match self.get_or_create(db_name) {
+            Ok(i) => i,
+            Err(e) => {
+                eprintln!(
+                    "SearchEngine::search_bm25_with_snippets: failed to open index: {}",
+                    e
+                );
+                return vec![];
+            }
+        };
+
+        {
+            let mut writer = idx.writer.lock();
+            if let Err(e) = writer.commit() {
+                eprintln!("SearchEngine: auto-commit before search failed: {}", e);
+            }
+        }
+
+        let reader = match idx.index.reader() {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("SearchEngine: failed to open reader: {}", e);
+                return vec![];
+            }
+        };
+        let searcher = reader.searcher();
+
+        let (content_field, tokenizer_name) = if strategy == "fulltext" {
+            (idx.fulltext_content_field, "fulltext_tokenizer")
+        } else {
+            (idx.term_content_field, "term_tokenizer")
+        };
+
+        let field_filter_term = Term::from_field_text(idx.field_name_field, field);
+        let field_filter: (Occur, Box<dyn Query>) = (
+            Occur::Must,
+            Box::new(TermQuery::new(field_filter_term, IndexRecordOption::Basic)),
+        );
+
+        let is_phrase =
+            query_text.starts_with('"') && query_text.ends_with('"') && query_text.len() > 2;
+
+        let content_query: Box<dyn Query> = if is_phrase {
+            let phrase_text = &query_text[1..query_text.len() - 1];
+            let phrase_terms = self.tokenize_with(&idx, tokenizer_name, phrase_text, content_field);
+            if phrase_terms.is_empty() {
+                return vec![];
+            }
+            let mut phrase_query = PhraseQuery::new(phrase_terms);
+            if let Some(slop) = phrase_slop {
+                phrase_query.set_slop(slop);
+            }
+            Box::new(phrase_query)
+        } else {
+            let terms = self.tokenize_with(&idx, tokenizer_name, query_text, content_field);
+            if terms.is_empty() {
+                return vec![];
+            }
+            if require_all {
+                let clauses: Vec<(Occur, Box<dyn Query>)> = terms
+                    .into_iter()
+                    .map(|t| {
+                        if let Some(distance) = fuzzy_distance {
+                            (
+                                Occur::Must,
+                                Box::new(FuzzyTermQuery::new(t, distance, true)) as Box<dyn Query>,
+                            )
+                        } else {
+                            (
+                                Occur::Must,
+                                Box::new(TermQuery::new(t, IndexRecordOption::WithFreqs))
+                                    as Box<dyn Query>,
+                            )
+                        }
+                    })
+                    .collect();
+                Box::new(BooleanQuery::new(clauses))
+            } else {
+                let clauses: Vec<(Occur, Box<dyn Query>)> = terms
+                    .into_iter()
+                    .map(|t| {
+                        if let Some(distance) = fuzzy_distance {
+                            (
+                                Occur::Should,
+                                Box::new(FuzzyTermQuery::new(t, distance, true)) as Box<dyn Query>,
+                            )
+                        } else {
+                            (
+                                Occur::Should,
+                                Box::new(TermQuery::new(t, IndexRecordOption::WithFreqs))
+                                    as Box<dyn Query>,
+                            )
+                        }
+                    })
+                    .collect();
+                Box::new(BooleanQuery::new(clauses))
+            }
+        };
+
+        let query = BooleanQuery::new(vec![field_filter, (Occur::Must, content_query)]);
+
+        let snippet_generator = match SnippetGenerator::create(&searcher, &query, content_field) {
+            Ok(sg) => sg,
+            Err(e) => {
+                eprintln!("SearchEngine: failed to create snippet generator: {}", e);
+                return vec![];
+            }
+        };
+
+        let top_docs = match searcher.search(&query, &TopDocs::with_limit(k)) {
+            Ok(td) => td,
+            Err(e) => {
+                eprintln!("SearchEngine: search failed: {}", e);
+                return vec![];
+            }
+        };
+
+        let mut results = Vec::with_capacity(top_docs.len());
+        for (score, doc_addr) in top_docs {
+            if let Ok(doc) = searcher.doc::<TantivyDocument>(doc_addr) {
+                if let Some(uid_val) = doc.get_first(idx.uid_field) {
+                    if let Some(uid) = TantivyValue::as_u64(&uid_val) {
+                        let snippet = snippet_generator.snippet_from_doc(&doc);
+                        let fragment_text = snippet.fragment();
+                        let highlighted: Vec<String> = snippet
+                            .highlighted()
+                            .iter()
+                            .filter_map(|range| {
+                                fragment_text.get(range.clone()).map(|s| s.to_string())
+                            })
+                            .collect();
+                        results.push(SearchResult {
+                            uid,
+                            score: score as f64,
+                            snippet: Some(snippet.to_html()),
+                            highlighted_terms: highlighted,
+                        });
+                    }
+                }
+            }
+        }
+        results
+    }
 
     /// Commit pending writes for a single database.
     pub fn commit(&self, db_name: &str) -> anyhow::Result<()> {
