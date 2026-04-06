@@ -3672,34 +3672,19 @@ impl RedbResolver {
         let load_time = start.elapsed();
 
         if let Some(ref vec) = near_vector {
-            let mut uid_dists = Vec::new();
-            for uid in &uids {
-                if let Some(Value::List(floats)) = self.resolve_cached(*uid, "embedding", cache) {
-                    let embed: Vec<f64> = floats
-                        .iter()
-                        .filter_map(|v| match v {
-                            Value::Number(n) => n.as_f64(),
-                            _ => None,
-                        })
-                        .collect();
+            let related_set: std::collections::HashSet<u64> = uids.iter().copied().collect();
 
-                    if embed.len() == vec.len() {
-                        let dot: f64 = embed.iter().zip(vec.iter()).map(|(a, b)| a * b).sum();
-                        let norm_a: f64 = embed.iter().map(|a| a * a).sum::<f64>().sqrt();
-                        let norm_b: f64 = vec.iter().map(|b| b * b).sum::<f64>().sqrt();
+            let vec_f32: Vec<f32> = vec.iter().map(|&x| x as f32).collect();
+            let hnsw_results =
+                self.storage
+                    .vector_engine
+                    .search(&self.db_name, &vec_f32, related_set.len() * 2);
 
-                        if norm_a > 0.0 && norm_b > 0.0 {
-                            let sim = dot / (norm_a * norm_b);
-                            uid_dists.push((*uid, 1.0 - sim));
-                        } else {
-                            uid_dists.push((*uid, f64::MAX));
-                        }
-                    }
-                }
-            }
-
-            uid_dists.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-            uids = uid_dists.into_iter().map(|(u, _)| u).collect();
+            uids = hnsw_results
+                .into_iter()
+                .filter(|(uid, _)| related_set.contains(uid))
+                .map(|(uid, _)| uid)
+                .collect();
         }
 
         if !filter.is_empty() {
