@@ -15,20 +15,20 @@ Do these 4 issues FIRST before any features. Without these, you **will lose data
 
 ## Features (Do After Infrastructure)
 
-| Issue | Task | Effort | File |
-|-------|------|--------|------|
-| 01 | Fuzzy matching | 1 week | `src/storage/tantivy_search.rs` |
-| 02 | Phrase queries | 1-2 weeks | `src/storage/tantivy_search.rs` |
-| 03 | Field boosting | 1-2 weeks | `src/storage/tantivy_search.rs` |
-| 04 | RRF weighting | 1 week | `src/bridge/redb_resolver.rs` |
-| 05 | Highlighting | 1 week | `src/storage/tantivy_search.rs` |
-| 06 | BM25 stats | 1 week | `src/storage/tantivy_search.rs` |
-| 07 | Tantivy batching | 1-2 weeks | `src/storage/tantivy_search.rs` |
-| 08 | Trigram index | 1 week | `src/storage/codec.rs` |
-| 09 | Faceted search | 2-3 weeks | `src/storage/tantivy_search.rs` |
-| 10 | Geo spatial index | 3-4 weeks | `src/storage/codec.rs` |
-| 11 | resolve_list HNSW | 1-2 weeks | `src/bridge/redb_resolver.rs` |
-| 12 | Embedding generation | 5-6 weeks | `src/embedding/mod.rs` |
+| Issue | Task | Effort | File | Status |
+|-------|------|--------|------|--------|
+| 01 | Fuzzy matching | 1 week | `src/storage/tantivy_search.rs` | ✅ Done |
+| 02 | Phrase queries | 1-2 weeks | `src/storage/tantivy_search.rs` | |
+| 03 | Field boosting | 1-2 weeks | `src/storage/tantivy_search.rs` | |
+| 04 | RRF weighting | 1 week | `src/bridge/redb_resolver.rs` | |
+| 05 | Highlighting | 1 week | `src/storage/tantivy_search.rs` | |
+| 06 | BM25 stats | 1 week | `src/storage/tantivy_search.rs` | |
+| 07 | Tantivy batching | 1-2 weeks | `src/storage/tantivy_search.rs` | |
+| 08 | Trigram index | 1 week | `src/storage/codec.rs` | |
+| 09 | Faceted search | 2-3 weeks | `src/storage/tantivy_search.rs` | |
+| 10 | Geo spatial index | 3-4 weeks | `src/storage/codec.rs` | |
+| 11 | resolve_list HNSW | 1-2 weeks | `src/bridge/redb_resolver.rs` | |
+| 12 | Embedding generation | 5-6 weeks | `src/embedding/mod.rs` | |
 
 **Note**: Issue 12 (was vector persistence) is now `00d`. Embedding generation moves to position 12.
 

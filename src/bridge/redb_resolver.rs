@@ -888,6 +888,7 @@ impl RedbResolver {
     ///
     /// * `strategy` – `"term"` (no stemming) or `"fulltext"` (Porter stemmer).
     /// * `require_all` – `true` → AND semantics; `false` → OR semantics.
+    /// * `fuzzy_distance` – Optional Levenshtein distance (0-2) for fuzzy matching.
     pub fn search_text_bm25(
         &self,
         query: &str,
@@ -895,6 +896,7 @@ impl RedbResolver {
         strategy: &str,
         k: usize,
         require_all: bool,
+        fuzzy_distance: Option<u8>,
     ) -> Vec<(u64, f64)> {
         self.storage.search_engine.search_bm25(
             &self.db_name,
@@ -903,6 +905,7 @@ impl RedbResolver {
             strategy,
             k,
             require_all,
+            fuzzy_distance,
         )
     }
 
@@ -917,7 +920,8 @@ impl RedbResolver {
         require_all: bool,
     ) -> Vec<(u64, f64)> {
         // BM25 results (over-fetch then fuse)
-        let text_results = self.search_text_bm25(text_query, field, "fulltext", k * 2, require_all);
+        let text_results =
+            self.search_text_bm25(text_query, field, "fulltext", k * 2, require_all, None);
 
         // ANN results (over-fetch then fuse)
         let vec_f32: Vec<f32> = vector.iter().map(|&x| x as f32).collect();
@@ -1484,6 +1488,7 @@ impl RedbResolver {
                         "anyofterms",
                         "alloftext",
                         "anyoftext",
+                        "fuzzy",
                     ]
                     .contains(&k.as_str())
                 });
@@ -1542,7 +1547,7 @@ impl RedbResolver {
                 // Handle "allofterms" — all terms must match (AND), no stemming
                 if let Some(Value::String(terms_str)) = map.get("allofterms") {
                     let field_uids: std::collections::HashSet<u64> = self
-                        .search_text_bm25(terms_str, field, "term", 100_000, true)
+                        .search_text_bm25(terms_str, field, "term", 100_000, true, None)
                         .into_iter()
                         .map(|(uid, _)| uid)
                         .collect();
@@ -1562,7 +1567,7 @@ impl RedbResolver {
                 // Handle "anyofterms" — any term matches (OR), no stemming
                 if let Some(Value::String(terms_str)) = map.get("anyofterms") {
                     let field_uids: std::collections::HashSet<u64> = self
-                        .search_text_bm25(terms_str, field, "term", 100_000, false)
+                        .search_text_bm25(terms_str, field, "term", 100_000, false, None)
                         .into_iter()
                         .map(|(uid, _)| uid)
                         .collect();
@@ -1582,7 +1587,7 @@ impl RedbResolver {
                 // Handle "alloftext" — all terms must match (AND), Porter stemming
                 if let Some(Value::String(terms_str)) = map.get("alloftext") {
                     let field_uids: std::collections::HashSet<u64> = self
-                        .search_text_bm25(terms_str, field, "fulltext", 100_000, true)
+                        .search_text_bm25(terms_str, field, "fulltext", 100_000, true, None)
                         .into_iter()
                         .map(|(uid, _)| uid)
                         .collect();
@@ -1602,7 +1607,7 @@ impl RedbResolver {
                 // Handle "anyoftext" — any term matches (OR), Porter stemming
                 if let Some(Value::String(terms_str)) = map.get("anyoftext") {
                     let field_uids: std::collections::HashSet<u64> = self
-                        .search_text_bm25(terms_str, field, "fulltext", 100_000, false)
+                        .search_text_bm25(terms_str, field, "fulltext", 100_000, false, None)
                         .into_iter()
                         .map(|(uid, _)| uid)
                         .collect();
@@ -1616,6 +1621,40 @@ impl RedbResolver {
                         );
                     } else {
                         candidates = Some(field_uids);
+                    }
+                }
+
+                // Handle "fuzzy" — fuzzy matching with Levenshtein distance
+                if let Some(Value::Object(fuzzy_map)) = map.get("fuzzy") {
+                    if let Some(Value::String(terms_str)) = fuzzy_map.get("terms") {
+                        let distance = match fuzzy_map.get("distance") {
+                            Some(Value::Number(n)) => n.as_i64().map(|d| d as u8).unwrap_or(1),
+                            _ => 1,
+                        };
+
+                        let field_uids: std::collections::HashSet<u64> = self
+                            .search_text_bm25(
+                                terms_str,
+                                field,
+                                "term",
+                                100_000,
+                                false,
+                                Some(distance),
+                            )
+                            .into_iter()
+                            .map(|(uid, _)| uid)
+                            .collect();
+
+                        if let Some(current) = candidates {
+                            candidates = Some(
+                                current
+                                    .into_iter()
+                                    .filter(|u| field_uids.contains(u))
+                                    .collect(),
+                            );
+                        } else {
+                            candidates = Some(field_uids);
+                        }
                     }
                 }
             }
@@ -1687,6 +1726,7 @@ impl RedbResolver {
                                 "anyofterms",
                                 "alloftext",
                                 "anyoftext",
+                                "fuzzy",
                             ]
                             .contains(&k.as_str())
                         });
@@ -3054,7 +3094,7 @@ impl RedbResolver {
             }
         } else if let Some((field, strat, query, require_all)) = text_search {
             let k = first.unwrap_or(50) * 4;
-            let results = self.search_text_bm25(&query, &field, &strat, k, require_all);
+            let results = self.search_text_bm25(&query, &field, &strat, k, require_all, None);
 
             for (uid, _score) in results {
                 if self.node_exists(type_name, uid)
@@ -3276,7 +3316,7 @@ impl RedbResolver {
 
         if let Some((field, strat, query, require_all)) = text_search {
             let count = self
-                .search_text_bm25(&query, &field, &strat, 10_000, require_all)
+                .search_text_bm25(&query, &field, &strat, 10_000, require_all, None)
                 .into_iter()
                 .filter(|(uid, _)| {
                     self.node_exists(type_name, *uid)

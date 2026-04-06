@@ -82,7 +82,7 @@ async fn test_hybrid_search() {
     // -----------------------------------------------------------------------
     // 1. Pure text search — "Rust" should match uid1 and uid3
     // -----------------------------------------------------------------------
-    let text_results = resolver.search_text_bm25("Rust", "title", "fulltext", 10, false);
+    let text_results = resolver.search_text_bm25("Rust", "title", "fulltext", 10, false, None);
     let text_uids: Vec<u64> = text_results.iter().map(|&(uid, _)| uid).collect();
     assert!(text_uids.contains(&uid1), "Text search must find uid1 (Rust Database)");
     assert!(text_uids.contains(&uid3), "Text search must find uid3 (Rust Script)");

@@ -28,7 +28,7 @@ use dashmap::DashMap;
 use parking_lot::Mutex;
 use tantivy::collector::TopDocs;
 use tantivy::directory::MmapDirectory;
-use tantivy::query::{BooleanQuery, Occur, Query, TermQuery};
+use tantivy::query::{BooleanQuery, FuzzyTermQuery, Occur, Query, TermQuery};
 use tantivy::schema::Value as TantivyValue;
 use tantivy::schema::{
     Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, FAST, INDEXED, STORED, STRING,
@@ -263,6 +263,7 @@ impl SearchEngine {
     ///
     /// * `strategy` – `"term"` (no stemming) or `"fulltext"` (Porter).
     /// * `require_all` – `true` for AND semantics, `false` for OR semantics.
+    /// * `fuzzy_distance` – Optional Levenshtein distance (0-2) for fuzzy matching.
     ///
     /// Returns `(uid, bm25_score)` pairs sorted by descending relevance.
     pub fn search_bm25(
@@ -273,6 +274,7 @@ impl SearchEngine {
         strategy: &str,
         k: usize,
         require_all: bool,
+        fuzzy_distance: Option<u8>,
     ) -> Vec<(u64, f64)> {
         let idx = match self.get_or_create(db_name) {
             Ok(i) => i,
@@ -327,15 +329,26 @@ impl SearchEngine {
         // enforce "at least one term must match" for OR semantics we wrap the
         // term queries in a nested BooleanQuery that has NO outer MUST, then
         // promote that nested query as a second MUST clause.
+        //
+        // For fuzzy queries, we use FuzzyTermQuery which matches terms within
+        // a Levenshtein distance.
         let content_query: Box<dyn Query> = if require_all {
             // AND — every term is individually required.
             let clauses: Vec<(Occur, Box<dyn Query>)> = terms
                 .into_iter()
                 .map(|t| {
-                    (
-                        Occur::Must,
-                        Box::new(TermQuery::new(t, IndexRecordOption::WithFreqs)) as Box<dyn Query>,
-                    )
+                    if let Some(distance) = fuzzy_distance {
+                        (
+                            Occur::Must,
+                            Box::new(FuzzyTermQuery::new(t, distance, true)) as Box<dyn Query>,
+                        )
+                    } else {
+                        (
+                            Occur::Must,
+                            Box::new(TermQuery::new(t, IndexRecordOption::WithFreqs))
+                                as Box<dyn Query>,
+                        )
+                    }
                 })
                 .collect();
             Box::new(BooleanQuery::new(clauses))
@@ -345,10 +358,18 @@ impl SearchEngine {
             let clauses: Vec<(Occur, Box<dyn Query>)> = terms
                 .into_iter()
                 .map(|t| {
-                    (
-                        Occur::Should,
-                        Box::new(TermQuery::new(t, IndexRecordOption::WithFreqs)) as Box<dyn Query>,
-                    )
+                    if let Some(distance) = fuzzy_distance {
+                        (
+                            Occur::Should,
+                            Box::new(FuzzyTermQuery::new(t, distance, true)) as Box<dyn Query>,
+                        )
+                    } else {
+                        (
+                            Occur::Should,
+                            Box::new(TermQuery::new(t, IndexRecordOption::WithFreqs))
+                                as Box<dyn Query>,
+                        )
+                    }
                 })
                 .collect();
             Box::new(BooleanQuery::new(clauses))
