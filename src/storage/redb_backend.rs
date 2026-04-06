@@ -786,7 +786,8 @@ impl RedbTable {
 // ─────────────────── FilterTarget ───────────────────
 
 /// A typed filter value for comparison operations.
-/// Replaces `rusqlite::types::Value` for backend-agnostic filter pushdown.
+/// Represents a value for backend-agnostic filter pushdown.
+/// Used to compare against stored JSON values in predicates.
 #[derive(Clone, Debug)]
 pub enum FilterTarget {
     Text(String),

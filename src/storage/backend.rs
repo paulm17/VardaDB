@@ -1150,11 +1150,17 @@ impl Storage {
 
 impl Drop for Storage {
     fn drop(&mut self) {
-        println!("Storage Drop triggered. Ensuring data is flushed...");
+        // Note: ReDB uses ACID transactions with auto-commit, so no explicit flush needed for data.
+        // However, we still need to persist:
+        // 1. Clock state (for HLC timestamp continuity)
+        // 2. Fingerprints (for sync)
+        // 3. Tantivy indexes (search engine)
+        // 4. Vector indexes (usearch)
+        if crate::debug_logging() {
+            println!("[Storage] Drop: persisting clock, fingerprints, and indexes...");
+        }
         if let Err(e) = self.flush() {
-            eprintln!("Failed to flush storage during drop: {}", e);
-        } else {
-            println!("Storage flushed successfully on drop.");
+            eprintln!("[Storage] Failed to persist state during drop: {}", e);
         }
     }
 }
