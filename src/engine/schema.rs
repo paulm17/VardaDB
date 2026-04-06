@@ -2067,6 +2067,92 @@ impl Schema {
                 dynamic::TypeRef::named(dynamic::TypeRef::FLOAT),
             )),
         );
+
+        // IndexStats Object
+        let index_stats_obj = dynamic::Object::new("IndexStats")
+            .field(dynamic::Field::new(
+                "docCount",
+                dynamic::TypeRef::named_nn("Int64"),
+                |ctx| {
+                    dynamic::FieldFuture::new(async move {
+                        let stats = ctx
+                            .parent_value
+                            .try_downcast_ref::<crate::storage::tantivy_search::IndexStats>()?;
+                        Ok(Some(dynamic::FieldValue::value(
+                            async_graphql::Value::Number((stats.doc_count as i64).into()),
+                        )))
+                    })
+                },
+            ))
+            .field(dynamic::Field::new(
+                "termCount",
+                dynamic::TypeRef::named_nn("Int64"),
+                |ctx| {
+                    dynamic::FieldFuture::new(async move {
+                        let stats = ctx
+                            .parent_value
+                            .try_downcast_ref::<crate::storage::tantivy_search::IndexStats>()?;
+                        Ok(Some(dynamic::FieldValue::value(
+                            async_graphql::Value::Number((stats.term_count as i64).into()),
+                        )))
+                    })
+                },
+            ))
+            .field(dynamic::Field::new(
+                "indexSizeBytes",
+                dynamic::TypeRef::named_nn("Int64"),
+                |ctx| {
+                    dynamic::FieldFuture::new(async move {
+                        let stats = ctx
+                            .parent_value
+                            .try_downcast_ref::<crate::storage::tantivy_search::IndexStats>()?;
+                        Ok(Some(dynamic::FieldValue::value(
+                            async_graphql::Value::Number((stats.index_size_bytes as i64).into()),
+                        )))
+                    })
+                },
+            ))
+            .field(dynamic::Field::new(
+                "segmentCount",
+                dynamic::TypeRef::named_nn("Int"),
+                |ctx| {
+                    dynamic::FieldFuture::new(async move {
+                        let stats = ctx
+                            .parent_value
+                            .try_downcast_ref::<crate::storage::tantivy_search::IndexStats>()?;
+                        Ok(Some(dynamic::FieldValue::value(
+                            async_graphql::Value::Number((stats.segment_count as i64).into()),
+                        )))
+                    })
+                },
+            ));
+        types.push(dynamic::Type::Object(index_stats_obj));
+
+        query_root = query_root.field(
+            dynamic::Field::new(
+                "indexStats",
+                dynamic::TypeRef::named_nn("IndexStats"),
+                |ctx| {
+                    dynamic::FieldFuture::new(async move {
+                        let db_name = ctx
+                            .args
+                            .try_get("type")?
+                            .string()?
+                            .to_string();
+                        use crate::engine::resolver::Resolver;
+                        let resolver = ctx.data::<Box<dyn Resolver + Send + Sync>>().unwrap();
+                        match resolver.get_index_stats(&db_name) {
+                            Ok(stats) => Ok(Some(dynamic::FieldValue::owned_any(stats))),
+                            Err(e) => Err(e.into()),
+                        }
+                    })
+                },
+            )
+            .argument(dynamic::InputValue::new(
+                "type",
+                dynamic::TypeRef::named_nn(dynamic::TypeRef::STRING),
+            )),
+        );
         // Define AuthZ types
         let check_permission_input = dynamic::InputObject::new("CheckPermissionInput")
             .field(dynamic::InputValue::new(

@@ -258,6 +258,14 @@ pub trait Resolver {
     fn compact(&self) -> Result<u64, String>; // Returns duration_ms
     fn needs_compaction(&self) -> bool;
 
+    // Index Statistics
+    fn get_index_stats(
+        &self,
+        _db_name: &str,
+    ) -> Result<crate::storage::tantivy_search::IndexStats, String> {
+        Err("get_index_stats not implemented".to_string())
+    }
+
     // Authorization
     fn bulk_check_permission(
         &self,

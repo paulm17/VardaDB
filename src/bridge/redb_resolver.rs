@@ -4275,4 +4275,14 @@ impl Resolver for RedbResolver {
     fn needs_compaction(&self) -> bool {
         self.storage.needs_compaction()
     }
+
+    fn get_index_stats(
+        &self,
+        db_name: &str,
+    ) -> Result<crate::storage::tantivy_search::IndexStats, String> {
+        self.storage
+            .search_engine
+            .get_stats(db_name)
+            .map_err(|e| e.to_string())
+    }
 }
