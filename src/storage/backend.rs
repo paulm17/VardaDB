@@ -1,8 +1,8 @@
-use crate::storage::sqlite_backend::{SqliteBackend, SqliteTable};
+use crate::storage::redb_backend::{RedbBackend, RedbTable};
 use byteorder::{BigEndian, ByteOrder};
 use permissions::storage::auth_store::AuthStore;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Weak};
 use tracing::{error, info};
 use uuid::Uuid;
 
@@ -23,13 +23,15 @@ macro_rules! dbg_println {
 }
 
 // Global registry for flushing
-static ACTIVE_STORAGES: std::sync::OnceLock<Mutex<Vec<Weak<Storage>>>> = std::sync::OnceLock::new();
+static ACTIVE_STORAGES: std::sync::OnceLock<parking_lot::Mutex<Vec<Weak<Storage>>>> =
+    std::sync::OnceLock::new();
 
 extern "C" fn crash_handler(_signum: libc::c_int) {
     dbg_println!("\n[VardaDB] Process exiting. Global shutdown hook triggered...");
     crate::llm::shutdown_all_managed_processes();
     if let Some(mutex) = ACTIVE_STORAGES.get() {
-        if let Ok(mut list) = mutex.lock() {
+        {
+            let mut list = mutex.lock();
             let count = list.len();
             if count > 0 {
                 dbg_println!("[VardaDB] Flushing {} active storage instances...", count);
@@ -41,26 +43,32 @@ extern "C" fn crash_handler(_signum: libc::c_int) {
                 dbg_println!("[VardaDB] Flush complete. Exiting.");
             }
         }
-    }
+    };
     std::process::exit(0);
 }
 
 pub struct Storage {
-    pub backends: dashmap::DashMap<String, Arc<SqliteBackend>>,
+    pub backends: dashmap::DashMap<String, Arc<RedbBackend>>,
     pub base_path: PathBuf,
     // Database Management
     // Map: DatabaseName -> (Main Table, History Table)
-    pub keyspaces: std::sync::RwLock<std::collections::HashMap<String, (SqliteTable, SqliteTable)>>,
+    pub keyspaces: std::sync::RwLock<std::collections::HashMap<String, (RedbTable, RedbTable)>>,
 
     // System Tables (Global)
-    pub sys_table: SqliteTable,        // SYSTEM: Config (NodeID, etc)
-    pub quarantine_table: SqliteTable, // QUARANTINE: Global
-    pub metrics_table: SqliteTable,    // METRICS: Time-series metrics
-    pub traces_table: SqliteTable,     // TRACES: Trace spans
-    pub auth_store: AuthStore,         // AUTH: Authorization tuples and attributes
+    pub sys_table: RedbTable,        // SYSTEM: Config (NodeID, etc)
+    pub quarantine_table: RedbTable, // QUARANTINE: Global
+    pub metrics_table: RedbTable,    // METRICS: Time-series metrics
+    pub traces_table: RedbTable,     // TRACES: Trace spans
+    pub auth_store: AuthStore,       // AUTH: Authorization tuples and attributes
     pub node_id: u64,
-    pub clock: std::sync::Mutex<crate::storage::timestamp::Timestamp>,
-    pub vector_tx: std::sync::mpsc::SyncSender<(u64, Vec<f64>)>,
+    pub clock: parking_lot::Mutex<crate::storage::timestamp::Timestamp>,
+    // Channel for async vector inserts: (db_name, uid, vector_f64)
+    pub vector_tx: std::sync::mpsc::SyncSender<(String, u64, Vec<f64>)>,
+
+    // Phase 4: Tantivy full-text search engine (replaces SQLite FTS5 / BM25 KV keys)
+    pub search_engine: Arc<crate::storage::tantivy_search::SearchEngine>,
+    // Phase 4: usearch HNSW vector engine with f16 quantisation (replaces sqlite-vec)
+    pub vector_engine: Arc<crate::storage::vector_engine::VectorEngine>,
 
     // Incremental Fingerprints: DbName -> (Hash, Count)
     pub fingerprints: std::sync::Arc<
@@ -73,7 +81,7 @@ pub struct Storage {
 
 impl Storage {
     fn initialize_database_tables(
-        backend: &SqliteBackend,
+        backend: &RedbBackend,
         main_table_name: &str,
         history_table_name: &str,
     ) -> anyhow::Result<()> {
@@ -85,14 +93,14 @@ impl Storage {
 
     pub fn new(path: impl AsRef<Path>, node_id_override: Option<u64>) -> anyhow::Result<Self> {
         let base_path = path.as_ref().to_path_buf();
-        let default_db_path = base_path.join("default.db");
+        let default_db_path = base_path.join("default.redb");
         dbg_info!(
             storage_path = %base_path.display(),
             default_db_path = %default_db_path.display(),
             node_id_override = ?node_id_override,
             "Storage: starting initialization"
         );
-        let default_backend = Arc::new(SqliteBackend::new(&default_db_path)?);
+        let default_backend = Arc::new(RedbBackend::new(&default_db_path)?);
         dbg_info!(
             default_db_path = %default_db_path.display(),
             "Storage: opened default backend"
@@ -118,16 +126,15 @@ impl Storage {
         default_backend.create_table("auth_social_state")?;
         default_backend.create_table("auth_keys")?;
 
-        let sys_table = SqliteTable::new("sys".to_string(), default_backend.clone());
-        let quarantine_table = SqliteTable::new("quarantine".to_string(), default_backend.clone());
-        let metrics_table = SqliteTable::new("sys_metrics".to_string(), default_backend.clone());
-        let traces_table = SqliteTable::new("sys_traces".to_string(), default_backend.clone());
+        let sys_table = RedbTable::new("sys".to_string(), default_backend.clone());
+        let quarantine_table = RedbTable::new("quarantine".to_string(), default_backend.clone());
+        let metrics_table = RedbTable::new("sys_metrics".to_string(), default_backend.clone());
+        let traces_table = RedbTable::new("sys_traces".to_string(), default_backend.clone());
 
         // AuthZ Store
-        let auth_tuples_table =
-            SqliteTable::new("auth_tuples".to_string(), default_backend.clone());
+        let auth_tuples_table = RedbTable::new("auth_tuples".to_string(), default_backend.clone());
         let auth_attributes_table =
-            SqliteTable::new("auth_attributes".to_string(), default_backend.clone());
+            RedbTable::new("auth_attributes".to_string(), default_backend.clone());
         let auth_store = AuthStore::new(
             std::sync::Arc::new(auth_tuples_table)
                 as std::sync::Arc<dyn permissions::storage::auth_store::KvStore>,
@@ -135,29 +142,39 @@ impl Storage {
                 as std::sync::Arc<dyn permissions::storage::auth_store::KvStore>,
         );
 
-        // Vector Worker (Bounded Channel)
-        let (tx, rx) = std::sync::mpsc::sync_channel::<(u64, Vec<f64>)>(5000);
-        let worker_backend = default_backend.clone();
+        // --- Phase 4: Tantivy search engine ---
+        let search_engine = Arc::new(
+            crate::storage::tantivy_search::SearchEngine::new(&base_path)
+                .expect("SearchEngine::new failed"),
+        );
 
-        std::thread::spawn(move || {
-            dbg_println!("Storage: Vector Background Worker Started");
-            while let Ok((uid, vec)) = rx.recv() {
-                let vec_f32: Vec<f32> = vec.iter().map(|v| *v as f32).collect();
-                let vec_bytes = unsafe {
-                    std::slice::from_raw_parts(vec_f32.as_ptr() as *const u8, vec_f32.len() * 4)
-                };
+        // --- Phase 4: usearch vector engine ---
+        let vector_engine = Arc::new(
+            crate::storage::vector_engine::VectorEngine::new(&base_path)
+                .expect("VectorEngine::new failed"),
+        );
 
-                let _ = worker_backend.with_writer(|conn| {
-                    // Upsert vector into vec_data table
-                    conn.execute(
-                        "INSERT OR REPLACE INTO vec_data(uid, embedding) VALUES (?1, ?2)",
-                        rusqlite::params![uid as i64, vec_bytes],
-                    )?;
-                    Ok(())
-                });
-            }
-            dbg_println!("Storage: Vector Background Worker Stopped");
-        });
+        // Vector Worker (Bounded Channel) — (db_name, uid, vector_f64)
+        // Converts f64 → f32 and delegates to the usearch VectorEngine.
+        let (tx, rx) = std::sync::mpsc::sync_channel::<(String, u64, Vec<f64>)>(5000);
+
+        {
+            let vector_engine_clone = Arc::clone(&vector_engine);
+            std::thread::spawn(move || {
+                dbg_println!("Storage: Vector Background Worker Started (usearch/f16)");
+                while let Ok((db_name, uid, vec_f64)) = rx.recv() {
+                    // f64 → f32; usearch stores internally as f16 (ScalarKind::F16)
+                    let vec_f32: Vec<f32> = vec_f64.iter().map(|&x| x as f32).collect();
+                    if let Err(e) = vector_engine_clone.add_vector(&db_name, uid, &vec_f32) {
+                        eprintln!(
+                            "Storage: VectorEngine insert error (db={}, uid={}): {}",
+                            db_name, uid, e
+                        );
+                    }
+                }
+                dbg_println!("Storage: Vector Background Worker Stopped");
+            });
+        }
 
         // Auto-discover databases from registry
         let mut initial_keyspaces = std::collections::HashMap::new();
@@ -168,10 +185,9 @@ impl Storage {
             "default_main",
             "default_history",
         )?;
-        let default_main =
-            SqliteTable::new_main("default_main".to_string(), default_backend.clone());
+        let default_main = RedbTable::new_main("default_main".to_string(), default_backend.clone());
         let default_history =
-            SqliteTable::new("default_history".to_string(), default_backend.clone());
+            RedbTable::new("default_history".to_string(), default_backend.clone());
         initial_keyspaces.insert("default".to_string(), (default_main, default_history));
 
         let registry = sys_table.prefix(b"db:");
@@ -202,7 +218,7 @@ impl Storage {
                 continue;
             }
 
-            match SqliteBackend::new(&db_path) {
+            match RedbBackend::new(&db_path) {
                 Ok(b) => {
                     let b_arc = Arc::new(b);
                     let main_name = format!("{}_main", db_name);
@@ -212,8 +228,8 @@ impl Storage {
 
                     backends.insert(db_name.clone(), b_arc.clone());
 
-                    let main_table = SqliteTable::new_main(main_name, b_arc.clone());
-                    let hist_table = SqliteTable::new(hist_name, b_arc.clone());
+                    let main_table = RedbTable::new_main(main_name, b_arc.clone());
+                    let hist_table = RedbTable::new(hist_name, b_arc.clone());
 
                     initial_keyspaces.insert(db_name.clone(), (main_table, hist_table));
                     dbg_println!("Storage: Discovered and loaded database '{}'", db_name);
@@ -252,7 +268,7 @@ impl Storage {
 
         dbg_info!("Storage: Initialized with Node ID: {}", node_id);
 
-        let clock = std::sync::Mutex::new(if let Some(val) = sys_table.get(b"clock")? {
+        let clock = parking_lot::Mutex::new(if let Some(val) = sys_table.get(b"clock")? {
             if val.len() >= 16 {
                 let bytes: [u8; 16] = val[0..16].try_into().unwrap();
                 let stored = crate::storage::timestamp::Timestamp::from_bytes(&bytes);
@@ -289,6 +305,8 @@ impl Storage {
             node_id,
             clock,
             vector_tx: tx,
+            search_engine,
+            vector_engine,
             fingerprints: std::sync::Arc::new(dashmap::DashMap::new()),
             fingerprints_ready: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
@@ -321,10 +339,11 @@ impl Storage {
                     );
                 }
             });
-            Mutex::new(Vec::new())
+            parking_lot::Mutex::new(Vec::new())
         });
 
-        if let Ok(mut list) = mutex.lock() {
+        {
+            let mut list = mutex.lock();
             list.push(Arc::downgrade(self));
         }
     }
@@ -343,18 +362,18 @@ impl Storage {
         let db_path = if let Some(p) = custom_path {
             PathBuf::from(p)
         } else {
-            self.base_path.join(format!("{}.db", name))
+            self.base_path.join(format!("{}.redb", name))
         };
 
-        let new_backend = Arc::new(SqliteBackend::new(&db_path)?);
+        let new_backend = Arc::new(RedbBackend::new(&db_path)?);
 
         let main_name = format!("{}_main", name);
         let history_name = format!("{}_history", name);
 
         Self::initialize_database_tables(new_backend.as_ref(), &main_name, &history_name)?;
 
-        let main_table = SqliteTable::new_main(main_name.clone(), new_backend.clone());
-        let history_table = SqliteTable::new(history_name, new_backend.clone());
+        let main_table = RedbTable::new_main(main_name.clone(), new_backend.clone());
+        let history_table = RedbTable::new(history_name, new_backend.clone());
 
         self.backends.insert(name.to_string(), new_backend);
 
@@ -387,7 +406,7 @@ impl Storage {
         let db_path = PathBuf::from(new_path);
 
         // Ensure new backend can be initialized
-        let new_backend = Arc::new(SqliteBackend::new(&db_path)?);
+        let new_backend = Arc::new(RedbBackend::new(&db_path)?);
 
         let main_name = format!("{}_main", name);
         let history_name = format!("{}_history", name);
@@ -400,8 +419,8 @@ impl Storage {
             db_path.to_string_lossy().as_bytes(),
         )?;
 
-        let main_table = SqliteTable::new_main(main_name, new_backend.clone());
-        let history_table = SqliteTable::new(history_name, new_backend.clone());
+        let main_table = RedbTable::new_main(main_name, new_backend.clone());
+        let history_table = RedbTable::new(history_name, new_backend.clone());
 
         self.backends.insert(name.to_string(), new_backend);
 
@@ -424,7 +443,7 @@ impl Storage {
         for name in lock.keys() {
             let path = if name == "default" {
                 self.base_path
-                    .join("default.db")
+                    .join("default.redb")
                     .to_string_lossy()
                     .to_string()
             } else {
@@ -441,7 +460,7 @@ impl Storage {
         result
     }
 
-    pub fn get_database(&self, name: &str) -> Option<(SqliteTable, SqliteTable)> {
+    pub fn get_database(&self, name: &str) -> Option<(RedbTable, RedbTable)> {
         let lock = self.keyspaces.read().unwrap();
         lock.get(name).cloned()
     }
@@ -484,7 +503,7 @@ impl Storage {
         main.get(key)
     }
 
-    /// Last-Write-Wins Put — Atomic via SQLite ON CONFLICT
+    /// Last-Write-Wins Put — Atomic via redb read-then-write
     pub fn put_with_lww(
         &self,
         db_name: &str,
@@ -512,7 +531,7 @@ impl Storage {
         Ok(())
     }
 
-    /// Batch Last-Write-Wins Put — Uses SQLite transaction for atomicity
+    /// Batch Last-Write-Wins Put — Uses redb WriteTransaction for atomicity
     pub fn put_batch_lww(
         &self,
         db_name: &str,
@@ -538,10 +557,10 @@ impl Storage {
             .ok_or(anyhow::anyhow!("Database not found"))?
             .clone();
         let batch_start = Instant::now();
-        backend.write_batch(|conn| {
+        backend.write_batch(|txn| {
             for (uid, predicate, value) in &items {
                 let key = crate::storage::codec::Codec::encode_data_key(*uid, predicate);
-                main_clone.batch_upsert_lww_on_conn(conn, &key, value, &ts_bytes)?;
+                main_clone.batch_upsert_lww_on_txn(txn, &key, value, &ts_bytes)?;
             }
             Ok(())
         })?;
@@ -632,13 +651,23 @@ impl Storage {
 
         // Persist clock state
         {
-            let clock = self.clock.lock().unwrap();
+            let clock = self.clock.lock();
             let _ = self.sys_table.insert("clock", &clock.to_bytes());
         }
 
         // Persist fingerprints
         if let Err(e) = self.persist_fingerprints() {
             eprintln!("Storage: Failed to persist fingerprints: {}", e);
+        }
+
+        // Commit Tantivy indexes
+        if let Err(e) = self.search_engine.commit_all() {
+            eprintln!("Storage: Failed to commit Tantivy indexes: {}", e);
+        }
+
+        // Save usearch vector indexes
+        if let Err(e) = self.vector_engine.save_all() {
+            eprintln!("Storage: Failed to save vector indexes: {}", e);
         }
 
         for entry in self.backends.iter() {
@@ -651,16 +680,16 @@ impl Storage {
             }
         }
 
-        dbg_println!("Storage: Flush complete (WAL checkpoint done)");
+        dbg_println!("Storage: Flush complete (redb backends shutdown)");
         Ok(())
     }
 
-    /// SQLite B-trees don't need compaction — this is a no-op.
+    /// redb manages its own page reuse — this is a no-op.
     pub fn needs_compaction(&self) -> bool {
         false
     }
 
-    /// No-op for SQLite. Returns 0ms.
+    /// No-op for redb. Returns 0ms.
     pub fn compact(&self) -> anyhow::Result<u64> {
         Ok(0)
     }
@@ -721,7 +750,7 @@ impl Storage {
     }
 
     pub fn next_timestamp(&self) -> crate::storage::timestamp::Timestamp {
-        let mut clock = self.clock.lock().unwrap();
+        let mut clock = self.clock.lock();
         let now = crate::storage::timestamp::Timestamp::physical_now();
         let next = clock.send(now);
         *clock = next;
@@ -729,7 +758,7 @@ impl Storage {
     }
 
     pub fn update_clock(&self, remote_ts: &crate::storage::timestamp::Timestamp) {
-        let mut clock = self.clock.lock().unwrap();
+        let mut clock = self.clock.lock();
         let now = crate::storage::timestamp::Timestamp::physical_now();
         let next = clock.receive(remote_ts, now);
         *clock = next;
@@ -737,70 +766,51 @@ impl Storage {
 
     // --- Vector Operations ---
 
-    pub fn put_vector(&self, uid: u64, vector: Vec<f64>) -> anyhow::Result<()> {
+    /// Enqueue a vector insert for async processing by the background worker.
+    ///
+    /// The worker converts f64 → f32 and inserts into the usearch index using
+    /// f16 quantisation (`ScalarKind::F16`).
+    pub fn put_vector(&self, db_name: &str, uid: u64, vector: Vec<f64>) -> anyhow::Result<()> {
         self.vector_tx
-            .send((uid, vector))
+            .send((db_name.to_string(), uid, vector))
             .map_err(|e| anyhow::anyhow!("Failed to send vector to worker: {}", e))?;
         Ok(())
     }
 
-    pub fn delete_vector(&self, uid: u64) -> anyhow::Result<()> {
-        let uid_i64 = uid as i64;
-        if let Some(backend) = self.backends.get("default") {
-            backend.with_writer(|conn| {
-                conn.execute(
-                    "DELETE FROM vec_data WHERE uid = ?1",
-                    rusqlite::params![uid_i64],
-                )?;
-                Ok(())
-            })?;
-        }
-        Ok(())
+    /// Remove the vector for `uid` from the given database's HNSW index.
+    pub fn delete_vector(&self, db_name: &str, uid: u64) -> anyhow::Result<()> {
+        self.vector_engine.remove_vector(db_name, uid)
     }
 
-    pub fn search_vectors(&self, query: &[f64], k: usize) -> anyhow::Result<Vec<(u64, f64)>> {
-        let vec_f32: Vec<f32> = query.iter().map(|v| *v as f32).collect();
-        let vec_bytes =
-            unsafe { std::slice::from_raw_parts(vec_f32.as_ptr() as *const u8, vec_f32.len() * 4) };
-
-        let backend = self
-            .backends
-            .get("default")
-            .ok_or(anyhow::anyhow!("Missing default DB"))?;
-        let conn = backend.get_reader()?;
-        let res = (|| -> anyhow::Result<Vec<(u64, f64)>> {
-            let mut stmt = conn.prepare("SELECT uid, distance FROM vec_data WHERE embedding MATCH ?1 AND k = ?2 ORDER BY distance")?;
-            let rows = stmt.query_map(rusqlite::params![vec_bytes, k as i64], |row| {
-                let uid: i64 = row.get(0)?;
-                let distance: f64 = row.get(1)?;
-                Ok((uid as u64, distance))
-            })?;
-
-            let mut results = Vec::new();
-            for r in rows {
-                if let Ok(val) = r {
-                    results.push(val);
-                }
-            }
-            Ok(results)
-        })();
-
-        backend.return_reader(conn);
-        res
+    /// Approximate nearest-neighbour search against the given database's index.
+    ///
+    /// Returns `(uid, cosine_distance)` pairs sorted by ascending distance.
+    /// Distances are widened from f32 to f64 for API consistency.
+    pub fn search_vectors(
+        &self,
+        db_name: &str,
+        query: &[f64],
+        k: usize,
+    ) -> anyhow::Result<Vec<(u64, f64)>> {
+        let query_f32: Vec<f32> = query.iter().map(|&x| x as f32).collect();
+        let results = self
+            .vector_engine
+            .search(db_name, &query_f32, k)
+            .into_iter()
+            .map(|(uid, dist)| (uid, dist as f64))
+            .collect();
+        Ok(results)
     }
 
     // --- Incremental Fingerprint Logic ---
 
     pub fn hash_item(key: &[u8], value: &[u8]) -> u64 {
-        const OFFSET_BASIS: u64 = 0xcbf29ce484222325;
-        const PRIME: u64 = 0x100000001b3;
-
-        let mut hash = OFFSET_BASIS;
-        for &byte in key.iter().chain(value.iter()) {
-            hash ^= byte as u64;
-            hash = hash.wrapping_mul(PRIME);
-        }
-        hash
+        // xxh3 for better collision properties and speed vs FNV-1a.
+        // The XOR accumulation in update_history_hash is intentional and preserved.
+        let mut combined = Vec::with_capacity(key.len() + value.len());
+        combined.extend_from_slice(key);
+        combined.extend_from_slice(value);
+        xxhash_rust::xxh3::xxh3_64(&combined)
     }
 
     pub fn rebuild_fingerprints(&self) -> anyhow::Result<()> {
@@ -873,7 +883,7 @@ impl Storage {
 
     pub fn restore_fingerprints(&self) -> anyhow::Result<()> {
         let keyspaces = self.keyspaces.read().unwrap();
-        let mut needs_rebuild: Vec<(String, SqliteTable)> = Vec::new();
+        let mut needs_rebuild: Vec<(String, RedbTable)> = Vec::new();
         dbg_info!(
             keyspace_count = keyspaces.len(),
             "Storage: restoring fingerprints"
@@ -961,8 +971,8 @@ impl Storage {
     }
 
     /// Spawn a background thread to rebuild fingerprints for the given databases.
-    fn spawn_fingerprint_rebuild(&self, db_list: Vec<(String, SqliteTable)>) {
-        // SqliteTable is Clone+Send, so we can move it into the thread safely
+    fn spawn_fingerprint_rebuild(&self, db_list: Vec<(String, RedbTable)>) {
+        // RedbTable is Clone+Send, so we can move it into the thread safely
         // Clone Arcs to keep fingerprints alive in background thread
         let fingerprints = self.fingerprints.clone();
         let ready_flag = self.fingerprints_ready.clone();

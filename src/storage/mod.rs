@@ -1,5 +1,8 @@
 pub mod backend;
 pub mod blob;
 pub mod codec;
-pub mod sqlite_backend;
+pub mod redb_backend;
+pub mod tantivy_search;
 pub mod timestamp;
+pub mod vector_engine;
+pub mod write_coalescer;

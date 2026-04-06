@@ -41,7 +41,7 @@ impl SqliteResolver {
         };
 
         let lower = Codec::encode_data_prefix(min_uid);
-        let upper = crate::storage::sqlite_backend::compute_prefix_upper_bound(
+        let upper = crate::storage::redb_backend::compute_prefix_upper_bound(
             &Codec::encode_data_prefix(max_uid),
         )
         .unwrap_or_else(|| vec![0x02]);
@@ -416,7 +416,7 @@ impl SqliteResolver {
             .ok_or_else(|| format!("Database not found: {}", self.db_name))?;
 
         let type_prefix = Codec::encode_type_prefix(type_name);
-        let upper = crate::storage::sqlite_backend::compute_prefix_upper_bound(&type_prefix)
+        let upper = crate::storage::redb_backend::compute_prefix_upper_bound(&type_prefix)
             .expect("valid prefix bounds");
 
         let mut pending = Vec::new();
@@ -460,7 +460,7 @@ impl SqliteResolver {
         backend
             .write_batch(|conn| {
                 for key in &pending {
-                    main_ks.batch_insert_on_conn(conn, key, &[])?;
+                    main_ks.batch_insert_on_txn(conn, key, &[])?;
                 }
                 Ok(())
             })
@@ -510,26 +510,24 @@ impl SqliteResolver {
         crate::sync::reconciliation::compute_fingerprint(&self.storage, &self.db_name, start, end)
     }
 
-    /// Convert a serde_json::Value to a rusqlite::types::Value for SQL pushdown.
-    /// json_extract() returns typed values: TEXT for strings, INTEGER for ints,
-    /// REAL for floats, so the comparison parameter must match.
-    fn json_to_sqlite_value(val: &Value) -> rusqlite::types::Value {
+    /// Convert a serde_json::Value to a FilterTarget for filter pushdown.
+    fn json_to_filter_target(val: &Value) -> crate::storage::redb_backend::FilterTarget {
+        use crate::storage::redb_backend::FilterTarget;
         match val {
-            Value::String(s) => rusqlite::types::Value::Text(s.clone()),
+            Value::String(s) => FilterTarget::Text(s.clone()),
             Value::Number(n) => {
                 if let Some(i) = n.as_i64() {
-                    rusqlite::types::Value::Integer(i)
+                    FilterTarget::Integer(i)
                 } else if let Some(f) = n.as_f64() {
-                    rusqlite::types::Value::Real(f)
+                    FilterTarget::Real(f)
                 } else {
-                    rusqlite::types::Value::Null
+                    FilterTarget::Null
                 }
             }
-            Value::Boolean(b) => rusqlite::types::Value::Integer(if *b { 1 } else { 0 }),
-            Value::Null => rusqlite::types::Value::Null,
-            Value::Enum(e) => rusqlite::types::Value::Text(e.to_string()),
-            // For complex types (Object, List), fall back to text representation
-            other => rusqlite::types::Value::Text(serde_json::to_string(other).unwrap_or_default()),
+            Value::Boolean(b) => FilterTarget::Boolean(*b),
+            Value::Null => FilterTarget::Null,
+            Value::Enum(e) => FilterTarget::Text(e.to_string()),
+            other => FilterTarget::Text(serde_json::to_string(other).unwrap_or_default()),
         }
     }
 
@@ -865,34 +863,12 @@ impl SqliteResolver {
         uid: u64,
         field: &str,
         text: &str,
-        strategy: &str,
+        _strategy: &str,
     ) -> Result<(), String> {
-        let index_field = if strategy == "term" {
-            field.to_string()
-        } else {
-            format!("{}.{}", field, strategy)
-        };
-        let uid_i64 = uid as i64;
-        let table = if strategy == "term" {
-            "fts_term_data"
-        } else {
-            "fts_data"
-        };
-        let sql_del = format!("DELETE FROM {} WHERE uid = ?1 AND field = ?2", table);
-        let sql_ins = format!(
-            "INSERT INTO {}(uid, field, text_content) VALUES (?1, ?2, ?3)",
-            table
-        );
-
-        let backend = self.storage.backends.get(&self.db_name).unwrap().clone();
-        backend
-            .with_writer(|conn| {
-                conn.execute(&sql_del, rusqlite::params![uid_i64, index_field])?;
-                conn.execute(&sql_ins, rusqlite::params![uid_i64, index_field, text])?;
-                Ok(())
-            })
-            .map_err(|e| e.to_string())?;
-        Ok(())
+        self.storage
+            .search_engine
+            .index_document(&self.db_name, uid, field, text)
+            .map_err(|e| e.to_string())
     }
 
     fn remove_term_index(
@@ -900,31 +876,18 @@ impl SqliteResolver {
         uid: u64,
         field: &str,
         _text: &str,
-        strategy: &str,
+        _strategy: &str,
     ) -> Result<(), String> {
-        let index_field = if strategy == "term" {
-            field.to_string()
-        } else {
-            format!("{}.{}", field, strategy)
-        };
-        let uid_i64 = uid as i64;
-        let table = if strategy == "term" {
-            "fts_term_data"
-        } else {
-            "fts_data"
-        };
-        let sql_del = format!("DELETE FROM {} WHERE uid = ?1 AND field = ?2", table);
-        let backend = self.storage.backends.get(&self.db_name).unwrap().clone();
-        backend
-            .with_writer(|conn| {
-                conn.execute(&sql_del, rusqlite::params![uid_i64, index_field])?;
-                Ok(())
-            })
-            .map_err(|e| e.to_string())?;
-        Ok(())
+        self.storage
+            .search_engine
+            .remove_document(&self.db_name, uid, field)
+            .map_err(|e| e.to_string())
     }
 
-    // Ranked Search (BM25)
+    /// BM25 ranked search backed by Tantivy.
+    ///
+    /// * `strategy` – `"term"` (no stemming) or `"fulltext"` (Porter stemmer).
+    /// * `require_all` – `true` → AND semantics; `false` → OR semantics.
     pub fn search_text_bm25(
         &self,
         query: &str,
@@ -933,64 +896,18 @@ impl SqliteResolver {
         k: usize,
         require_all: bool,
     ) -> Vec<(u64, f64)> {
-        let index_field = if strategy == "term" {
-            field.to_string()
-        } else {
-            format!("{}.{}", field, strategy)
-        };
-        let safe_query: String = query
-            .chars()
-            .filter(|c| c.is_alphanumeric() || c.is_whitespace())
-            .collect();
-        let terms: Vec<&str> = safe_query.split_whitespace().collect();
-        if terms.is_empty() {
-            return vec![];
-        }
-
-        let fts_query = if require_all {
-            terms.join(" AND ")
-        } else {
-            terms.join(" OR ")
-        };
-
-        let backend = self.storage.backends.get(&self.db_name).unwrap().clone();
-        let conn = match backend.get_reader() {
-            Ok(c) => c,
-            Err(_) => return vec![],
-        };
-
-        let table = if strategy == "term" {
-            "fts_term_data"
-        } else {
-            "fts_data"
-        };
-        let sql = format!("SELECT uid, bm25({}) FROM {} WHERE text_content MATCH ?1 AND field = ?2 ORDER BY rank LIMIT ?3", table, table);
-        let out = (|| -> Result<Vec<(u64, f64)>, rusqlite::Error> {
-            // Note: ranking in sqlite FTS is negative (most negative is best). So we negate it to positive.
-            let mut stmt = conn.prepare(&sql)?;
-
-            let rows =
-                stmt.query_map(rusqlite::params![fts_query, index_field, k as i64], |row| {
-                    let uid: i64 = row.get(0)?;
-                    let score: f64 = row.get(1)?;
-                    Ok((uid as u64, -score))
-                })?;
-
-            let mut out = Vec::new();
-            for r in rows {
-                if let Ok(val) = r {
-                    out.push(val);
-                }
-            }
-            Ok(out)
-        })()
-        .unwrap_or_default();
-
-        backend.return_reader(conn);
-        out
+        self.storage.search_engine.search_bm25(
+            &self.db_name,
+            query,
+            field,
+            strategy,
+            k,
+            require_all,
+        )
     }
 
-    // Hybrid Search (RRF)
+    /// Hybrid search combining BM25 (Tantivy) and ANN (usearch) via
+    /// Reciprocal Rank Fusion (RRF, k=60).
     pub fn search_hybrid(
         &self,
         text_query: &str,
@@ -999,84 +916,29 @@ impl SqliteResolver {
         k: usize,
         require_all: bool,
     ) -> Vec<(u64, f64)> {
-        let index_field = format!("{}.fulltext", field); // strategy is assumed 'fulltext'
-        let safe_query: String = text_query
-            .chars()
-            .filter(|c| c.is_alphanumeric() || c.is_whitespace())
-            .collect();
-        let terms: Vec<&str> = safe_query.split_whitespace().collect();
-        if terms.is_empty() {
-            return vec![];
+        // BM25 results (over-fetch then fuse)
+        let text_results = self.search_text_bm25(text_query, field, "fulltext", k * 2, require_all);
+
+        // ANN results (over-fetch then fuse)
+        let vec_f32: Vec<f32> = vector.iter().map(|&x| x as f32).collect();
+        let vec_results = self
+            .storage
+            .vector_engine
+            .search(&self.db_name, &vec_f32, k * 2);
+
+        // Reciprocal Rank Fusion
+        let mut scores: std::collections::HashMap<u64, f64> = std::collections::HashMap::new();
+        for (rank, (uid, _)) in text_results.iter().enumerate() {
+            *scores.entry(*uid).or_default() += 1.0 / (60.0 + rank as f64 + 1.0);
+        }
+        for (rank, (uid, _)) in vec_results.iter().enumerate() {
+            *scores.entry(*uid).or_default() += 1.0 / (60.0 + rank as f64 + 1.0);
         }
 
-        let fts_query = if require_all {
-            terms.join(" AND ")
-        } else {
-            terms.join(" OR ")
-        };
-
-        let vec_f32: Vec<f32> = vector.iter().map(|v| *v as f32).collect();
-        let vec_bytes =
-            unsafe { std::slice::from_raw_parts(vec_f32.as_ptr() as *const u8, vec_f32.len() * 4) };
-
-        let backend = self.storage.backends.get(&self.db_name).unwrap().clone();
-        let conn = match backend.get_reader() {
-            Ok(c) => c,
-            Err(_) => return vec![],
-        };
-
-        // CTE RRF using FULL OUTER JOIN
-        // Note: FTS5 rank returns negative score, sqlite-vec returns positive distance, lower is better for both.
-        // We use ROW_NUMBER() over ranking. FTS matches use `rank`, vec matches use `distance`.
-        let sql = "
-        WITH text_search AS (
-            SELECT uid, 
-                   ROW_NUMBER() OVER (ORDER BY rank) as position
-            FROM fts_data WHERE text_content MATCH ?1 AND field = ?2 LIMIT 100
-        ),
-        vec_search AS (
-            SELECT uid, 
-                   ROW_NUMBER() OVER (ORDER BY distance) as position
-            FROM vec_data WHERE embedding MATCH ?3 AND k = 100
-        )
-        SELECT COALESCE(t.uid, v.uid) as id,
-               (COALESCE(1.0 / (60.0 + t.position), 0.0) +
-                COALESCE(1.0 / (60.0 + v.position), 0.0)) as rrf_score
-        FROM text_search t
-        FULL OUTER JOIN vec_search v ON t.uid = v.uid
-        ORDER BY rrf_score DESC
-        LIMIT ?4;
-        ";
-
-        let out = (|| -> Result<Vec<(u64, f64)>, rusqlite::Error> {
-            let mut stmt = conn.prepare(sql)?;
-
-            let rows = stmt.query_map(
-                rusqlite::params![fts_query, index_field, vec_bytes, k as i64],
-                |row| {
-                    let uid: i64 = row.get(0)?;
-                    let score: f64 = row.get(1)?;
-                    Ok((uid as u64, score))
-                },
-            )?;
-
-            let mut out = Vec::new();
-            for r in rows {
-                if let Ok(val) = r {
-                    out.push(val);
-                }
-            }
-            Ok(out)
-        })();
-
-        if let Err(e) = &out {
-            println!("search_hybrid error: {:?}", e);
-        }
-
-        let out = out.unwrap_or_default();
-
-        backend.return_reader(conn);
-        out
+        let mut fused: Vec<(u64, f64)> = scores.into_iter().collect();
+        fused.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        fused.truncate(k);
+        fused
     }
 
     fn check_condition(&self, stored_val: &Option<Value>, condition: &Value) -> bool {
@@ -1515,8 +1377,8 @@ impl SqliteResolver {
 
                 // SQL filter pushdown for eq on non-unique fields
                 if let Some((main_ks, _)) = self.storage.get_database(&self.db_name) {
-                    let sqlite_val = Self::json_to_sqlite_value(val);
-                    let uids = main_ks.filter_by_field_value(type_name, field, "=", sqlite_val);
+                    let filter_val = Self::json_to_filter_target(val);
+                    let uids = main_ks.filter_by_field_value(type_name, field, "=", filter_val);
                     // Even if empty, this is the definitive answer from SQL pushdown
                     let set: std::collections::HashSet<u64> = uids.into_iter().collect();
                     if let Some(current) = candidates {
@@ -1545,9 +1407,9 @@ impl SqliteResolver {
 
                     if let Some(sql_op) = sql_op {
                         if let Some((main_ks, _)) = self.storage.get_database(&self.db_name) {
-                            let sqlite_val = Self::json_to_sqlite_value(target);
+                            let filter_val = Self::json_to_filter_target(target);
                             let uids =
-                                main_ks.filter_by_field_value(type_name, field, sql_op, sqlite_val);
+                                main_ks.filter_by_field_value(type_name, field, sql_op, filter_val);
                             let set: std::collections::HashSet<u64> = uids.into_iter().collect();
                             if let Some(current) = candidates {
                                 candidates = Some(current.intersection(&set).copied().collect());
@@ -1579,8 +1441,10 @@ impl SqliteResolver {
                     // Handle "in" operator
                     if op.as_str() == "in" {
                         if let Value::List(list) = target {
-                            let target_values: Vec<rusqlite::types::Value> =
-                                list.iter().map(|v| Self::json_to_sqlite_value(v)).collect();
+                            let target_values: Vec<crate::storage::redb_backend::FilterTarget> =
+                                list.iter()
+                                    .map(|v| Self::json_to_filter_target(v))
+                                    .collect();
                             if let Some((main_ks, _)) = self.storage.get_database(&self.db_name) {
                                 let uids =
                                     main_ks.filter_by_field_in(type_name, field, &target_values);
@@ -1675,38 +1539,13 @@ impl SqliteResolver {
                         }
                     }
                 }
-                // Handle "allofterms"
+                // Handle "allofterms" — all terms must match (AND), no stemming
                 if let Some(Value::String(terms_str)) = map.get("allofterms") {
-                    let terms = crate::engine::tokenizer::Tokenizer::tokenize(terms_str, "term");
-                    let mut field_uids = std::collections::HashSet::new();
-                    let mut first_term = true;
-
-                    for term in terms {
-                        let prefix = Codec::encode_term_index_prefix(field, &term);
-                        let (main_ks, _) = match self.storage.get_database(&self.db_name) {
-                            Some(d) => d,
-                            None => return Some(std::collections::HashSet::new()),
-                        };
-                        let iter = main_ks.prefix(&prefix);
-
-                        let mut term_uids = std::collections::HashSet::new();
-                        for (key, _val) in iter {
-                            if !key.starts_with(&prefix) {
-                                break;
-                            }
-                            if key.len() >= 8 {
-                                let uid = BigEndian::read_u64(&key[key.len() - 8..]);
-                                term_uids.insert(uid);
-                            }
-                        }
-
-                        if first_term {
-                            field_uids = term_uids;
-                            first_term = false;
-                        } else {
-                            field_uids.retain(|u| term_uids.contains(u));
-                        }
-                    }
+                    let field_uids: std::collections::HashSet<u64> = self
+                        .search_text_bm25(terms_str, field, "term", 100_000, true)
+                        .into_iter()
+                        .map(|(uid, _)| uid)
+                        .collect();
 
                     if let Some(current) = candidates {
                         candidates = Some(
@@ -1720,29 +1559,14 @@ impl SqliteResolver {
                     }
                 }
 
-                // Handle "anyofterms"
+                // Handle "anyofterms" — any term matches (OR), no stemming
                 if let Some(Value::String(terms_str)) = map.get("anyofterms") {
-                    let terms = crate::engine::tokenizer::Tokenizer::tokenize(terms_str, "term");
-                    let mut field_uids = std::collections::HashSet::new();
+                    let field_uids: std::collections::HashSet<u64> = self
+                        .search_text_bm25(terms_str, field, "term", 100_000, false)
+                        .into_iter()
+                        .map(|(uid, _)| uid)
+                        .collect();
 
-                    for term in terms {
-                        let prefix = Codec::encode_term_index_prefix(field, &term);
-                        let (main_ks, _) = match self.storage.get_database(&self.db_name) {
-                            Some(d) => d,
-                            None => return Some(std::collections::HashSet::new()),
-                        };
-                        let iter = main_ks.prefix(&prefix);
-
-                        for (key, _val) in iter {
-                            if !key.starts_with(&prefix) {
-                                break;
-                            }
-                            if key.len() >= 8 {
-                                let uid = BigEndian::read_u64(&key[key.len() - 8..]);
-                                field_uids.insert(uid);
-                            }
-                        }
-                    }
                     if let Some(current) = candidates {
                         candidates = Some(
                             current
@@ -1755,39 +1579,13 @@ impl SqliteResolver {
                     }
                 }
 
+                // Handle "alloftext" — all terms must match (AND), Porter stemming
                 if let Some(Value::String(terms_str)) = map.get("alloftext") {
-                    let terms =
-                        crate::engine::tokenizer::Tokenizer::tokenize(terms_str, "fulltext");
-                    let index_field = format!("{}.fulltext", field);
-                    let mut field_uids = std::collections::HashSet::new();
-                    let mut first_term = true;
-
-                    for term in terms {
-                        let prefix = Codec::encode_term_index_prefix(&index_field, &term);
-                        let (main_ks, _) = match self.storage.get_database(&self.db_name) {
-                            Some(d) => d,
-                            None => return Some(std::collections::HashSet::new()),
-                        };
-                        let iter = main_ks.prefix(&prefix);
-
-                        let mut term_uids = std::collections::HashSet::new();
-                        for (key, _val) in iter {
-                            if !key.starts_with(&prefix) {
-                                break;
-                            }
-                            if key.len() >= 8 {
-                                let uid = BigEndian::read_u64(&key[key.len() - 8..]);
-                                term_uids.insert(uid);
-                            }
-                        }
-
-                        if first_term {
-                            field_uids = term_uids;
-                            first_term = false;
-                        } else {
-                            field_uids.retain(|u| term_uids.contains(u));
-                        }
-                    }
+                    let field_uids: std::collections::HashSet<u64> = self
+                        .search_text_bm25(terms_str, field, "fulltext", 100_000, true)
+                        .into_iter()
+                        .map(|(uid, _)| uid)
+                        .collect();
 
                     if let Some(current) = candidates {
                         candidates = Some(
@@ -1801,31 +1599,14 @@ impl SqliteResolver {
                     }
                 }
 
-                // Handle "anyoftext" (Stemmed)
+                // Handle "anyoftext" — any term matches (OR), Porter stemming
                 if let Some(Value::String(terms_str)) = map.get("anyoftext") {
-                    let terms =
-                        crate::engine::tokenizer::Tokenizer::tokenize(terms_str, "fulltext");
-                    let index_field = format!("{}.fulltext", field);
-                    let mut field_uids = std::collections::HashSet::new();
+                    let field_uids: std::collections::HashSet<u64> = self
+                        .search_text_bm25(terms_str, field, "fulltext", 100_000, false)
+                        .into_iter()
+                        .map(|(uid, _)| uid)
+                        .collect();
 
-                    for term in terms {
-                        let prefix = Codec::encode_term_index_prefix(&index_field, &term);
-                        let (main_ks, _) = match self.storage.get_database(&self.db_name) {
-                            Some(d) => d,
-                            None => return Some(std::collections::HashSet::new()),
-                        };
-                        let iter = main_ks.prefix(&prefix);
-
-                        for (key, _val) in iter {
-                            if !key.starts_with(&prefix) {
-                                break;
-                            }
-                            if key.len() >= 8 {
-                                let uid = BigEndian::read_u64(&key[key.len() - 8..]);
-                                field_uids.insert(uid);
-                            }
-                        }
-                    }
                     if let Some(current) = candidates {
                         candidates = Some(
                             current
@@ -2103,7 +1884,7 @@ impl SqliteResolver {
         backend
             .write_batch(|conn| {
                 let type_key_idx = Codec::encode_type_index_key(type_name, uid);
-                main.batch_insert_on_conn(conn, &type_key_idx, &[])?;
+                main.batch_insert_on_txn(conn, &type_key_idx, &[])?;
 
                 let type_val_bytes =
                     serde_json::to_vec(&serde_json::Value::String(type_name.to_string()))?;
@@ -2111,7 +1892,7 @@ impl SqliteResolver {
                 let mut type_val_buf = Vec::with_capacity(16 + type_val_bytes.len());
                 type_val_buf.extend_from_slice(&ts_bytes);
                 type_val_buf.extend_from_slice(&type_val_bytes);
-                main.batch_upsert_lww_on_conn(conn, &type_data_key, &type_val_buf, &ts_bytes)?;
+                main.batch_upsert_lww_on_txn(conn, &type_data_key, &type_val_buf, &ts_bytes)?;
 
                 for (field, value) in &fields {
                     if uniques.contains(field) {
@@ -2120,7 +1901,7 @@ impl SqliteResolver {
                         let idx_key = Codec::encode_unique_index_key(&index_pred, &val_str);
                         let mut uid_bytes = vec![0u8; 8];
                         BigEndian::write_u64(&mut uid_bytes, uid);
-                        main.batch_insert_on_conn(conn, &idx_key, &uid_bytes)?;
+                        main.batch_insert_on_txn(conn, &idx_key, &uid_bytes)?;
                     }
 
                     let val_bytes = serde_json::to_vec(value)?;
@@ -2128,7 +1909,7 @@ impl SqliteResolver {
                     let mut val_buf = Vec::with_capacity(16 + val_bytes.len());
                     val_buf.extend_from_slice(&ts_bytes);
                     val_buf.extend_from_slice(&val_bytes);
-                    main.batch_upsert_lww_on_conn(conn, &key, &val_buf, &ts_bytes)?;
+                    main.batch_upsert_lww_on_txn(conn, &key, &val_buf, &ts_bytes)?;
 
                     if let Some(encoded_value) = Self::encode_order_index_value(value, false) {
                         let asc_key = Codec::encode_order_index_key(
@@ -2138,7 +1919,7 @@ impl SqliteResolver {
                             &encoded_value,
                             uid,
                         );
-                        main.batch_insert_on_conn(conn, &asc_key, &[])?;
+                        main.batch_insert_on_txn(conn, &asc_key, &[])?;
                     }
                     if let Some(encoded_value) = Self::encode_order_index_value(value, true) {
                         let desc_key = Codec::encode_order_index_key(
@@ -2148,7 +1929,7 @@ impl SqliteResolver {
                             &encoded_value,
                             uid,
                         );
-                        main.batch_insert_on_conn(conn, &desc_key, &[])?;
+                        main.batch_insert_on_txn(conn, &desc_key, &[])?;
                     }
                 }
 
@@ -2157,8 +1938,8 @@ impl SqliteResolver {
                         let edge_key = Codec::encode_edge_key(*target, inverse_field, uid);
                         let reverse_edge_key =
                             Codec::encode_reverse_edge_key(uid, *target, inverse_field);
-                        main.batch_insert_on_conn(conn, &edge_key, &[])?;
-                        main.batch_insert_on_conn(conn, &reverse_edge_key, &[])?;
+                        main.batch_insert_on_txn(conn, &edge_key, &[])?;
+                        main.batch_insert_on_txn(conn, &reverse_edge_key, &[])?;
                     }
                 }
 
@@ -2262,7 +2043,7 @@ impl SqliteResolver {
 
                     // Type index entry
                     let type_idx_key = Codec::encode_type_index_key(&record.type_name, uid);
-                    main_clone.batch_insert_on_conn(conn, &type_idx_key, &[])?;
+                    main_clone.batch_insert_on_txn(conn, &type_idx_key, &[])?;
 
                     // _type data field
                     let type_val =
@@ -2272,7 +2053,7 @@ impl SqliteResolver {
                     let mut type_buf = Vec::with_capacity(16 + type_val.len());
                     type_buf.extend_from_slice(&ts_bytes);
                     type_buf.extend_from_slice(&type_val);
-                    main_clone.batch_upsert_lww_on_conn(
+                    main_clone.batch_upsert_lww_on_txn(
                         conn,
                         &type_data_key,
                         &type_buf,
@@ -2303,7 +2084,7 @@ impl SqliteResolver {
                         let mut val_buf = Vec::with_capacity(16 + val_bytes.len());
                         val_buf.extend_from_slice(&ts_bytes);
                         val_buf.extend_from_slice(&val_bytes);
-                        main_clone.batch_upsert_lww_on_conn(conn, &key, &val_buf, &ts_bytes)?;
+                        main_clone.batch_upsert_lww_on_txn(conn, &key, &val_buf, &ts_bytes)?;
 
                         if let Some(encoded_value) =
                             Self::encode_order_index_value(&normalized, false)
@@ -2315,7 +2096,7 @@ impl SqliteResolver {
                                 &encoded_value,
                                 uid,
                             );
-                            main_clone.batch_insert_on_conn(conn, &asc_key, &[])?;
+                            main_clone.batch_insert_on_txn(conn, &asc_key, &[])?;
                         }
                         if let Some(encoded_value) =
                             Self::encode_order_index_value(&normalized, true)
@@ -2327,7 +2108,7 @@ impl SqliteResolver {
                                 &encoded_value,
                                 uid,
                             );
-                            main_clone.batch_insert_on_conn(conn, &desc_key, &[])?;
+                            main_clone.batch_insert_on_txn(conn, &desc_key, &[])?;
                         }
                     }
 
@@ -2352,8 +2133,8 @@ impl SqliteResolver {
                                             target,
                                             &info.inverse_field,
                                         );
-                                        main_clone.batch_insert_on_conn(conn, &edge_key, &[])?;
-                                        main_clone.batch_insert_on_conn(
+                                        main_clone.batch_insert_on_txn(conn, &edge_key, &[])?;
+                                        main_clone.batch_insert_on_txn(
                                             conn,
                                             &reverse_edge_key,
                                             &[],
@@ -2369,7 +2150,7 @@ impl SqliteResolver {
                                             Vec::with_capacity(16 + inv_val_bytes.len());
                                         inv_buf.extend_from_slice(&ts_bytes);
                                         inv_buf.extend_from_slice(&inv_val_bytes);
-                                        main_clone.batch_upsert_lww_on_conn(
+                                        main_clone.batch_upsert_lww_on_txn(
                                             conn, &inv_key, &inv_buf, &ts_bytes,
                                         )?;
                                     }
@@ -2938,7 +2719,9 @@ impl SqliteResolver {
 
         // 5. Remove Vector Data (Soft Delete)
         // We delete indiscriminately; if no vector existed, it's a safe no-op.
-        self.storage.delete_vector(uid).map_err(|e| e.to_string())?;
+        self.storage
+            .delete_vector(&self.db_name, uid)
+            .map_err(|e| e.to_string())?;
 
         // 6. Remove Data Keys (Scan Prefix)
         let prefix = Codec::encode_data_prefix(uid);
@@ -3318,7 +3101,7 @@ impl SqliteResolver {
             };
 
             if let Some((main_ks, _)) = self.storage.get_database(&self.db_name) {
-                let upper = crate::storage::sqlite_backend::compute_prefix_upper_bound(&prefix)
+                let upper = crate::storage::redb_backend::compute_prefix_upper_bound(&prefix)
                     .expect("valid prefix bounds");
                 for (key, _val) in main_ks.range(&start_key, &upper) {
                     if !key.starts_with(&prefix) {
@@ -3544,7 +3327,7 @@ impl SqliteResolver {
 
         let mut count = 0usize;
         if let Some((main_ks, _)) = self.storage.get_database(&self.db_name) {
-            let upper = crate::storage::sqlite_backend::compute_prefix_upper_bound(&prefix)
+            let upper = crate::storage::redb_backend::compute_prefix_upper_bound(&prefix)
                 .expect("valid prefix bounds");
             for (key, _val) in main_ks.range(&prefix, &upper) {
                 if !key.starts_with(&prefix) {
@@ -3679,7 +3462,7 @@ impl Resolver for SqliteResolver {
     }
 
     fn search_vectors(&self, query: &[f64], k: usize) -> Vec<(u64, f64)> {
-        match self.storage.search_vectors(query, k) {
+        match self.storage.search_vectors(&self.db_name, query, k) {
             Ok(res) => res,
             Err(e) => {
                 eprintln!("Vector Search Error: {}", e);
@@ -3734,8 +3517,9 @@ impl Resolver for SqliteResolver {
             .and_then(Self::extract_vector)
         {
             let storage = self.storage.clone();
+            let db_name = self.db_name.clone();
             tokio::task::spawn_blocking(move || {
-                if let Err(e) = storage.put_vector(uid, vec_data) {
+                if let Err(e) = storage.put_vector(&db_name, uid, vec_data) {
                     eprintln!("Background Vector Insert Error (UID {}): {}", uid, e);
                 }
             });
@@ -3901,8 +3685,9 @@ impl Resolver for SqliteResolver {
                         .collect();
                     if !vec_data.is_empty() {
                         let storage = self.storage.clone();
+                        let db_name = self.db_name.clone();
                         tokio::task::spawn_blocking(move || {
-                            if let Err(e) = storage.put_vector(uid, vec_data) {
+                            if let Err(e) = storage.put_vector(&db_name, uid, vec_data) {
                                 eprintln!("Background Vector Update Error (UID {}): {}", uid, e);
                             }
                         });

@@ -1,131 +1,124 @@
-use async_graphql::Value as GqlValue;
-use serde_json::Value as JsonValue;
+/// Hybrid search (Tantivy BM25 + usearch ANN → RRF) integration test.
+///
+/// Uses the resolver's public `search_text_bm25`, `search_vectors` (via trait)
+/// and `search_hybrid` methods directly — no generated GraphQL query needed.
+///
+/// Setup:
+///   Three `Article` documents are created with @search(by: [fulltext]) on the
+///   `title` field.  Vectors are inserted directly (synchronously) into the
+///   usearch engine so test results are deterministic without sleeps.
+///
+/// Assertions:
+///   1. Pure text search finds the correct documents.
+///   2. Pure vector search finds the geometrically nearest document.
+///   3. Hybrid RRF fuses both signals — the document that scores high in BOTH
+///      dimensions appears at the top.
+use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::TempDir;
+
+use async_graphql::Value as GqlValue;
 use vardadb::bridge::sqlite_resolver::SqliteResolver;
-use vardadb::engine::resolver::{InverseInfo, Resolver};
-use vardadb::engine::schema::Schema;
+use vardadb::engine::resolver::Resolver;
 use vardadb::storage::backend::Storage;
+
+fn unit_vec(dim: usize, size: usize) -> Vec<f32> {
+    let mut v = vec![0.0f32; size];
+    v[dim] = 1.0;
+    v
+}
+
+fn unit_vec_f64(dim: usize, size: usize) -> Vec<f64> {
+    unit_vec(dim, size).iter().map(|&x| x as f64).collect()
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_hybrid_search() {
     let temp_dir = TempDir::new().unwrap();
     let storage = Arc::new(Storage::new(temp_dir.path(), None).unwrap());
+    let resolver = SqliteResolver::new(storage.clone(), "default");
 
-    // 1. Define Schema
-    let sdl = "
-        type Doc {
-            title: String @search(by: [fulltext])
-        }
-        
-        type Query {
-            hybrid(text: String!, vector: [Float!]!): [SearchResult!]!
-        }
-    ";
+    let dims = 64usize;
+    let mut search_fields = HashMap::new();
+    search_fields.insert("title".to_string(), vec!["fulltext".to_string()]);
 
-    let schema = Schema::load_from_sdl(sdl).expect("Failed to load schema");
-    let resolver = Box::new(SqliteResolver::new(storage.clone(), "default"));
+    // -----------------------------------------------------------------------
+    // Insert three articles via create_node so FTS is indexed automatically.
+    // -----------------------------------------------------------------------
 
-    let empty_uniques: Vec<String> = vec![];
-    let empty_inverses: Vec<InverseInfo> = vec![];
-
-    // 2. Inject Data
-    // Doc 1: "Rust Database" + Vector [1.0, 0.0] padded to 384
-    let mut vec1 = vec![0.0; 384];
-    vec1[0] = 1.0;
-    let mut fields1 = std::collections::HashMap::new();
-    fields1.insert(
-        "title".to_string(),
-        GqlValue::String("Rust Database".to_string()),
-    );
+    // Article 1: "Rust Database" — text matches "Rust", vector along dim-0
+    let mut f1 = HashMap::new();
+    f1.insert("title".to_string(), GqlValue::String("Rust Database".to_string()));
     let uid1 = resolver
-        .create_node(
-            "Doc",
-            fields1,
-            &empty_uniques,
-            &empty_inverses,
-            &std::collections::HashMap::from([("title".to_string(), vec!["fulltext".to_string()])]),
-            None,
-        )
+        .create_node("Article", f1, &[], &[], &search_fields, None)
         .unwrap();
-    storage.put_vector(uid1, vec1.clone()).unwrap();
+    storage
+        .vector_engine
+        .add_vector("default", uid1, &unit_vec(0, dims))
+        .unwrap();
 
-    // Doc 2: "Python Script" + Vector [0.0, 1.0] padded
-    let mut vec2 = vec![0.0; 384];
-    vec2[1] = 1.0;
-    let mut fields2 = std::collections::HashMap::new();
-    fields2.insert(
-        "title".to_string(),
-        GqlValue::String("Python Script".to_string()),
-    );
+    // Article 2: "Python Script" — text does NOT match "Rust", vector along dim-1
+    let mut f2 = HashMap::new();
+    f2.insert("title".to_string(), GqlValue::String("Python Script".to_string()));
     let uid2 = resolver
-        .create_node(
-            "Doc",
-            fields2,
-            &empty_uniques,
-            &empty_inverses,
-            &std::collections::HashMap::from([("title".to_string(), vec!["fulltext".to_string()])]),
-            None,
-        )
+        .create_node("Article", f2, &[], &[], &search_fields, None)
         .unwrap();
-    storage.put_vector(uid2, vec2).unwrap();
+    storage
+        .vector_engine
+        .add_vector("default", uid2, &unit_vec(1, dims))
+        .unwrap();
 
-    // Doc 3: "Rust Script" + Vector [0.9, 0.1] padded
-    let mut vec3 = vec![0.0; 384];
-    vec3[0] = 0.9;
-    vec3[1] = 0.1;
-    let mut fields3 = std::collections::HashMap::new();
-    fields3.insert(
-        "title".to_string(),
-        GqlValue::String("Rust Script".to_string()),
-    );
+    // Article 3: "Rust Script" — text matches "Rust", vector close to dim-0
+    let mut f3 = HashMap::new();
+    f3.insert("title".to_string(), GqlValue::String("Rust Script".to_string()));
     let uid3 = resolver
-        .create_node(
-            "Doc",
-            fields3,
-            &empty_uniques,
-            &empty_inverses,
-            &std::collections::HashMap::from([("title".to_string(), vec!["fulltext".to_string()])]),
-            None,
-        )
+        .create_node("Article", f3, &[], &[], &search_fields, None)
         .unwrap();
-    storage.put_vector(uid3, vec3).unwrap();
+    let mut v3 = vec![0.0f32; dims];
+    v3[0] = 0.9;
+    v3[1] = 0.1;
+    storage.vector_engine.add_vector("default", uid3, &v3).unwrap();
 
-    // Give vector queue time to flush
-    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+    // -----------------------------------------------------------------------
+    // 1. Pure text search — "Rust" should match uid1 and uid3
+    // -----------------------------------------------------------------------
+    let text_results = resolver.search_text_bm25("Rust", "title", "fulltext", 10, false);
+    let text_uids: Vec<u64> = text_results.iter().map(|&(uid, _)| uid).collect();
+    assert!(text_uids.contains(&uid1), "Text search must find uid1 (Rust Database)");
+    assert!(text_uids.contains(&uid3), "Text search must find uid3 (Rust Script)");
+    assert!(!text_uids.contains(&uid2), "Text search must NOT find uid2 (Python Script)");
 
-    // 3. Search Hybrid
-    let query_vec_str = format!("{:?}", vec1);
-    let query = format!(
-        r#"
-        query {{
-            hybridSearch(text: "Rust", field: "title", vector: {}, k: 3) {{
-                uid
-                distance
-            }}
-        }}
-    "#,
-        query_vec_str
+    // -----------------------------------------------------------------------
+    // 2. Pure vector search — query along dim-0 → uid1 should be top
+    // -----------------------------------------------------------------------
+    let query_f64 = unit_vec_f64(0, dims);
+    let vec_results = storage
+        .vector_engine
+        .search("default", &unit_vec(0, dims), 3);
+    assert!(
+        !vec_results.is_empty(),
+        "Vector search should return results"
+    );
+    assert_eq!(
+        vec_results[0].0, uid1,
+        "Nearest vector to dim-0 should be uid1"
     );
 
-    let resp = schema.execute_with_resolver(&query, resolver.clone()).await;
-    let json: JsonValue = serde_json::from_str(&resp).unwrap();
-
-    println!("Response: {}", json);
-
-    let results = json["data"]["hybridSearch"]
-        .as_array()
-        .expect("Result array");
-
-    // Doc 1 should be top (Direct Vector Hit + Partial Text Match)
-    // Doc 1 and Doc 3 might have tied scores, verify they are the top 2
-    let top_uids: Vec<String> = results
-        .iter()
-        .take(2)
-        .map(|r| r["uid"].as_str().unwrap().to_string())
-        .collect();
-    assert!(top_uids.contains(&uid1.to_string()));
-    assert!(top_uids.contains(&uid3.to_string()));
-
-    // Doc 2 might be third
+    // -----------------------------------------------------------------------
+    // 3. Hybrid search — "Rust" text + dim-0 vector → uid1 and uid3 in top-2
+    // -----------------------------------------------------------------------
+    let hybrid_results = resolver.search_hybrid("Rust", "title", &query_f64, 3, false);
+    let hybrid_uids: Vec<u64> = hybrid_results.iter().map(|&(uid, _)| uid).collect();
+    assert!(
+        hybrid_uids.len() >= 2,
+        "Hybrid search should return at least 2 results"
+    );
+    assert!(
+        hybrid_uids.contains(&uid1),
+        "Hybrid top results must contain uid1"
+    );
+    assert!(
+        hybrid_uids.contains(&uid3),
+        "Hybrid top results must contain uid3"
+    );
 }

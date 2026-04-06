@@ -2,7 +2,7 @@ use async_graphql::Value;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::Mutex;
+use parking_lot::Mutex;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InverseInfo {
@@ -37,7 +37,6 @@ impl RequestCache {
     pub fn get_resolved(&self, uid: u64, field_name: &str) -> Option<Option<Value>> {
         self.resolved_fields
             .lock()
-            .unwrap()
             .get(&(uid, field_name.to_string()))
             .cloned()
     }
@@ -45,14 +44,12 @@ impl RequestCache {
     pub fn insert_resolved(&self, uid: u64, field_name: &str, value: Option<Value>) {
         self.resolved_fields
             .lock()
-            .unwrap()
             .insert((uid, field_name.to_string()), value);
     }
 
     pub fn get_related_uids(&self, uid: u64, field_name: &str) -> Option<Vec<u64>> {
         self.related_uids
             .lock()
-            .unwrap()
             .get(&(uid, field_name.to_string()))
             .cloned()
     }
@@ -60,22 +57,21 @@ impl RequestCache {
     pub fn insert_related_uids(&self, uid: u64, field_name: &str, uids: Vec<u64>) {
         self.related_uids
             .lock()
-            .unwrap()
             .insert((uid, field_name.to_string()), uids);
     }
 
     pub fn get_loaded_object(&self, uid: u64) -> Option<HashMap<String, Value>> {
-        self.loaded_objects.lock().unwrap().get(&uid).cloned()
+        self.loaded_objects.lock().get(&uid).cloned()
     }
 
     pub fn insert_loaded_object(&self, uid: u64, fields: HashMap<String, Value>) {
         {
-            let mut resolved = self.resolved_fields.lock().unwrap();
+            let mut resolved = self.resolved_fields.lock();
             for (field_name, value) in &fields {
                 resolved.insert((uid, field_name.clone()), Some(value.clone()));
             }
         }
-        self.loaded_objects.lock().unwrap().insert(uid, fields);
+        self.loaded_objects.lock().insert(uid, fields);
     }
 }
 

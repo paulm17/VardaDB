@@ -1,51 +1,46 @@
-use lru::LruCache;
-use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use std::num::NonZeroUsize;
-use std::sync::Mutex;
+use std::time::Duration;
 
-/// A thread-safe Bounded LRU Cache for GraphQL Query Results.
+/// A thread-safe, lock-free, bounded cache for GraphQL query results.
 ///
-/// Principles:
-/// 1. Bounded: Fixed capacity (e.g. 100) to prevent OOM.
-/// 2. LRU: Evicts least accessed items effectively.
-/// 3. Invalidation: Clears entries based on tags (Type names).
+/// Powered by `moka` — a concurrent cache with:
+/// - Lock-free reads (no global Mutex contention)
+/// - LRU eviction with size bounds
+/// - TTL-based expiration
+/// - Concurrent reads without blocking
+///
+/// This replaces the previous `Mutex<LruCache>` implementation which
+/// required a global lock on every cache hit under concurrent GraphQL load.
 pub struct QueryCache {
-    inner: Mutex<LruCache<u64, String>>, // Key: Hash(Query+Vars), Value: JSON Response
-                                         // For invalidation, we might need a secondary index: TypeName -> Vec<Key>
-                                         // Or simplified: Global clear on mutation / Type-based clear by iterating (slow?).
-                                         // Given the LRU size is small (100), iteration is fine.
+    inner: moka::sync::Cache<u64, String>,
 }
 
 impl QueryCache {
     pub fn new(capacity: usize) -> Self {
         Self {
-            inner: Mutex::new(LruCache::new(NonZeroUsize::new(capacity).unwrap())),
+            inner: moka::sync::Cache::builder()
+                .max_capacity(capacity as u64)
+                .time_to_live(Duration::from_secs(60)) // TTL: 1 minute
+                .build(),
         }
     }
 
     pub fn get(&self, query: &str, vars: &str) -> Option<String> {
         let key = Self::hash_query(query, vars);
-        let mut lock = self.inner.lock().unwrap();
-        lock.get(&key).cloned() // Return Clone of String (cheap enough for JSON)
+        self.inner.get(&key)
     }
 
     pub fn put(&self, query: &str, vars: &str, result: String) {
         let key = Self::hash_query(query, vars);
-        let mut lock = self.inner.lock().unwrap();
-        lock.put(key, result);
+        self.inner.insert(key, result);
     }
 
     pub fn invalidate(&self) {
-        // Simple strategy: Clear All on Mutation.
-        // This guarantees consistency without complex dependency tracking.
-        // For a Demo/Local DB, this is acceptable.
-        let mut lock = self.inner.lock().unwrap();
-        lock.clear();
+        self.inner.invalidate_all();
     }
 
     fn hash_query(query: &str, vars: &str) -> u64 {
-        let mut hasher = DefaultHasher::new();
+        let mut hasher = ahash::AHasher::default();
         query.hash(&mut hasher);
         vars.hash(&mut hasher);
         hasher.finish()

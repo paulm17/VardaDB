@@ -270,30 +270,30 @@ pub async fn init_system(config: crate::config::VardaConfig) -> (Arc<ServerState
     let auth_state = if let Some(auth_config) = config.auth.clone() {
         println!("Auth subsystem enabled");
 
-        // Build auth store from pre-created SqliteTables
+        // Build auth store from pre-created RedbTables
         let default_backend = storage.backends.get("default").unwrap().clone();
         let auth_login_store = auth::state::AuthStore::new(
-            std::sync::Arc::new(crate::storage::sqlite_backend::SqliteTable::new(
+            std::sync::Arc::new(crate::storage::redb_backend::RedbTable::new(
                 "auth_users".to_string(),
                 default_backend.clone(),
             )) as std::sync::Arc<dyn auth::state::KvStore>,
-            std::sync::Arc::new(crate::storage::sqlite_backend::SqliteTable::new(
+            std::sync::Arc::new(crate::storage::redb_backend::RedbTable::new(
                 "auth_tokens".to_string(),
                 default_backend.clone(),
             )) as std::sync::Arc<dyn auth::state::KvStore>,
-            std::sync::Arc::new(crate::storage::sqlite_backend::SqliteTable::new(
+            std::sync::Arc::new(crate::storage::redb_backend::RedbTable::new(
                 "auth_confirmations".to_string(),
                 default_backend.clone(),
             )) as std::sync::Arc<dyn auth::state::KvStore>,
-            std::sync::Arc::new(crate::storage::sqlite_backend::SqliteTable::new(
+            std::sync::Arc::new(crate::storage::redb_backend::RedbTable::new(
                 "auth_identities".to_string(),
                 default_backend.clone(),
             )) as std::sync::Arc<dyn auth::state::KvStore>,
-            std::sync::Arc::new(crate::storage::sqlite_backend::SqliteTable::new(
+            std::sync::Arc::new(crate::storage::redb_backend::RedbTable::new(
                 "auth_social_state".to_string(),
                 default_backend.clone(),
             )) as std::sync::Arc<dyn auth::state::KvStore>,
-            std::sync::Arc::new(crate::storage::sqlite_backend::SqliteTable::new(
+            std::sync::Arc::new(crate::storage::redb_backend::RedbTable::new(
                 "auth_keys".to_string(),
                 default_backend.clone(),
             )) as std::sync::Arc<dyn auth::state::KvStore>,
