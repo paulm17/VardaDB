@@ -116,6 +116,10 @@ pub struct SearchEngine {
     /// create duplicate Tantivy documents.
     /// Cleared when `remove_document` is called for that (uid, field).
     indexed_this_batch: DashMap<(String, u64, String), ()>,
+    /// Batched deletes pending commit.
+    /// Maps db_name -> Vec<(uid, field_name)>.
+    /// Deletes are batched to reduce write amplification.
+    pending_deletes: DashMap<String, Vec<(u64, String)>>,
 }
 
 impl SearchEngine {
@@ -124,6 +128,7 @@ impl SearchEngine {
             base_path: base_path.to_path_buf(),
             indexes: DashMap::new(),
             indexed_this_batch: DashMap::new(),
+            pending_deletes: DashMap::new(),
         })
     }
 
@@ -227,6 +232,11 @@ impl SearchEngine {
         field: &str,
         text: &str,
     ) -> anyhow::Result<()> {
+        // Flush any pending deletes for this db before adding new documents.
+        // This ensures that if a remove_document was called before an update,
+        // the delete is applied before the new document is added.
+        self.flush_deletes(db_name)?;
+
         // Deduplicate: if the same (db, uid, field) has already been indexed,
         // skip the add. This prevents duplicate Tantivy documents when a field
         // declares multiple search strategies (e.g. `@search(by: [term, fulltext])`),
@@ -240,16 +250,6 @@ impl SearchEngine {
 
         let idx = self.get_or_create(db_name)?;
         let cid = composite_doc_id(uid, field);
-
-        // Note: We do NOT delete old documents here. If this is an update,
-        // remove_document() should have been called first. Deleting here
-        // would cause the newly added document to also be deleted because
-        // they share the same doc_id_field value.
-        //
-        // The flow for an update is:
-        // 1. remove_document() -> delete_term + commit
-        // 2. index_document() -> add new doc + commit (this function)
-        // If we also deleted here, the delete_term would apply to BOTH documents.
 
         let mut doc = TantivyDocument::default();
         doc.add_u64(idx.uid_field, uid);
@@ -271,18 +271,39 @@ impl SearchEngine {
     /// Called per-field during node updates and deletes so that only the
     /// relevant field entry is removed, leaving other field documents intact.
     ///
-    /// IMPORTANT: This commits the Tantivy writer to ensure the delete is
-    /// applied before any subsequent add_document for the same (uid, field).
-    /// Without this, the delete_term would also delete the newly added document.
+    /// Deletes are batched to reduce write amplification. When the batch
+    /// size reaches 100, an automatic flush is triggered.
     pub fn remove_document(&self, db_name: &str, uid: u64, field: &str) -> anyhow::Result<()> {
         let batch_key = (db_name.to_string(), uid, field.to_string());
         self.indexed_this_batch.remove(&batch_key);
 
-        let idx = self.get_or_create(db_name)?;
-        let cid = composite_doc_id(uid, field);
-        {
+        let mut deletes = self.pending_deletes.entry(db_name.to_string()).or_default();
+        deletes.push((uid, field.to_string()));
+
+        if deletes.len() >= 100 {
+            drop(deletes);
+            self.flush_deletes(db_name)?;
+        }
+        Ok(())
+    }
+
+    /// Flush all pending deletes for a database.
+    ///
+    /// Commits the batched deletes to Tantivy. Called automatically when
+    /// batch size reaches 100, or manually via commit/commit_all.
+    pub fn flush_deletes(&self, db_name: &str) -> anyhow::Result<()> {
+        if let Some((_, deletes)) = self.pending_deletes.remove(db_name) {
+            if deletes.is_empty() {
+                return Ok(());
+            }
+            let idx = self.get_or_create(db_name)?;
             let mut writer = idx.writer.lock();
-            writer.delete_term(Term::from_field_u64(idx.doc_id_field, cid));
+
+            for (uid, field) in deletes {
+                let cid = composite_doc_id(uid, &field);
+                writer.delete_term(Term::from_field_u64(idx.doc_id_field, cid));
+            }
+
             writer.commit()?;
         }
         Ok(())
@@ -774,6 +795,7 @@ impl SearchEngine {
 
     /// Commit pending writes for a single database.
     pub fn commit(&self, db_name: &str) -> anyhow::Result<()> {
+        self.flush_deletes(db_name)?;
         if let Some(idx) = self.indexes.get(db_name) {
             let mut writer = idx.writer.lock();
             writer.commit()?;
@@ -787,6 +809,7 @@ impl SearchEngine {
     /// Commit pending writes for all open indexes.
     pub fn commit_all(&self) -> anyhow::Result<()> {
         for entry in self.indexes.iter() {
+            self.flush_deletes(entry.key())?;
             let mut writer = entry.value().writer.lock();
             writer.commit()?;
         }
@@ -839,5 +862,86 @@ impl SearchEngine {
             terms.push(Term::from_field_text(field, &token.text));
         }
         terms
+    }
+}
+
+impl Drop for SearchEngine {
+    fn drop(&mut self) {
+        let dbs: Vec<String> = self
+            .pending_deletes
+            .iter()
+            .map(|e| e.key().clone())
+            .collect();
+        for db in dbs {
+            let _ = self.flush_deletes(&db);
+        }
+        for entry in self.indexes.iter() {
+            let _ = self.commit(entry.key());
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn create_test_search_engine() -> (TempDir, SearchEngine) {
+        let temp_dir = TempDir::new().expect("failed to create temp dir");
+        let search_engine =
+            SearchEngine::new(temp_dir.path()).expect("failed to create search engine");
+        (temp_dir, search_engine)
+    }
+
+    #[test]
+    fn test_deletes_are_batched() {
+        let (_temp_dir, search_engine) = create_test_search_engine();
+
+        for i in 0..50 {
+            search_engine
+                .remove_document("default", i, "content")
+                .unwrap();
+        }
+
+        assert_eq!(
+            search_engine
+                .pending_deletes
+                .get("default")
+                .map(|v| v.len())
+                .unwrap_or(0),
+            50
+        );
+
+        for i in 50..100 {
+            search_engine
+                .remove_document("default", i, "content")
+                .unwrap();
+        }
+
+        assert!(
+            search_engine
+                .pending_deletes
+                .get("default")
+                .map(|v| v.len())
+                .unwrap_or(0)
+                < 100
+        );
+    }
+
+    #[test]
+    fn test_flush_deletes_clears_pending() {
+        let (_temp_dir, search_engine) = create_test_search_engine();
+
+        for i in 0..10 {
+            search_engine
+                .remove_document("default", i, "content")
+                .unwrap();
+        }
+
+        assert!(search_engine.pending_deletes.contains_key("default"));
+
+        search_engine.flush_deletes("default").unwrap();
+
+        assert!(!search_engine.pending_deletes.contains_key("default"));
     }
 }
