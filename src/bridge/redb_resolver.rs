@@ -907,6 +907,76 @@ impl RedbResolver {
         Ok(())
     }
 
+    fn write_geohash_index(&self, uid: u64, field: &str, lat: f64, lon: f64) -> Result<(), String> {
+        let geohash = crate::storage::geohash::encode_geohash(lat, lon, 8);
+        for i in 1..=8 {
+            let prefix = &geohash[..i];
+            let key = Codec::encode_geohash_index_key(field, prefix, uid);
+            self.storage
+                .insert(&self.db_name, &key, &[])
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
+    fn remove_geohash_index(
+        &self,
+        uid: u64,
+        field: &str,
+        lat: f64,
+        lon: f64,
+    ) -> Result<(), String> {
+        let geohash = crate::storage::geohash::encode_geohash(lat, lon, 8);
+        for i in 1..=8 {
+            let prefix = &geohash[..i];
+            let key = Codec::encode_geohash_index_key(field, prefix, uid);
+            self.storage
+                .remove(&self.db_name, &key)
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
+    fn extract_geo_point(value: &serde_json::Value) -> Option<(f64, f64)> {
+        if let serde_json::Value::Object(map) = value {
+            let lat = map.get("latitude")?.as_f64()?;
+            let lon = map.get("longitude")?.as_f64()?;
+            Some((lat, lon))
+        } else {
+            None
+        }
+    }
+
+    fn search_geohash_near(
+        &self,
+        field: &str,
+        lat: f64,
+        lon: f64,
+        max_meters: f64,
+    ) -> Result<std::collections::HashSet<u64>, String> {
+        let precision = crate::storage::geohash::precision_for_radius(max_meters);
+        let center_geohash = crate::storage::geohash::encode_geohash(lat, lon, precision);
+        let neighbor_geohashes = crate::storage::geohash::get_neighbor_geohashes(&center_geohash);
+
+        let mut candidates = std::collections::HashSet::new();
+
+        for geohash in &neighbor_geohashes {
+            let prefix = Codec::encode_geohash_prefix(field, geohash);
+            if let Some((main_ks, _)) = self.storage.get_database(&self.db_name) {
+                for (key, _) in main_ks.prefix(&prefix) {
+                    if !key.starts_with(&prefix) {
+                        break;
+                    }
+                    if let Some(uid) = Codec::decode_geohash_index_uid(&key) {
+                        candidates.insert(uid);
+                    }
+                }
+            }
+        }
+
+        Ok(candidates)
+    }
+
     fn search_contains(
         &self,
         field: &str,
@@ -1584,6 +1654,41 @@ impl RedbResolver {
                                     candidates = Some(set);
                                 }
                                 handled_by_pushdown = true;
+                            }
+                        }
+                    }
+
+                    // Handle "near" operator using geohash index
+                    if op.as_str() == "near" {
+                        if let Value::Object(near_args) = target {
+                            if let (Some(Value::Number(dist_val)), Some(Value::Object(coord_map))) =
+                                (near_args.get("distance"), near_args.get("coordinate"))
+                            {
+                                if let (
+                                    Some(Value::Number(lat_val)),
+                                    Some(Value::Number(lon_val)),
+                                ) = (coord_map.get("latitude"), coord_map.get("longitude"))
+                                {
+                                    if let (Some(max_meters), Some(target_lat), Some(target_lon)) =
+                                        (dist_val.as_f64(), lat_val.as_f64(), lon_val.as_f64())
+                                    {
+                                        if let Ok(geo_candidates) = self.search_geohash_near(
+                                            field, target_lat, target_lon, max_meters,
+                                        ) {
+                                            if let Some(current) = candidates {
+                                                candidates = Some(
+                                                    current
+                                                        .intersection(&geo_candidates)
+                                                        .copied()
+                                                        .collect(),
+                                                );
+                                            } else {
+                                                candidates = Some(geo_candidates);
+                                            }
+                                            handled_by_pushdown = true;
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -2537,6 +2642,22 @@ impl RedbResolver {
             }
         }
 
+        // 5c. Handle Geohash Indexing for GeoPoint fields with @search(by: [geo])
+        for (field, tokenizers) in search_fields {
+            if tokenizers.contains(&"geo".to_string()) {
+                if let Some(value) = fields.get(field) {
+                    if let Some((lat, lon)) = Self::extract_geo_point(value) {
+                        if let Err(e) = self.write_geohash_index(uid, field, lat, lon) {
+                            eprintln!(
+                                "Geohash Indexing Failed (create_node) for uid={}: {}",
+                                uid, e
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
         let total = fn_start.elapsed();
         if crate::debug_logging() && total.as_millis() > 2 {
             eprintln!(
@@ -2878,6 +2999,30 @@ impl RedbResolver {
                 }
             }
 
+            // Remove old geohash indexes for GeoPoint fields
+            if let Some(tokenizers) = search_fields.get(field) {
+                if tokenizers.contains(&"geo".to_string()) {
+                    let data_key = Codec::encode_data_key(uid, field);
+                    if let Ok(Some(bytes)) = self.storage.get(&self.db_name, &data_key) {
+                        let payload = if bytes.len() > 16 {
+                            &bytes[16..]
+                        } else {
+                            &bytes
+                        };
+                        if let Ok(val) = serde_json::from_slice::<serde_json::Value>(payload) {
+                            if let Some((lat, lon)) = Self::extract_geo_point(&val) {
+                                if let Err(e) = self.remove_geohash_index(uid, field, lat, lon) {
+                                    eprintln!(
+                                        "Geohash remove failed (update_node) for uid={}: {}",
+                                        uid, e
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             let data_key = Codec::encode_data_key(uid, field);
             if let Ok(Some(bytes)) = self.storage.get(&self.db_name, &data_key) {
                 let payload = if bytes.len() > 16 {
@@ -3026,6 +3171,19 @@ impl RedbResolver {
                             .index_facet(&self.db_name, uid, field, s)
                     {
                         eprintln!("Facet Indexing Failed (update_node) for uid={}: {}", uid, e);
+                    }
+                }
+            }
+            // Geohash indexing for GeoPoint fields
+            if let Some(tokenizers) = search_fields.get(field) {
+                if tokenizers.contains(&"geo".to_string()) {
+                    if let Some((lat, lon)) = Self::extract_geo_point(value) {
+                        if let Err(e) = self.write_geohash_index(uid, field, lat, lon) {
+                            eprintln!(
+                                "Geohash Indexing Failed (update_node) for uid={}: {}",
+                                uid, e
+                            );
+                        }
                     }
                 }
             }
@@ -3211,6 +3369,30 @@ impl RedbResolver {
                 .remove_facet(&self.db_name, uid, field)
             {
                 eprintln!("Facet remove failed (delete_node) for uid={}: {}", uid, e);
+            }
+        }
+
+        // Remove Geohash Indexes for GeoPoint fields
+        for (field, tokenizers) in search_fields {
+            if tokenizers.contains(&"geo".to_string()) {
+                let data_key = Codec::encode_data_key(uid, field);
+                if let Ok(Some(bytes)) = self.storage.get(&self.db_name, &data_key) {
+                    let payload = if bytes.len() > 16 {
+                        &bytes[16..]
+                    } else {
+                        &bytes
+                    };
+                    if let Ok(val) = serde_json::from_slice::<serde_json::Value>(payload) {
+                        if let Some((lat, lon)) = Self::extract_geo_point(&val) {
+                            if let Err(e) = self.remove_geohash_index(uid, field, lat, lon) {
+                                eprintln!(
+                                    "Geohash remove failed (delete_node) for uid={}: {}",
+                                    uid, e
+                                );
+                            }
+                        }
+                    }
+                }
             }
         }
 

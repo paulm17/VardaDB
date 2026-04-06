@@ -320,4 +320,33 @@ impl Codec {
         }
         Some(BigEndian::read_u64(&key[key.len() - 8..]))
     }
+
+    // --- Geohash Index (Geo Spatial) ---
+    // Prefix: 0x0A
+    // Key: [0x0A][Predicate][0x00][Geohash][UID]
+    pub fn encode_geohash_index_key(predicate: &str, geohash: &str, uid: u64) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(1 + predicate.len() + 1 + geohash.len() + 8);
+        buf.push(0x0A);
+        buf.extend_from_slice(predicate.as_bytes());
+        buf.push(0x00);
+        buf.extend_from_slice(geohash.as_bytes());
+        buf.write_u64::<BigEndian>(uid).unwrap();
+        buf
+    }
+
+    pub fn encode_geohash_prefix(predicate: &str, geohash_prefix: &str) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(1 + predicate.len() + 1 + geohash_prefix.len());
+        buf.push(0x0A);
+        buf.extend_from_slice(predicate.as_bytes());
+        buf.push(0x00);
+        buf.extend_from_slice(geohash_prefix.as_bytes());
+        buf
+    }
+
+    pub fn decode_geohash_index_uid(key: &[u8]) -> Option<u64> {
+        if key.len() < 9 || key[0] != 0x0A {
+            return None;
+        }
+        Some(BigEndian::read_u64(&key[key.len() - 8..]))
+    }
 }

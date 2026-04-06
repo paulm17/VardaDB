@@ -26,7 +26,7 @@ Do these 4 issues FIRST before any features. Without these, you **will lose data
 | 07 | Tantivy batching | 1-2 weeks | `src/storage/tantivy_search.rs` | ✅ Done |
 | 08 | Trigram index | 1 week | `src/storage/codec.rs` | ✅ Done |
 | 09 | Faceted search | 2-3 weeks | `src/storage/tantivy_search.rs` | ✅ Done |
-| 10 | Geo spatial index | 3-4 weeks | `src/storage/codec.rs` | |
+| 10 | Geo spatial index | 3-4 weeks | `src/storage/codec.rs` | ✅ Done |
 | 11 | resolve_list HNSW | 1-2 weeks | `src/bridge/redb_resolver.rs` | |
 | 12 | Embedding generation | 5-6 weeks | `src/embedding/mod.rs` | |
 

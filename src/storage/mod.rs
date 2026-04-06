@@ -1,6 +1,7 @@
 pub mod backend;
 pub mod blob;
 pub mod codec;
+pub mod geohash;
 pub mod redb_backend;
 pub mod tantivy_search;
 pub mod timestamp;
