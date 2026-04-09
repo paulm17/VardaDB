@@ -872,25 +872,9 @@ impl SqliteResolver {
         } else {
             format!("{}.{}", field, strategy)
         };
-        let uid_i64 = uid as i64;
-        let table = if strategy == "term" {
-            "fts_term_data"
-        } else {
-            "fts_data"
-        };
-        let sql_del = format!("DELETE FROM {} WHERE uid = ?1 AND field = ?2", table);
-        let sql_ins = format!(
-            "INSERT INTO {}(uid, field, text_content) VALUES (?1, ?2, ?3)",
-            table
-        );
-
-        let backend = self.storage.backends.get(&self.db_name).unwrap().clone();
-        backend
-            .with_writer(|conn| {
-                conn.execute(&sql_del, rusqlite::params![uid_i64, index_field])?;
-                conn.execute(&sql_ins, rusqlite::params![uid_i64, index_field, text])?;
-                Ok(())
-            })
+        self.storage
+            .search_engine
+            .index_document(&self.db_name, uid, &index_field, text)
             .map_err(|e| e.to_string())?;
         Ok(())
     }
@@ -907,24 +891,13 @@ impl SqliteResolver {
         } else {
             format!("{}.{}", field, strategy)
         };
-        let uid_i64 = uid as i64;
-        let table = if strategy == "term" {
-            "fts_term_data"
-        } else {
-            "fts_data"
-        };
-        let sql_del = format!("DELETE FROM {} WHERE uid = ?1 AND field = ?2", table);
-        let backend = self.storage.backends.get(&self.db_name).unwrap().clone();
-        backend
-            .with_writer(|conn| {
-                conn.execute(&sql_del, rusqlite::params![uid_i64, index_field])?;
-                Ok(())
-            })
+        self.storage
+            .search_engine
+            .remove_document(&self.db_name, uid, &index_field)
             .map_err(|e| e.to_string())?;
         Ok(())
     }
 
-    // Ranked Search (BM25)
     pub fn search_text_bm25(
         &self,
         query: &str,
@@ -938,59 +911,16 @@ impl SqliteResolver {
         } else {
             format!("{}.{}", field, strategy)
         };
-        let safe_query: String = query
-            .chars()
-            .filter(|c| c.is_alphanumeric() || c.is_whitespace())
-            .collect();
-        let terms: Vec<&str> = safe_query.split_whitespace().collect();
-        if terms.is_empty() {
-            return vec![];
-        }
-
-        let fts_query = if require_all {
-            terms.join(" AND ")
-        } else {
-            terms.join(" OR ")
-        };
-
-        let backend = self.storage.backends.get(&self.db_name).unwrap().clone();
-        let conn = match backend.get_reader() {
-            Ok(c) => c,
-            Err(_) => return vec![],
-        };
-
-        let table = if strategy == "term" {
-            "fts_term_data"
-        } else {
-            "fts_data"
-        };
-        let sql = format!("SELECT uid, bm25({}) FROM {} WHERE text_content MATCH ?1 AND field = ?2 ORDER BY rank LIMIT ?3", table, table);
-        let out = (|| -> Result<Vec<(u64, f64)>, rusqlite::Error> {
-            // Note: ranking in sqlite FTS is negative (most negative is best). So we negate it to positive.
-            let mut stmt = conn.prepare(&sql)?;
-
-            let rows =
-                stmt.query_map(rusqlite::params![fts_query, index_field, k as i64], |row| {
-                    let uid: i64 = row.get(0)?;
-                    let score: f64 = row.get(1)?;
-                    Ok((uid as u64, -score))
-                })?;
-
-            let mut out = Vec::new();
-            for r in rows {
-                if let Ok(val) = r {
-                    out.push(val);
-                }
-            }
-            Ok(out)
-        })()
-        .unwrap_or_default();
-
-        backend.return_reader(conn);
-        out
+        self.storage.search_engine.search_bm25(
+            &self.db_name,
+            query,
+            &index_field,
+            strategy,
+            k,
+            require_all,
+        )
     }
 
-    // Hybrid Search (RRF)
     pub fn search_hybrid(
         &self,
         text_query: &str,
@@ -999,84 +929,30 @@ impl SqliteResolver {
         k: usize,
         require_all: bool,
     ) -> Vec<(u64, f64)> {
-        let index_field = format!("{}.fulltext", field); // strategy is assumed 'fulltext'
-        let safe_query: String = text_query
-            .chars()
-            .filter(|c| c.is_alphanumeric() || c.is_whitespace())
-            .collect();
-        let terms: Vec<&str> = safe_query.split_whitespace().collect();
-        if terms.is_empty() {
-            return vec![];
-        }
-
-        let fts_query = if require_all {
-            terms.join(" AND ")
-        } else {
-            terms.join(" OR ")
-        };
-
+        let bm25_results = self.search_text_bm25(text_query, field, "fulltext", 100, require_all);
         let vec_f32: Vec<f32> = vector.iter().map(|v| *v as f32).collect();
-        let vec_bytes =
-            unsafe { std::slice::from_raw_parts(vec_f32.as_ptr() as *const u8, vec_f32.len() * 4) };
+        let vec_results = self
+            .storage
+            .vector_engine
+            .search(&self.db_name, &vec_f32, 100);
 
-        let backend = self.storage.backends.get(&self.db_name).unwrap().clone();
-        let conn = match backend.get_reader() {
-            Ok(c) => c,
-            Err(_) => return vec![],
-        };
+        let mut rrf_scores: std::collections::HashMap<u64, f64> = std::collections::HashMap::new();
+        let rrf_k = 60.0;
 
-        // CTE RRF using FULL OUTER JOIN
-        // Note: FTS5 rank returns negative score, sqlite-vec returns positive distance, lower is better for both.
-        // We use ROW_NUMBER() over ranking. FTS matches use `rank`, vec matches use `distance`.
-        let sql = "
-        WITH text_search AS (
-            SELECT uid, 
-                   ROW_NUMBER() OVER (ORDER BY rank) as position
-            FROM fts_data WHERE text_content MATCH ?1 AND field = ?2 LIMIT 100
-        ),
-        vec_search AS (
-            SELECT uid, 
-                   ROW_NUMBER() OVER (ORDER BY distance) as position
-            FROM vec_data WHERE embedding MATCH ?3 AND k = 100
-        )
-        SELECT COALESCE(t.uid, v.uid) as id,
-               (COALESCE(1.0 / (60.0 + t.position), 0.0) +
-                COALESCE(1.0 / (60.0 + v.position), 0.0)) as rrf_score
-        FROM text_search t
-        FULL OUTER JOIN vec_search v ON t.uid = v.uid
-        ORDER BY rrf_score DESC
-        LIMIT ?4;
-        ";
-
-        let out = (|| -> Result<Vec<(u64, f64)>, rusqlite::Error> {
-            let mut stmt = conn.prepare(sql)?;
-
-            let rows = stmt.query_map(
-                rusqlite::params![fts_query, index_field, vec_bytes, k as i64],
-                |row| {
-                    let uid: i64 = row.get(0)?;
-                    let score: f64 = row.get(1)?;
-                    Ok((uid as u64, score))
-                },
-            )?;
-
-            let mut out = Vec::new();
-            for r in rows {
-                if let Ok(val) = r {
-                    out.push(val);
-                }
-            }
-            Ok(out)
-        })();
-
-        if let Err(e) = &out {
-            println!("search_hybrid error: {:?}", e);
+        for (rank, (uid, _score)) in bm25_results.iter().enumerate() {
+            let rank_f = (rank + 1) as f64;
+            *rrf_scores.entry(*uid).or_insert(0.0) += 1.0 / (rrf_k + rank_f);
         }
 
-        let out = out.unwrap_or_default();
+        for (rank, (uid, _dist)) in vec_results.iter().enumerate() {
+            let rank_f = (rank + 1) as f64;
+            *rrf_scores.entry(*uid).or_insert(0.0) += 1.0 / (rrf_k + rank_f);
+        }
 
-        backend.return_reader(conn);
-        out
+        let mut combined: Vec<(u64, f64)> = rrf_scores.into_iter().collect();
+        combined.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        combined.truncate(k);
+        combined
     }
 
     fn check_condition(&self, stored_val: &Option<Value>, condition: &Value) -> bool {
@@ -2938,7 +2814,9 @@ impl SqliteResolver {
 
         // 5. Remove Vector Data (Soft Delete)
         // We delete indiscriminately; if no vector existed, it's a safe no-op.
-        self.storage.delete_vector(uid).map_err(|e| e.to_string())?;
+        self.storage
+            .delete_vector(&self.db_name, uid)
+            .map_err(|e| e.to_string())?;
 
         // 6. Remove Data Keys (Scan Prefix)
         let prefix = Codec::encode_data_prefix(uid);
@@ -3679,7 +3557,7 @@ impl Resolver for SqliteResolver {
     }
 
     fn search_vectors(&self, query: &[f64], k: usize) -> Vec<(u64, f64)> {
-        match self.storage.search_vectors(query, k) {
+        match self.storage.search_vectors(&self.db_name, query, k) {
             Ok(res) => res,
             Err(e) => {
                 eprintln!("Vector Search Error: {}", e);
@@ -3734,8 +3612,9 @@ impl Resolver for SqliteResolver {
             .and_then(Self::extract_vector)
         {
             let storage = self.storage.clone();
+            let db_name = self.db_name.clone();
             tokio::task::spawn_blocking(move || {
-                if let Err(e) = storage.put_vector(uid, vec_data) {
+                if let Err(e) = storage.put_vector(&db_name, uid, vec_data) {
                     eprintln!("Background Vector Insert Error (UID {}): {}", uid, e);
                 }
             });
@@ -3901,8 +3780,9 @@ impl Resolver for SqliteResolver {
                         .collect();
                     if !vec_data.is_empty() {
                         let storage = self.storage.clone();
+                        let db_name = self.db_name.clone();
                         tokio::task::spawn_blocking(move || {
-                            if let Err(e) = storage.put_vector(uid, vec_data) {
+                            if let Err(e) = storage.put_vector(&db_name, uid, vec_data) {
                                 eprintln!("Background Vector Update Error (UID {}): {}", uid, e);
                             }
                         });

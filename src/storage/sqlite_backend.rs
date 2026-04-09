@@ -1,6 +1,5 @@
 use byteorder::ByteOrder;
 use lru::LruCache;
-use rusqlite::ffi::{sqlite3_auto_extension, sqlite3_reset_auto_extension};
 use rusqlite::OptionalExtension;
 use rusqlite::{params, Connection};
 use std::hash::Hash;
@@ -41,17 +40,6 @@ impl SqliteBackend {
             dbg_info!(parent = %parent.display(), "SqliteBackend: ensured parent directory exists");
         }
 
-        // Register sqlite-vec extension exactly once (sqlite3_auto_extension is
-        // cumulative — calling it N times registers the init function N times,
-        // causing each new connection to run it N times → SIGTRAP with ≥3 DBs).
-        static SQLITE_VEC_INIT: std::sync::Once = std::sync::Once::new();
-        SQLITE_VEC_INIT.call_once(|| unsafe {
-            sqlite3_reset_auto_extension();
-            sqlite3_auto_extension(Some(std::mem::transmute(
-                sqlite_vec::sqlite3_vec_init as *const (),
-            )));
-        });
-
         let writer = Connection::open(&db_path)?;
         dbg_info!(db_path = %db_path.display(), "SqliteBackend: writer connection opened");
         Self::apply_pragmas(&writer)?;
@@ -86,20 +74,6 @@ impl SqliteBackend {
             name
         ))?;
         dbg_info!(db_path = %self.path.display(), table = %name, "SqliteBackend: create_table complete");
-        Ok(())
-    }
-
-    /// Create Full-Text Search and Vector tables for native search
-    pub fn create_native_search_tables(&self) -> anyhow::Result<()> {
-        dbg_info!(db_path = %self.path.display(), "SqliteBackend: creating native search tables if needed");
-        let conn = self.writer.lock().unwrap();
-        // Native vector storage currently uses a fixed 384-dimensional schema.
-        conn.execute_batch(
-            "CREATE VIRTUAL TABLE IF NOT EXISTS fts_data USING fts5(uid UNINDEXED, field UNINDEXED, text_content, tokenize='porter unicode61');
-             CREATE VIRTUAL TABLE IF NOT EXISTS fts_term_data USING fts5(uid UNINDEXED, field UNINDEXED, text_content, tokenize='unicode61');
-             CREATE VIRTUAL TABLE IF NOT EXISTS vec_data USING vec0(uid INTEGER PRIMARY KEY, embedding float[384]);"
-        )?;
-        dbg_info!(db_path = %self.path.display(), "SqliteBackend: native search table setup complete");
         Ok(())
     }
 

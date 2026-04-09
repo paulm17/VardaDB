@@ -48,7 +48,7 @@ async fn test_hybrid_search() {
             None,
         )
         .unwrap();
-    storage.put_vector(uid1, vec1.clone()).unwrap();
+    storage.put_vector("default", uid1, vec1.clone()).unwrap();
 
     // Doc 2: "Python Script" + Vector [0.0, 1.0] padded
     let mut vec2 = vec![0.0; 384];
@@ -68,7 +68,7 @@ async fn test_hybrid_search() {
             None,
         )
         .unwrap();
-    storage.put_vector(uid2, vec2).unwrap();
+    storage.put_vector("default", uid2, vec2).unwrap();
 
     // Doc 3: "Rust Script" + Vector [0.9, 0.1] padded
     let mut vec3 = vec![0.0; 384];
@@ -89,10 +89,9 @@ async fn test_hybrid_search() {
             None,
         )
         .unwrap();
-    storage.put_vector(uid3, vec3).unwrap();
+    storage.put_vector("default", uid3, vec3).unwrap();
 
-    // Give vector queue time to flush
-    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+    // Vectors are now synchronous via usearch
 
     // 3. Search Hybrid
     let query_vec_str = format!("{:?}", vec1);

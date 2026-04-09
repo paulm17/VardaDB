@@ -1,4 +1,6 @@
 use crate::storage::sqlite_backend::{SqliteBackend, SqliteTable};
+use crate::storage::tantivy_search::SearchEngine;
+use crate::storage::vector_engine::VectorEngine;
 use byteorder::{BigEndian, ByteOrder};
 use permissions::storage::auth_store::AuthStore;
 use std::path::{Path, PathBuf};
@@ -60,7 +62,8 @@ pub struct Storage {
     pub auth_store: AuthStore,         // AUTH: Authorization tuples and attributes
     pub node_id: u64,
     pub clock: std::sync::Mutex<crate::storage::timestamp::Timestamp>,
-    pub vector_tx: std::sync::mpsc::SyncSender<(u64, Vec<f64>)>,
+    pub search_engine: SearchEngine,
+    pub vector_engine: VectorEngine,
 
     // Incremental Fingerprints: DbName -> (Hash, Count)
     pub fingerprints: std::sync::Arc<
@@ -79,7 +82,6 @@ impl Storage {
     ) -> anyhow::Result<()> {
         backend.create_main_table(main_table_name)?;
         backend.create_table(history_table_name)?;
-        backend.create_native_search_tables()?;
         Ok(())
     }
 
@@ -107,7 +109,6 @@ impl Storage {
         default_backend.create_table("sys_metrics")?;
         default_backend.create_table("sys_traces")?;
         default_backend.create_table("vectors")?;
-        default_backend.create_native_search_tables()?;
         default_backend.create_table("auth_tuples")?;
         default_backend.create_table("auth_attributes")?;
         // Auth login tables
@@ -134,30 +135,6 @@ impl Storage {
             std::sync::Arc::new(auth_attributes_table)
                 as std::sync::Arc<dyn permissions::storage::auth_store::KvStore>,
         );
-
-        // Vector Worker (Bounded Channel)
-        let (tx, rx) = std::sync::mpsc::sync_channel::<(u64, Vec<f64>)>(5000);
-        let worker_backend = default_backend.clone();
-
-        std::thread::spawn(move || {
-            dbg_println!("Storage: Vector Background Worker Started");
-            while let Ok((uid, vec)) = rx.recv() {
-                let vec_f32: Vec<f32> = vec.iter().map(|v| *v as f32).collect();
-                let vec_bytes = unsafe {
-                    std::slice::from_raw_parts(vec_f32.as_ptr() as *const u8, vec_f32.len() * 4)
-                };
-
-                let _ = worker_backend.with_writer(|conn| {
-                    // Upsert vector into vec_data table
-                    conn.execute(
-                        "INSERT OR REPLACE INTO vec_data(uid, embedding) VALUES (?1, ?2)",
-                        rusqlite::params![uid as i64, vec_bytes],
-                    )?;
-                    Ok(())
-                });
-            }
-            dbg_println!("Storage: Vector Background Worker Stopped");
-        });
 
         // Auto-discover databases from registry
         let mut initial_keyspaces = std::collections::HashMap::new();
@@ -279,7 +256,7 @@ impl Storage {
 
         let storage = Self {
             backends,
-            base_path,
+            base_path: base_path.clone(),
             keyspaces: std::sync::RwLock::new(initial_keyspaces),
             sys_table,
             quarantine_table,
@@ -288,7 +265,8 @@ impl Storage {
             auth_store,
             node_id,
             clock,
-            vector_tx: tx,
+            search_engine: SearchEngine::new(&base_path),
+            vector_engine: VectorEngine::new(&base_path),
             fingerprints: std::sync::Arc::new(dashmap::DashMap::new()),
             fingerprints_ready: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
@@ -630,15 +608,21 @@ impl Storage {
     pub fn flush(&self) -> anyhow::Result<()> {
         dbg_println!("Storage: Flush starting...");
 
-        // Persist clock state
         {
             let clock = self.clock.lock().unwrap();
             let _ = self.sys_table.insert("clock", &clock.to_bytes());
         }
 
-        // Persist fingerprints
         if let Err(e) = self.persist_fingerprints() {
             eprintln!("Storage: Failed to persist fingerprints: {}", e);
+        }
+
+        if let Err(e) = self.search_engine.commit_all() {
+            eprintln!("Storage: Failed to commit search indexes: {}", e);
+        }
+
+        if let Err(e) = self.vector_engine.save_all() {
+            eprintln!("Storage: Failed to save vector indexes: {}", e);
         }
 
         for entry in self.backends.iter() {
@@ -737,56 +721,29 @@ impl Storage {
 
     // --- Vector Operations ---
 
-    pub fn put_vector(&self, uid: u64, vector: Vec<f64>) -> anyhow::Result<()> {
-        self.vector_tx
-            .send((uid, vector))
-            .map_err(|e| anyhow::anyhow!("Failed to send vector to worker: {}", e))?;
+    pub fn put_vector(&self, db_name: &str, uid: u64, vector: Vec<f64>) -> anyhow::Result<()> {
+        let vec_f32: Vec<f32> = vector.iter().map(|v| *v as f32).collect();
+        self.vector_engine.add_vector(db_name, uid, &vec_f32)?;
         Ok(())
     }
 
-    pub fn delete_vector(&self, uid: u64) -> anyhow::Result<()> {
-        let uid_i64 = uid as i64;
-        if let Some(backend) = self.backends.get("default") {
-            backend.with_writer(|conn| {
-                conn.execute(
-                    "DELETE FROM vec_data WHERE uid = ?1",
-                    rusqlite::params![uid_i64],
-                )?;
-                Ok(())
-            })?;
-        }
+    pub fn delete_vector(&self, db_name: &str, uid: u64) -> anyhow::Result<()> {
+        self.vector_engine.remove_vector(db_name, uid)?;
         Ok(())
     }
 
-    pub fn search_vectors(&self, query: &[f64], k: usize) -> anyhow::Result<Vec<(u64, f64)>> {
+    pub fn search_vectors(
+        &self,
+        db_name: &str,
+        query: &[f64],
+        k: usize,
+    ) -> anyhow::Result<Vec<(u64, f64)>> {
         let vec_f32: Vec<f32> = query.iter().map(|v| *v as f32).collect();
-        let vec_bytes =
-            unsafe { std::slice::from_raw_parts(vec_f32.as_ptr() as *const u8, vec_f32.len() * 4) };
-
-        let backend = self
-            .backends
-            .get("default")
-            .ok_or(anyhow::anyhow!("Missing default DB"))?;
-        let conn = backend.get_reader()?;
-        let res = (|| -> anyhow::Result<Vec<(u64, f64)>> {
-            let mut stmt = conn.prepare("SELECT uid, distance FROM vec_data WHERE embedding MATCH ?1 AND k = ?2 ORDER BY distance")?;
-            let rows = stmt.query_map(rusqlite::params![vec_bytes, k as i64], |row| {
-                let uid: i64 = row.get(0)?;
-                let distance: f64 = row.get(1)?;
-                Ok((uid as u64, distance))
-            })?;
-
-            let mut results = Vec::new();
-            for r in rows {
-                if let Ok(val) = r {
-                    results.push(val);
-                }
-            }
-            Ok(results)
-        })();
-
-        backend.return_reader(conn);
-        res
+        let results = self.vector_engine.search(db_name, &vec_f32, k);
+        Ok(results
+            .into_iter()
+            .map(|(uid, dist)| (uid, dist as f64))
+            .collect())
     }
 
     // --- Incremental Fingerprint Logic ---
