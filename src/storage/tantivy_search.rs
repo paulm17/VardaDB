@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tantivy::collector::TopDocs;
 use tantivy::directory::MmapDirectory;
-use tantivy::query::{BooleanQuery, FuzzyTermQuery, Occur, TermQuery};
+use tantivy::query::{BooleanQuery, FuzzyTermQuery, Occur, PhraseQuery, TermQuery};
 use tantivy::schema::{OwnedValue, *};
 use tantivy::tokenizer::{LowerCaser, SimpleTokenizer, Stemmer, TextAnalyzer, TokenizerManager};
 use tantivy::{doc, Index, IndexWriter, ReloadPolicy, TantivyDocument};
@@ -184,15 +184,36 @@ impl SearchEngine {
         Ok(())
     }
 
+    fn tokenize_with(
+        &self,
+        idx: &DbIndex,
+        tokenizer_name: &str,
+        text: &str,
+        field: Field,
+    ) -> Vec<tantivy::Term> {
+        let mut tokenizer = match idx.index.tokenizers().get(tokenizer_name) {
+            Some(t) => t,
+            None => return vec![],
+        };
+        let mut token_stream = tokenizer.token_stream(text);
+        let mut terms = Vec::new();
+        while token_stream.advance() {
+            let token = token_stream.token();
+            terms.push(tantivy::Term::from_field_text(field, &token.text));
+        }
+        terms
+    }
+
     pub fn search_bm25(
         &self,
         db_name: &str,
-        query: &str,
+        query_text: &str,
         _field: &str,
         strategy: &str,
         k: usize,
         require_all: bool,
         fuzzy_distance: Option<u8>,
+        phrase_slop: Option<u32>,
     ) -> Vec<(u64, f64)> {
         let db_index = match self.get_or_create_index(db_name) {
             Ok(idx) => idx,
@@ -204,64 +225,83 @@ impl SearchEngine {
         } else {
             db_index.fulltext_content_field
         };
+        let tokenizer_name = if strategy == "term" {
+            "term_tokenizer"
+        } else {
+            "fulltext_tokenizer"
+        };
 
         let field_name_term = tantivy::Term::from_field_text(db_index.field_name_field, _field);
         let field_query = TermQuery::new(field_name_term, IndexRecordOption::Basic);
 
-        let safe_query: String = query
-            .chars()
-            .filter(|c| c.is_alphanumeric() || c.is_whitespace())
-            .collect();
-        let terms: Vec<String> = safe_query
-            .split_whitespace()
-            .map(|t| t.to_lowercase())
-            .collect();
-        if terms.is_empty() {
-            return vec![];
-        }
+        let is_phrase =
+            query_text.starts_with('"') && query_text.ends_with('"') && query_text.len() > 2;
 
-        let text_query = if require_all {
-            let sub_queries: Vec<(Occur, Box<dyn tantivy::query::Query>)> = terms
-                .iter()
-                .map(|term| {
-                    let t = tantivy::Term::from_field_text(content_field, term);
-                    if let Some(distance) = fuzzy_distance {
-                        (
-                            Occur::Must,
-                            Box::new(FuzzyTermQuery::new(t, distance, true))
-                                as Box<dyn tantivy::query::Query>,
-                        )
-                    } else {
-                        (
-                            Occur::Must,
-                            Box::new(TermQuery::new(t, IndexRecordOption::Basic))
-                                as Box<dyn tantivy::query::Query>,
-                        )
-                    }
-                })
-                .collect();
-            BooleanQuery::new(sub_queries)
+        let content_query: Box<dyn tantivy::query::Query> = if is_phrase {
+            let phrase_text = &query_text[1..query_text.len() - 1];
+            let phrase_terms =
+                self.tokenize_with(&db_index, tokenizer_name, phrase_text, content_field);
+            if phrase_terms.is_empty() {
+                return vec![];
+            }
+            if phrase_terms.len() == 1 {
+                Box::new(TermQuery::new(
+                    phrase_terms.into_iter().next().unwrap(),
+                    IndexRecordOption::WithFreqs,
+                ))
+            } else {
+                let mut phrase_query = PhraseQuery::new(phrase_terms);
+                if let Some(slop) = phrase_slop {
+                    phrase_query.set_slop(slop);
+                }
+                Box::new(phrase_query)
+            }
         } else {
-            let sub_queries: Vec<(Occur, Box<dyn tantivy::query::Query>)> = terms
-                .iter()
-                .map(|term| {
-                    let t = tantivy::Term::from_field_text(content_field, term);
-                    if let Some(distance) = fuzzy_distance {
-                        (
-                            Occur::Should,
-                            Box::new(FuzzyTermQuery::new(t, distance, true))
-                                as Box<dyn tantivy::query::Query>,
-                        )
-                    } else {
-                        (
-                            Occur::Should,
-                            Box::new(TermQuery::new(t, IndexRecordOption::Basic))
-                                as Box<dyn tantivy::query::Query>,
-                        )
-                    }
-                })
-                .collect();
-            BooleanQuery::new(sub_queries)
+            let terms = self.tokenize_with(&db_index, tokenizer_name, query_text, content_field);
+            if terms.is_empty() {
+                return vec![];
+            }
+            if require_all {
+                let clauses: Vec<(Occur, Box<dyn tantivy::query::Query>)> = terms
+                    .into_iter()
+                    .map(|t| {
+                        if let Some(distance) = fuzzy_distance {
+                            (
+                                Occur::Must,
+                                Box::new(FuzzyTermQuery::new(t, distance, true))
+                                    as Box<dyn tantivy::query::Query>,
+                            )
+                        } else {
+                            (
+                                Occur::Must,
+                                Box::new(TermQuery::new(t, IndexRecordOption::WithFreqs))
+                                    as Box<dyn tantivy::query::Query>,
+                            )
+                        }
+                    })
+                    .collect();
+                Box::new(BooleanQuery::new(clauses))
+            } else {
+                let clauses: Vec<(Occur, Box<dyn tantivy::query::Query>)> = terms
+                    .into_iter()
+                    .map(|t| {
+                        if let Some(distance) = fuzzy_distance {
+                            (
+                                Occur::Should,
+                                Box::new(FuzzyTermQuery::new(t, distance, true))
+                                    as Box<dyn tantivy::query::Query>,
+                            )
+                        } else {
+                            (
+                                Occur::Should,
+                                Box::new(TermQuery::new(t, IndexRecordOption::WithFreqs))
+                                    as Box<dyn tantivy::query::Query>,
+                            )
+                        }
+                    })
+                    .collect();
+                Box::new(BooleanQuery::new(clauses))
+            }
         };
 
         let combined = BooleanQuery::new(vec![
@@ -269,10 +309,7 @@ impl SearchEngine {
                 Occur::Must,
                 Box::new(field_query) as Box<dyn tantivy::query::Query>,
             ),
-            (
-                Occur::Must,
-                Box::new(text_query) as Box<dyn tantivy::query::Query>,
-            ),
+            (Occur::Must, content_query),
         ]);
 
         let reader = match db_index

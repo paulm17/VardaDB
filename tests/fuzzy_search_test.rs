@@ -26,6 +26,7 @@ fn test_fuzzy_matching_low_level() {
         10,
         false,
         Some(1),
+        None,
     );
     assert_eq!(results.len(), 1, "Fuzzy 'databse' (distance=1) should find 'database'");
     assert_eq!(results[0].0, 1);
@@ -38,17 +39,18 @@ fn test_fuzzy_matching_low_level() {
         10,
         false,
         Some(2),
+        None,
     );
     assert_eq!(results2.len(), 1, "Fuzzy 'databas' (distance=2) should find 'database'");
     assert_eq!(results2[0].0, 1);
 
     let results3 =
-        search.search_bm25("default", "database", "name", "term", 10, false, None);
+        search.search_bm25("default", "database", "name", "term", 10, false, None, None);
     assert_eq!(results3.len(), 1, "Exact 'database' should find 'database'");
     assert_eq!(results3[0].0, 1);
 
     let results4 =
-        search.search_bm25("default", "databse", "name", "term", 10, false, None);
+        search.search_bm25("default", "databse", "name", "term", 10, false, None, None);
     assert_eq!(
         results4.len(), 0,
         "Exact search 'databse' should NOT find 'database'"
@@ -72,6 +74,7 @@ fn test_fuzzy_no_false_positives() {
         10,
         false,
         Some(1),
+        None,
     );
     assert_eq!(
         results.len(), 0,
@@ -99,6 +102,7 @@ fn test_fuzzy_and_semantics() {
         10,
         true,
         Some(1),
+        None,
     );
     let uids: Vec<u64> = results.iter().map(|(u, _)| *u).collect();
     assert_eq!(
@@ -131,6 +135,7 @@ fn test_fuzzy_or_semantics() {
         10,
         false,
         Some(1),
+        None,
     );
     let uids: std::collections::HashSet<u64> =
         results.iter().map(|(u, _)| *u).collect();

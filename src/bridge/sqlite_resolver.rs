@@ -906,6 +906,7 @@ impl SqliteResolver {
         k: usize,
         require_all: bool,
         fuzzy_distance: Option<u8>,
+        phrase_slop: Option<u32>,
     ) -> Vec<(u64, f64)> {
         let index_field = if strategy == "term" {
             field.to_string()
@@ -920,6 +921,7 @@ impl SqliteResolver {
             k,
             require_all,
             fuzzy_distance,
+            phrase_slop,
         )
     }
 
@@ -932,7 +934,7 @@ impl SqliteResolver {
         require_all: bool,
     ) -> Vec<(u64, f64)> {
         let bm25_results =
-            self.search_text_bm25(text_query, field, "fulltext", 100, require_all, None);
+            self.search_text_bm25(text_query, field, "fulltext", 100, require_all, None, None);
         let vec_f32: Vec<f32> = vector.iter().map(|v| *v as f32).collect();
         let vec_results = self
             .storage
@@ -1500,6 +1502,7 @@ impl SqliteResolver {
                         "alloftext",
                         "anyoftext",
                         "fuzzy",
+                        "phrase",
                     ]
                     .contains(&k.as_str())
                 });
@@ -1733,6 +1736,42 @@ impl SqliteResolver {
                                 100_000,
                                 false,
                                 Some(distance),
+                                None,
+                            )
+                            .into_iter()
+                            .map(|(uid, _)| uid)
+                            .collect();
+
+                        if let Some(current) = candidates {
+                            candidates = Some(
+                                current
+                                    .into_iter()
+                                    .filter(|u| field_uids.contains(u))
+                                    .collect(),
+                            );
+                        } else {
+                            candidates = Some(field_uids);
+                        }
+                    }
+                }
+
+                if let Some(Value::Object(phrase_map)) = map.get("phrase") {
+                    if let Some(Value::String(terms_str)) = phrase_map.get("terms") {
+                        let slop = match phrase_map.get("slop") {
+                            Some(Value::Number(n)) => n.as_i64().map(|s| s as u32),
+                            _ => None,
+                        };
+
+                        let quoted_query = format!("\"{}\"", terms_str);
+                        let field_uids: std::collections::HashSet<u64> = self
+                            .search_text_bm25(
+                                &quoted_query,
+                                field,
+                                "fulltext",
+                                100_000,
+                                true,
+                                None,
+                                slop,
                             )
                             .into_iter()
                             .map(|(uid, _)| uid)
@@ -1820,6 +1859,7 @@ impl SqliteResolver {
                                 "alloftext",
                                 "anyoftext",
                                 "fuzzy",
+                                "phrase",
                             ]
                             .contains(&k.as_str())
                         });
@@ -3187,7 +3227,7 @@ impl SqliteResolver {
             }
         } else if let Some((field, strat, query, require_all)) = text_search {
             let k = first.unwrap_or(50) * 4;
-            let results = self.search_text_bm25(&query, &field, &strat, k, require_all, None);
+            let results = self.search_text_bm25(&query, &field, &strat, k, require_all, None, None);
 
             for (uid, _score) in results {
                 if self.node_exists(type_name, uid)
@@ -3409,7 +3449,7 @@ impl SqliteResolver {
 
         if let Some((field, strat, query, require_all)) = text_search {
             let count = self
-                .search_text_bm25(&query, &field, &strat, 10_000, require_all, None)
+                .search_text_bm25(&query, &field, &strat, 10_000, require_all, None, None)
                 .into_iter()
                 .filter(|(uid, _)| {
                     self.node_exists(type_name, *uid)
