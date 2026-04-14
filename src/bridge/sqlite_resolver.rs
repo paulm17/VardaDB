@@ -905,6 +905,7 @@ impl SqliteResolver {
         strategy: &str,
         k: usize,
         require_all: bool,
+        fuzzy_distance: Option<u8>,
     ) -> Vec<(u64, f64)> {
         let index_field = if strategy == "term" {
             field.to_string()
@@ -918,6 +919,7 @@ impl SqliteResolver {
             strategy,
             k,
             require_all,
+            fuzzy_distance,
         )
     }
 
@@ -929,7 +931,8 @@ impl SqliteResolver {
         k: usize,
         require_all: bool,
     ) -> Vec<(u64, f64)> {
-        let bm25_results = self.search_text_bm25(text_query, field, "fulltext", 100, require_all);
+        let bm25_results =
+            self.search_text_bm25(text_query, field, "fulltext", 100, require_all, None);
         let vec_f32: Vec<f32> = vector.iter().map(|v| *v as f32).collect();
         let vec_results = self
             .storage
@@ -1496,6 +1499,7 @@ impl SqliteResolver {
                         "anyofterms",
                         "alloftext",
                         "anyoftext",
+                        "fuzzy",
                     ]
                     .contains(&k.as_str())
                 });
@@ -1713,6 +1717,39 @@ impl SqliteResolver {
                         candidates = Some(field_uids);
                     }
                 }
+
+                if let Some(Value::Object(fuzzy_map)) = map.get("fuzzy") {
+                    if let Some(Value::String(terms_str)) = fuzzy_map.get("terms") {
+                        let distance = match fuzzy_map.get("distance") {
+                            Some(Value::Number(n)) => n.as_i64().map(|d| d as u8).unwrap_or(1),
+                            _ => 1,
+                        };
+
+                        let field_uids: std::collections::HashSet<u64> = self
+                            .search_text_bm25(
+                                terms_str,
+                                field,
+                                "term",
+                                100_000,
+                                false,
+                                Some(distance),
+                            )
+                            .into_iter()
+                            .map(|(uid, _)| uid)
+                            .collect();
+
+                        if let Some(current) = candidates {
+                            candidates = Some(
+                                current
+                                    .into_iter()
+                                    .filter(|u| field_uids.contains(u))
+                                    .collect(),
+                            );
+                        } else {
+                            candidates = Some(field_uids);
+                        }
+                    }
+                }
             }
         }
         candidates
@@ -1782,6 +1819,7 @@ impl SqliteResolver {
                                 "anyofterms",
                                 "alloftext",
                                 "anyoftext",
+                                "fuzzy",
                             ]
                             .contains(&k.as_str())
                         });
@@ -3149,7 +3187,7 @@ impl SqliteResolver {
             }
         } else if let Some((field, strat, query, require_all)) = text_search {
             let k = first.unwrap_or(50) * 4;
-            let results = self.search_text_bm25(&query, &field, &strat, k, require_all);
+            let results = self.search_text_bm25(&query, &field, &strat, k, require_all, None);
 
             for (uid, _score) in results {
                 if self.node_exists(type_name, uid)
@@ -3371,7 +3409,7 @@ impl SqliteResolver {
 
         if let Some((field, strat, query, require_all)) = text_search {
             let count = self
-                .search_text_bm25(&query, &field, &strat, 10_000, require_all)
+                .search_text_bm25(&query, &field, &strat, 10_000, require_all, None)
                 .into_iter()
                 .filter(|(uid, _)| {
                     self.node_exists(type_name, *uid)

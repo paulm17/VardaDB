@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tantivy::collector::TopDocs;
 use tantivy::directory::MmapDirectory;
-use tantivy::query::{BooleanQuery, Occur, TermQuery};
+use tantivy::query::{BooleanQuery, FuzzyTermQuery, Occur, TermQuery};
 use tantivy::schema::{OwnedValue, *};
 use tantivy::tokenizer::{LowerCaser, SimpleTokenizer, Stemmer, TextAnalyzer, TokenizerManager};
 use tantivy::{doc, Index, IndexWriter, ReloadPolicy, TantivyDocument};
@@ -192,6 +192,7 @@ impl SearchEngine {
         strategy: &str,
         k: usize,
         require_all: bool,
+        fuzzy_distance: Option<u8>,
     ) -> Vec<(u64, f64)> {
         let db_index = match self.get_or_create_index(db_name) {
             Ok(idx) => idx,
@@ -223,11 +224,20 @@ impl SearchEngine {
             let sub_queries: Vec<(Occur, Box<dyn tantivy::query::Query>)> = terms
                 .iter()
                 .map(|term| {
-                    let tq = TermQuery::new(
-                        tantivy::Term::from_field_text(content_field, term),
-                        IndexRecordOption::Basic,
-                    );
-                    (Occur::Must, Box::new(tq) as Box<dyn tantivy::query::Query>)
+                    let t = tantivy::Term::from_field_text(content_field, term);
+                    if let Some(distance) = fuzzy_distance {
+                        (
+                            Occur::Must,
+                            Box::new(FuzzyTermQuery::new(t, distance, true))
+                                as Box<dyn tantivy::query::Query>,
+                        )
+                    } else {
+                        (
+                            Occur::Must,
+                            Box::new(TermQuery::new(t, IndexRecordOption::Basic))
+                                as Box<dyn tantivy::query::Query>,
+                        )
+                    }
                 })
                 .collect();
             BooleanQuery::new(sub_queries)
@@ -235,14 +245,20 @@ impl SearchEngine {
             let sub_queries: Vec<(Occur, Box<dyn tantivy::query::Query>)> = terms
                 .iter()
                 .map(|term| {
-                    let tq = TermQuery::new(
-                        tantivy::Term::from_field_text(content_field, term),
-                        IndexRecordOption::Basic,
-                    );
-                    (
-                        Occur::Should,
-                        Box::new(tq) as Box<dyn tantivy::query::Query>,
-                    )
+                    let t = tantivy::Term::from_field_text(content_field, term);
+                    if let Some(distance) = fuzzy_distance {
+                        (
+                            Occur::Should,
+                            Box::new(FuzzyTermQuery::new(t, distance, true))
+                                as Box<dyn tantivy::query::Query>,
+                        )
+                    } else {
+                        (
+                            Occur::Should,
+                            Box::new(TermQuery::new(t, IndexRecordOption::Basic))
+                                as Box<dyn tantivy::query::Query>,
+                        )
+                    }
                 })
                 .collect();
             BooleanQuery::new(sub_queries)
