@@ -58,6 +58,7 @@ async fn test_execution_flow() {
             _offset: Option<usize>,
             _: &[String],
             _near_vector: Option<Vec<f64>>,
+            _: Option<f32>,
             _: &std::collections::HashMap<
                 String,
                 vardadb::engine::resolver::QueryTypeMetadata,
@@ -71,6 +72,7 @@ async fn test_execution_flow() {
             _: std::collections::HashMap<String, async_graphql::Value>,
             _: &[String],
             _: Option<Vec<f64>>,
+            _: Option<f32>,
             _: &std::collections::HashMap<
                 String,
                 vardadb::engine::resolver::QueryTypeMetadata,
@@ -125,7 +127,7 @@ async fn test_execution_flow() {
         fn search_vectors(&self, _: &[f64], _: usize) -> Vec<(u64, f64)> {
             vec![]
         }
-        fn search_hybrid(&self, _: &str, _: &str, _: &[f64], _: usize) -> Vec<(u64, f64)> {
+        fn search_hybrid(&self, _: &str, _: &str, _: &[f64], _: usize, _: Option<f32>) -> Vec<(u64, f64)> {
             vec![]
         }
         fn flush(&self) -> Result<(), String> {

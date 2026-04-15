@@ -106,6 +106,7 @@ pub trait Resolver {
         offset: Option<usize>,
         uniques: &[String],
         near_vector: Option<Vec<f64>>,
+        rrf_alpha: Option<f32>,
         query_metadata: &HashMap<String, QueryTypeMetadata>,
     ) -> Vec<u64>;
 
@@ -119,6 +120,7 @@ pub trait Resolver {
         offset: Option<usize>,
         uniques: &[String],
         near_vector: Option<Vec<f64>>,
+        rrf_alpha: Option<f32>,
         query_metadata: &HashMap<String, QueryTypeMetadata>,
         _cache: &RequestCache,
     ) -> Vec<u64> {
@@ -131,6 +133,7 @@ pub trait Resolver {
             offset,
             uniques,
             near_vector,
+            rrf_alpha,
             query_metadata,
         )
     }
@@ -141,6 +144,7 @@ pub trait Resolver {
         filter: std::collections::HashMap<String, Value>,
         uniques: &[String],
         near_vector: Option<Vec<f64>>,
+        rrf_alpha: Option<f32>,
         query_metadata: &HashMap<String, QueryTypeMetadata>,
     ) -> usize;
 
@@ -150,10 +154,18 @@ pub trait Resolver {
         filter: std::collections::HashMap<String, Value>,
         uniques: &[String],
         near_vector: Option<Vec<f64>>,
+        rrf_alpha: Option<f32>,
         query_metadata: &HashMap<String, QueryTypeMetadata>,
         _cache: &RequestCache,
     ) -> usize {
-        self.count_nodes(type_name, filter, uniques, near_vector, query_metadata)
+        self.count_nodes(
+            type_name,
+            filter,
+            uniques,
+            near_vector,
+            rrf_alpha,
+            query_metadata,
+        )
     }
 
     // Resolve a list of related nodes (1:M) with filter/sort/pagination
@@ -236,7 +248,14 @@ pub trait Resolver {
     fn search_vectors(&self, query: &[f64], k: usize) -> Vec<(u64, f64)>;
 
     // Advanced Search
-    fn search_hybrid(&self, text: &str, field: &str, vector: &[f64], k: usize) -> Vec<(u64, f64)>;
+    fn search_hybrid(
+        &self,
+        text: &str,
+        field: &str,
+        vector: &[f64],
+        k: usize,
+        alpha: Option<f32>,
+    ) -> Vec<(u64, f64)>;
 
     // Maintenance
     fn flush(&self) -> Result<(), String>;

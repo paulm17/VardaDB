@@ -41,6 +41,7 @@ impl Resolver for DummyResolver {
         _: Option<usize>,
         _: &[String],
         _: Option<Vec<f64>>,
+        _: Option<f32>,
         _: &std::collections::HashMap<String, crate::engine::resolver::QueryTypeMetadata>,
     ) -> Vec<u64> {
         vec![]
@@ -64,6 +65,7 @@ impl Resolver for DummyResolver {
         _: std::collections::HashMap<String, Value>,
         _: &[String],
         _: Option<Vec<f64>>,
+        _: Option<f32>,
         _: &std::collections::HashMap<String, crate::engine::resolver::QueryTypeMetadata>,
     ) -> usize {
         0
@@ -102,7 +104,14 @@ impl Resolver for DummyResolver {
     fn search_vectors(&self, _: &[f64], _: usize) -> Vec<(u64, f64)> {
         vec![]
     }
-    fn search_hybrid(&self, _: &str, _: &str, _: &[f64], _: usize) -> Vec<(u64, f64)> {
+    fn search_hybrid(
+        &self,
+        _: &str,
+        _: &str,
+        _: &[f64],
+        _: usize,
+        _: Option<f32>,
+    ) -> Vec<(u64, f64)> {
         vec![]
     }
     fn flush(&self) -> Result<(), String> {

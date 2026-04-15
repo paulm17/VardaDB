@@ -969,7 +969,12 @@ impl SqliteResolver {
         vector: &[f64],
         k: usize,
         require_all: bool,
+        alpha: Option<f32>,
     ) -> Vec<(u64, f64)> {
+        let alpha = alpha.unwrap_or(0.5);
+        let text_weight = 1.0 - alpha as f64;
+        let vector_weight = alpha as f64;
+
         let bm25_results =
             self.search_text_bm25(text_query, field, "fulltext", 100, require_all, None, None);
         let vec_f32: Vec<f32> = vector.iter().map(|v| *v as f32).collect();
@@ -983,12 +988,12 @@ impl SqliteResolver {
 
         for (rank, (uid, _score)) in bm25_results.iter().enumerate() {
             let rank_f = (rank + 1) as f64;
-            *rrf_scores.entry(*uid).or_insert(0.0) += 1.0 / (rrf_k + rank_f);
+            *rrf_scores.entry(*uid).or_insert(0.0) += text_weight / (rrf_k + rank_f);
         }
 
         for (rank, (uid, _dist)) in vec_results.iter().enumerate() {
             let rank_f = (rank + 1) as f64;
-            *rrf_scores.entry(*uid).or_insert(0.0) += 1.0 / (rrf_k + rank_f);
+            *rrf_scores.entry(*uid).or_insert(0.0) += vector_weight / (rrf_k + rank_f);
         }
 
         let mut combined: Vec<(u64, f64)> = rrf_scores.into_iter().collect();
@@ -1616,6 +1621,7 @@ impl SqliteResolver {
                                     None,
                                     None,
                                     child_uniques,
+                                    None,
                                     None,
                                     query_metadata,
                                     None,
@@ -3288,6 +3294,7 @@ impl SqliteResolver {
         offset: Option<usize>,
         uniques: &[String],
         near_vector: Option<Vec<f64>>,
+        rrf_alpha: Option<f32>,
         query_metadata: &std::collections::HashMap<
             String,
             crate::engine::resolver::QueryTypeMetadata,
@@ -3366,7 +3373,7 @@ impl SqliteResolver {
             let k = first.unwrap_or(50) * 4;
             let search_results =
                 if let Some((field, _strat, query, require_all)) = text_search.clone() {
-                    self.search_hybrid(&query, &field, vec, k, require_all)
+                    self.search_hybrid(&query, &field, vec, k, require_all, rrf_alpha)
                 } else {
                     self.search_vectors(vec, k)
                 };
@@ -3532,6 +3539,7 @@ impl SqliteResolver {
         filter: std::collections::HashMap<String, Value>,
         uniques: &[String],
         near_vector: Option<Vec<f64>>,
+        rrf_alpha: Option<f32>,
         query_metadata: &std::collections::HashMap<
             String,
             crate::engine::resolver::QueryTypeMetadata,
@@ -3583,7 +3591,7 @@ impl SqliteResolver {
         if let Some(ref vec) = near_vector {
             let search_results =
                 if let Some((field, _strat, query, require_all)) = text_search.clone() {
-                    self.search_hybrid(&query, &field, vec, 10_000, require_all)
+                    self.search_hybrid(&query, &field, vec, 10_000, require_all, rrf_alpha)
                 } else {
                     self.search_vectors(vec, 10_000)
                 };
@@ -3811,8 +3819,15 @@ impl Resolver for SqliteResolver {
         }
     }
 
-    fn search_hybrid(&self, text: &str, field: &str, vector: &[f64], k: usize) -> Vec<(u64, f64)> {
-        self.search_hybrid(text, field, vector, k, false)
+    fn search_hybrid(
+        &self,
+        text: &str,
+        field: &str,
+        vector: &[f64],
+        k: usize,
+        alpha: Option<f32>,
+    ) -> Vec<(u64, f64)> {
+        self.search_hybrid(text, field, vector, k, false, alpha)
     }
 
     fn resolve(&self, uid: u64, field_name: &str) -> Option<Value> {
@@ -3907,6 +3922,7 @@ impl Resolver for SqliteResolver {
         offset: Option<usize>,
         uniques: &[String],
         near_vector: Option<Vec<f64>>,
+        rrf_alpha: Option<f32>,
         query_metadata: &std::collections::HashMap<
             String,
             crate::engine::resolver::QueryTypeMetadata,
@@ -3921,6 +3937,7 @@ impl Resolver for SqliteResolver {
             offset,
             uniques,
             near_vector,
+            rrf_alpha,
             query_metadata,
             None,
         )
@@ -3936,6 +3953,7 @@ impl Resolver for SqliteResolver {
         offset: Option<usize>,
         uniques: &[String],
         near_vector: Option<Vec<f64>>,
+        rrf_alpha: Option<f32>,
         query_metadata: &std::collections::HashMap<
             String,
             crate::engine::resolver::QueryTypeMetadata,
@@ -3951,6 +3969,7 @@ impl Resolver for SqliteResolver {
             offset,
             uniques,
             near_vector,
+            rrf_alpha,
             query_metadata,
             Some(cache),
         )
@@ -3962,6 +3981,7 @@ impl Resolver for SqliteResolver {
         filter: std::collections::HashMap<String, Value>,
         uniques: &[String],
         near_vector: Option<Vec<f64>>,
+        rrf_alpha: Option<f32>,
         query_metadata: &std::collections::HashMap<
             String,
             crate::engine::resolver::QueryTypeMetadata,
@@ -3972,6 +3992,7 @@ impl Resolver for SqliteResolver {
             filter,
             uniques,
             near_vector,
+            rrf_alpha,
             query_metadata,
             None,
         )
@@ -3983,6 +4004,7 @@ impl Resolver for SqliteResolver {
         filter: std::collections::HashMap<String, Value>,
         uniques: &[String],
         near_vector: Option<Vec<f64>>,
+        rrf_alpha: Option<f32>,
         query_metadata: &std::collections::HashMap<
             String,
             crate::engine::resolver::QueryTypeMetadata,
@@ -3994,6 +4016,7 @@ impl Resolver for SqliteResolver {
             filter,
             uniques,
             near_vector,
+            rrf_alpha,
             query_metadata,
             Some(cache),
         )
