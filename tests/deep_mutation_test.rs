@@ -72,6 +72,7 @@ async fn test_deep_mutation() {
             _uniques: &[String],
             _inverses: &[InverseInfo],
             _search_fields: &HashMap<String, Vec<String>>,
+            _: &[String],
             _: Option<&VectorConfig>,
         ) -> Result<u64, String> {
             let mut calls = self.calls.lock().unwrap();
@@ -94,6 +95,7 @@ async fn test_deep_mutation() {
             _: &[String],
             _: &[InverseInfo],
             _: &HashMap<String, Vec<String>>,
+            _: &[String],
             _: Option<&VectorConfig>,
         ) -> Result<(), String> {
             Ok(())
@@ -105,6 +107,7 @@ async fn test_deep_mutation() {
             _: &[String],
             _: &[InverseInfo],
             _: &HashMap<String, Vec<String>>,
+            _: &[String],
         ) -> Result<(), String> {
             Ok(())
         }
@@ -138,6 +141,9 @@ async fn test_deep_mutation() {
             _checks: Vec<(String, String, String)>,
         ) -> async_graphql::Result<Vec<(String, String, String, bool)>> {
             Ok(vec![])
+        }
+        fn get_facet_counts(&self, _: &str, _: &str) -> Vec<(String, u64)> {
+            vec![]
         }
     }
 

@@ -51,9 +51,10 @@ async fn test_resolver_optimization() {
         .create_node(
             "User",
             fields0,
-            &["email".to_string()], // Uniques
-            &[],                    // Inverses
-            &search_map,            // Search
+            &["email".to_string()],
+            &[],
+            &search_map,
+            &[],
             None,
         )
         .expect("Failed to create User 0");
@@ -79,6 +80,7 @@ async fn test_resolver_optimization() {
                 &["email".to_string()],
                 &[],
                 &search_map,
+                &[],
                 None,
             )
             .expect(&format!("Failed to create User {}", i));

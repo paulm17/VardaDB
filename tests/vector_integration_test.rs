@@ -31,6 +31,7 @@ async fn test_manual_vector_indexing() -> anyhow::Result<()> {
             &[],
             &[],
             &HashMap::new(),
+            &[],
             Some(&vector_config),
         )
         .map_err(|e| anyhow::anyhow!(e))?;
@@ -74,6 +75,7 @@ async fn test_manual_vector_indexing() -> anyhow::Result<()> {
             &[],
             &[],
             &HashMap::new(),
+            &[],
             Some(&vector_config),
         )
         .map_err(|e| anyhow::anyhow!(e))?;

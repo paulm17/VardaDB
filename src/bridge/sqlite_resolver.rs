@@ -2212,6 +2212,7 @@ impl SqliteResolver {
         uniques: &[String],
         inverses: &[crate::engine::resolver::InverseInfo],
         search_fields: &std::collections::HashMap<String, Vec<String>>,
+        facet_fields: &[String],
         source: crate::realtime::bus::MutationSource,
         timestamp_override: Option<crate::storage::timestamp::Timestamp>,
     ) -> Result<(), String> {
@@ -2423,6 +2424,21 @@ impl SqliteResolver {
             }
         }
 
+        // 5b. Handle Facet Indexing
+        for facet_field in facet_fields {
+            if let Some(value) = fields.get(facet_field) {
+                if let serde_json::Value::String(s) = value {
+                    if let Err(e) =
+                        self.storage
+                            .search_engine
+                            .index_facet(&self.db_name, uid, facet_field, s)
+                    {
+                        eprintln!("Facet Indexing Failed (create_node) for uid={}: {}", uid, e);
+                    }
+                }
+            }
+        }
+
         let total = fn_start.elapsed();
         if crate::debug_logging() && total.as_millis() > 2 {
             eprintln!(
@@ -2442,6 +2458,7 @@ impl SqliteResolver {
                 uniques: uniques.to_vec(),
                 inverses: inverses.to_vec(),
                 search_fields: search_fields.clone(),
+                facet_fields: facet_fields.to_vec(),
             }),
             timestamp: Some(timestamp),
             node_id: self.storage.node_id,
@@ -2687,6 +2704,7 @@ impl SqliteResolver {
         uniques: &[String],
         inverses: &[crate::engine::resolver::InverseInfo],
         search_fields: &std::collections::HashMap<String, Vec<String>>,
+        facet_fields: &[String],
         source: crate::realtime::bus::MutationSource,
         timestamp_override: Option<crate::storage::timestamp::Timestamp>,
     ) -> Result<(), String> {
@@ -2760,6 +2778,18 @@ impl SqliteResolver {
                 };
                 if let Ok(val) = serde_json::from_slice::<serde_json::Value>(payload) {
                     self.remove_order_index(type_name, uid, field, &val)?;
+                }
+            }
+        }
+        // 0b. Remove old facet indexes
+        for (field, _) in &fields {
+            if facet_fields.contains(field) {
+                if let Err(e) = self
+                    .storage
+                    .search_engine
+                    .remove_facet(&self.db_name, uid, field)
+                {
+                    eprintln!("Facet remove failed (update_node) for uid={}: {}", uid, e);
                 }
             }
         }
@@ -2995,6 +3025,21 @@ impl SqliteResolver {
             }
         }
 
+        // 4b. Facet re-indexing
+        for (field, value) in &fields {
+            if facet_fields.contains(field) {
+                if let serde_json::Value::String(s) = value {
+                    if let Err(e) =
+                        self.storage
+                            .search_engine
+                            .index_facet(&self.db_name, uid, field, s)
+                    {
+                        eprintln!("Facet Indexing Failed (update_node) for uid={}: {}", uid, e);
+                    }
+                }
+            }
+        }
+
         // Inject ID into payload for Frontend Cache compatibility
         let mut event_payload = fields;
         event_payload.insert("id".to_string(), serde_json::Value::String(uid.to_string()));
@@ -3009,6 +3054,7 @@ impl SqliteResolver {
                 uniques: uniques.to_vec(),
                 inverses: inverses.to_vec(),
                 search_fields: search_fields.clone(),
+                facet_fields: facet_fields.to_vec(),
             }),
             timestamp: Some(timestamp),
             node_id: self.storage.node_id,
@@ -3023,6 +3069,7 @@ impl SqliteResolver {
         uniques: &[String],
         inverses: &[crate::engine::resolver::InverseInfo],
         search_fields: &std::collections::HashMap<String, Vec<String>>,
+        facet_fields: &[String],
         source: crate::realtime::bus::MutationSource,
         timestamp_override: Option<crate::storage::timestamp::Timestamp>,
     ) -> Result<(), String> {
@@ -3059,6 +3106,16 @@ impl SqliteResolver {
                 if let Ok(val) = serde_json::from_slice::<serde_json::Value>(payload) {
                     self.remove_order_index(type_name, uid, field, &val)?;
                 }
+            }
+        }
+        // 0b. Remove Facet Indexes
+        for field in facet_fields {
+            if let Err(e) = self
+                .storage
+                .search_engine
+                .remove_facet(&self.db_name, uid, field)
+            {
+                eprintln!("Facet remove failed (delete_node) for uid={}: {}", uid, e);
             }
         }
         // 1. Handle Inverses (Unlink)
@@ -3243,6 +3300,7 @@ impl SqliteResolver {
                 uniques: uniques.to_vec(),
                 inverses: inverses.to_vec(),
                 search_fields: search_fields.clone(),
+                facet_fields: facet_fields.to_vec(),
             }),
             timestamp: Some(timestamp),
             node_id: self.storage.node_id,
@@ -3269,6 +3327,7 @@ impl SqliteResolver {
                     &metadata.uniques,
                     &metadata.inverses,
                     &metadata.search_fields,
+                    &metadata.facet_fields,
                     source,
                     event.timestamp,
                 )
@@ -3282,6 +3341,7 @@ impl SqliteResolver {
                     &metadata.uniques,
                     &metadata.inverses,
                     &metadata.search_fields,
+                    &metadata.facet_fields,
                     source,
                     event.timestamp,
                 )
@@ -3292,6 +3352,7 @@ impl SqliteResolver {
                 &metadata.uniques,
                 &metadata.inverses,
                 &metadata.search_fields,
+                &metadata.facet_fields,
                 source,
                 event.timestamp,
             ),
@@ -3997,6 +4058,7 @@ impl Resolver for SqliteResolver {
         uniques: &[String],
         inverses: &[crate::engine::resolver::InverseInfo],
         search_fields: &std::collections::HashMap<String, Vec<String>>,
+        facet_fields: &[String],
         vector_config: Option<&crate::engine::resolver::VectorConfig>,
     ) -> Result<u64, String> {
         let op_start = std::time::Instant::now();
@@ -4036,6 +4098,7 @@ impl Resolver for SqliteResolver {
             uniques,
             inverses,
             search_fields,
+            facet_fields,
             crate::realtime::bus::MutationSource::Local,
             None,
         )?;
@@ -4169,13 +4232,12 @@ impl Resolver for SqliteResolver {
         uniques: &[String],
         inverses: &[crate::engine::resolver::InverseInfo],
         search_fields: &std::collections::HashMap<String, Vec<String>>,
+        facet_fields: &[String],
         vector_config: Option<&crate::engine::resolver::VectorConfig>,
     ) -> Result<(), String> {
         let op_start = std::time::Instant::now();
 
-        // Automatic embedding generation was removed with the local model backend.
         if let Some(config) = vector_config {
-            // HNSW Update
             if let Some(val) = fields.get(&config.field) {
                 if let Value::List(list) = val {
                     let vec_data: Vec<f64> = list
@@ -4215,6 +4277,7 @@ impl Resolver for SqliteResolver {
             uniques,
             inverses,
             search_fields,
+            facet_fields,
             crate::realtime::bus::MutationSource::Local,
             None,
         );
@@ -4238,6 +4301,7 @@ impl Resolver for SqliteResolver {
         uniques: &[String],
         inverses: &[crate::engine::resolver::InverseInfo],
         search_fields: &std::collections::HashMap<String, Vec<String>>,
+        facet_fields: &[String],
     ) -> Result<(), String> {
         self.delete_node_internal(
             type_name,
@@ -4245,6 +4309,7 @@ impl Resolver for SqliteResolver {
             uniques,
             inverses,
             search_fields,
+            facet_fields,
             crate::realtime::bus::MutationSource::Local,
             None,
         )
@@ -4297,5 +4362,9 @@ impl Resolver for SqliteResolver {
             .search_engine
             .get_stats(db_name)
             .map_err(|e| e.to_string())
+    }
+
+    fn get_facet_counts(&self, db_name: &str, field: &str) -> Vec<(String, u64)> {
+        self.storage.search_engine.get_facet_counts(db_name, field)
     }
 }

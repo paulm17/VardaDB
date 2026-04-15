@@ -45,6 +45,7 @@ async fn test_hybrid_search() {
             &empty_uniques,
             &empty_inverses,
             &std::collections::HashMap::from([("title".to_string(), vec!["fulltext".to_string()])]),
+            &[],
             None,
         )
         .unwrap();
@@ -65,6 +66,7 @@ async fn test_hybrid_search() {
             &empty_uniques,
             &empty_inverses,
             &std::collections::HashMap::from([("title".to_string(), vec!["fulltext".to_string()])]),
+            &[],
             None,
         )
         .unwrap();
@@ -86,6 +88,7 @@ async fn test_hybrid_search() {
             &empty_uniques,
             &empty_inverses,
             &std::collections::HashMap::from([("title".to_string(), vec!["fulltext".to_string()])]),
+            &[],
             None,
         )
         .unwrap();

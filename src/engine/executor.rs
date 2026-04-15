@@ -27,6 +27,7 @@ impl Resolver for DummyResolver {
         _uniques: &[String],
         _: &[crate::engine::resolver::InverseInfo],
         _: &std::collections::HashMap<String, Vec<String>>,
+        _: &[String],
         _: Option<&crate::engine::resolver::VectorConfig>,
     ) -> Result<u64, String> {
         Ok(0)
@@ -78,6 +79,7 @@ impl Resolver for DummyResolver {
         _: &[String],
         _: &[crate::engine::resolver::InverseInfo],
         _: &std::collections::HashMap<String, Vec<String>>,
+        _: &[String],
         _: Option<&crate::engine::resolver::VectorConfig>,
     ) -> Result<(), String> {
         Ok(())
@@ -89,6 +91,7 @@ impl Resolver for DummyResolver {
         _: &[String],
         _: &[crate::engine::resolver::InverseInfo],
         _: &std::collections::HashMap<String, Vec<String>>,
+        _: &[String],
     ) -> Result<(), String> {
         Ok(())
     }
@@ -129,5 +132,8 @@ impl Resolver for DummyResolver {
         _checks: Vec<(String, String, String)>,
     ) -> async_graphql::Result<Vec<(String, String, String, bool)>> {
         Ok(vec![])
+    }
+    fn get_facet_counts(&self, _: &str, _: &str) -> Vec<(String, u64)> {
+        vec![]
     }
 }

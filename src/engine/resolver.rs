@@ -214,6 +214,7 @@ pub trait Resolver {
         uniques: &[String],
         inverses: &[InverseInfo],
         search_fields: &std::collections::HashMap<String, Vec<String>>,
+        facet_fields: &[String],
         vector_config: Option<&VectorConfig>,
     ) -> Result<u64, String>;
     fn update_node(
@@ -224,6 +225,7 @@ pub trait Resolver {
         uniques: &[String],
         inverses: &[InverseInfo],
         search_fields: &std::collections::HashMap<String, Vec<String>>,
+        facet_fields: &[String],
         vector_config: Option<&VectorConfig>,
     ) -> Result<(), String>;
     fn delete_node(
@@ -233,6 +235,7 @@ pub trait Resolver {
         uniques: &[String],
         inverses: &[InverseInfo],
         search_fields: &std::collections::HashMap<String, Vec<String>>,
+        facet_fields: &[String],
     ) -> Result<(), String>;
 
     // Check existence
@@ -276,4 +279,6 @@ pub trait Resolver {
     ) -> Result<crate::storage::tantivy_search::IndexStats, String> {
         Err("get_index_stats not implemented".to_string())
     }
+
+    fn get_facet_counts(&self, db_name: &str, field: &str) -> Vec<(String, u64)>;
 }

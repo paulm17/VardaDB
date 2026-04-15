@@ -2,10 +2,12 @@ use dashmap::DashMap;
 use parking_lot::Mutex;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tantivy::collector::TopDocs;
+use tantivy::collector::{FacetCollector, FacetCounts, TopDocs};
 use tantivy::directory::MmapDirectory;
-use tantivy::query::{BooleanQuery, BoostQuery, FuzzyTermQuery, Occur, PhraseQuery, TermQuery};
-use tantivy::schema::{OwnedValue, *};
+use tantivy::query::{
+    AllQuery, BooleanQuery, BoostQuery, FuzzyTermQuery, Occur, PhraseQuery, TermQuery,
+};
+use tantivy::schema::{Facet, FacetOptions, OwnedValue, *};
 use tantivy::snippet::SnippetGenerator;
 use tantivy::tokenizer::{LowerCaser, SimpleTokenizer, Stemmer, TextAnalyzer, TokenizerManager};
 use tantivy::{doc, Index, IndexWriter, ReloadPolicy, TantivyDocument};
@@ -54,6 +56,7 @@ struct DbIndex {
     field_name_field: Field,
     term_content_field: Field,
     fulltext_content_field: Field,
+    facet_field: Field,
     indexed_this_batch: Mutex<std::collections::HashSet<u64>>,
 }
 
@@ -62,7 +65,7 @@ pub struct SearchEngine {
     base_path: PathBuf,
 }
 
-fn build_schema() -> (Schema, Field, Field, Field, Field, Field) {
+fn build_schema() -> (Schema, Field, Field, Field, Field, Field, Field) {
     let mut schema_builder = Schema::builder();
     let uid_field = schema_builder.add_u64_field("uid", FAST | STORED);
     let doc_id_field = schema_builder.add_u64_field("doc_id", INDEXED | STORED);
@@ -87,6 +90,7 @@ fn build_schema() -> (Schema, Field, Field, Field, Field, Field) {
             )
             .set_stored(),
     );
+    let facet_field = schema_builder.add_facet_field("facet_values", FacetOptions::default());
     let schema = schema_builder.build();
     (
         schema,
@@ -95,6 +99,7 @@ fn build_schema() -> (Schema, Field, Field, Field, Field, Field) {
         field_name_field,
         term_content_field,
         fulltext_content_field,
+        facet_field,
     )
 }
 
@@ -112,6 +117,7 @@ impl DbIndex {
             field_name_field,
             term_content_field,
             fulltext_content_field,
+            facet_field,
         ) = build_schema();
 
         let index_path = base_path.join(format!("{}_tantivy", db_name));
@@ -135,6 +141,7 @@ impl DbIndex {
             field_name_field,
             term_content_field,
             fulltext_content_field,
+            facet_field,
             indexed_this_batch: Mutex::new(std::collections::HashSet::new()),
         })
     }
@@ -843,5 +850,101 @@ impl SearchEngine {
 
     pub fn flush_deletes_all(&self) -> anyhow::Result<()> {
         self.commit_all()
+    }
+
+    pub fn index_facet(
+        &self,
+        db_name: &str,
+        uid: u64,
+        field: &str,
+        value: &str,
+    ) -> anyhow::Result<()> {
+        self.flush_deletes(db_name)?;
+
+        let idx = self.get_or_create_index(db_name)?;
+        let cid = composite_doc_id(uid, field);
+
+        let facet_path = format!("/{}/{}", field, value);
+        let facet = Facet::from(&facet_path);
+
+        let mut doc = TantivyDocument::default();
+        doc.add_u64(idx.uid_field, uid);
+        doc.add_u64(idx.doc_id_field, cid);
+        doc.add_text(idx.field_name_field, field);
+        doc.add_facet(idx.facet_field, facet);
+
+        {
+            let mut writer = idx.writer.lock();
+            writer.add_document(doc)?;
+            writer.commit()?;
+        }
+        Ok(())
+    }
+
+    pub fn remove_facet(&self, db_name: &str, uid: u64, field: &str) -> anyhow::Result<()> {
+        let idx = self.get_or_create_index(db_name)?;
+        let cid = composite_doc_id(uid, field);
+        {
+            let mut writer = idx.writer.lock();
+            writer.delete_term(tantivy::Term::from_field_u64(idx.doc_id_field, cid));
+            writer.commit()?;
+        }
+        Ok(())
+    }
+
+    pub fn get_facet_counts(&self, db_name: &str, field: &str) -> Vec<(String, u64)> {
+        let idx = match self.get_or_create_index(db_name) {
+            Ok(i) => i,
+            Err(e) => {
+                eprintln!(
+                    "SearchEngine::get_facet_counts: failed to open index: {}",
+                    e
+                );
+                return vec![];
+            }
+        };
+
+        {
+            let mut writer = idx.writer.lock();
+            if let Err(e) = writer.commit() {
+                eprintln!(
+                    "SearchEngine: auto-commit before facet counts failed: {}",
+                    e
+                );
+            }
+        }
+
+        let reader = match idx.index.reader() {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("SearchEngine: failed to open reader: {}", e);
+                return vec![];
+            }
+        };
+        let searcher = reader.searcher();
+
+        let facet_collector = FacetCollector::for_field("facet_values");
+
+        let counts: FacetCounts = match searcher.search(&AllQuery, &facet_collector) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("SearchEngine: facet collection failed: {}", e);
+                return vec![];
+            }
+        };
+
+        let facet_prefix_str = format!("/{}/", field);
+
+        counts
+            .get(&facet_prefix_str)
+            .map(|(facet, count)| {
+                let facet_str = facet.to_string();
+                let value = facet_str
+                    .strip_prefix(&facet_prefix_str)
+                    .unwrap_or(&facet_str)
+                    .to_string();
+                (value, count)
+            })
+            .collect()
     }
 }
