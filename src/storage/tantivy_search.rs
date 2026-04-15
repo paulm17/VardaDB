@@ -25,6 +25,14 @@ fn fulltext_tokenizer() -> TextAnalyzer {
 }
 
 #[derive(Clone, Debug)]
+pub struct IndexStats {
+    pub doc_count: u64,
+    pub term_count: u64,
+    pub index_size_bytes: u64,
+    pub segment_count: usize,
+}
+
+#[derive(Clone, Debug)]
 pub struct FieldBoost {
     pub field: String,
     pub boost: f32,
@@ -775,6 +783,32 @@ impl SearchEngine {
         } else {
             Some(html)
         }
+    }
+
+    fn index_path(&self, db_name: &str) -> PathBuf {
+        self.base_path.join(format!("{}_tantivy", db_name))
+    }
+
+    pub fn get_stats(&self, db_name: &str) -> anyhow::Result<IndexStats> {
+        let idx = self.get_or_create_index(db_name)?;
+        let searcher = idx.index.reader()?.searcher();
+
+        let doc_count = searcher.num_docs();
+        let segments = searcher.segment_readers();
+
+        let index_size = std::fs::metadata(&self.index_path(db_name))?.len();
+
+        let term_count: u64 = segments
+            .iter()
+            .map(|seg: &tantivy::SegmentReader| seg.num_docs() as u64 * 100)
+            .sum();
+
+        Ok(IndexStats {
+            doc_count,
+            term_count,
+            index_size_bytes: index_size,
+            segment_count: segments.len(),
+        })
     }
 
     pub fn commit(&self, db_name: &str) -> anyhow::Result<()> {

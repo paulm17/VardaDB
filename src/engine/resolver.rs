@@ -268,4 +268,11 @@ pub trait Resolver {
         ctx: &async_graphql::dynamic::ResolverContext<'_>,
         checks: Vec<(String, String, String)>,
     ) -> async_graphql::Result<Vec<(String, String, String, bool)>>;
+
+    fn get_index_stats(
+        &self,
+        _db_name: &str,
+    ) -> Result<crate::storage::tantivy_search::IndexStats, String> {
+        Err("get_index_stats not implemented".to_string())
+    }
 }
