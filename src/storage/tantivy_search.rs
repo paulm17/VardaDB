@@ -6,6 +6,7 @@ use tantivy::collector::TopDocs;
 use tantivy::directory::MmapDirectory;
 use tantivy::query::{BooleanQuery, BoostQuery, FuzzyTermQuery, Occur, PhraseQuery, TermQuery};
 use tantivy::schema::{OwnedValue, *};
+use tantivy::snippet::SnippetGenerator;
 use tantivy::tokenizer::{LowerCaser, SimpleTokenizer, Stemmer, TextAnalyzer, TokenizerManager};
 use tantivy::{doc, Index, IndexWriter, ReloadPolicy, TantivyDocument};
 use xxhash_rust::xxh3::xxh3_64;
@@ -27,6 +28,14 @@ fn fulltext_tokenizer() -> TextAnalyzer {
 pub struct FieldBoost {
     pub field: String,
     pub boost: f32,
+}
+
+#[derive(Clone, Debug)]
+pub struct SearchResult {
+    pub uid: u64,
+    pub score: f64,
+    pub snippet: Option<String>,
+    pub highlighted_terms: Vec<String>,
 }
 
 struct DbIndex {
@@ -501,6 +510,271 @@ impl SearchEngine {
             }
         }
         results
+    }
+
+    pub fn search_bm25_with_snippets(
+        &self,
+        db_name: &str,
+        query_text: &str,
+        _field: &str,
+        strategy: &str,
+        k: usize,
+        require_all: bool,
+        fuzzy_distance: Option<u8>,
+        phrase_slop: Option<u32>,
+    ) -> Vec<SearchResult> {
+        let db_index = match self.get_or_create_index(db_name) {
+            Ok(idx) => idx,
+            Err(_) => return vec![],
+        };
+
+        {
+            let mut writer = db_index.writer.lock();
+            let _ = writer.commit();
+        }
+
+        let content_field = if strategy == "term" {
+            db_index.term_content_field
+        } else {
+            db_index.fulltext_content_field
+        };
+        let tokenizer_name = if strategy == "term" {
+            "term_tokenizer"
+        } else {
+            "fulltext_tokenizer"
+        };
+
+        let field_name_term = tantivy::Term::from_field_text(db_index.field_name_field, _field);
+        let field_query = TermQuery::new(field_name_term, IndexRecordOption::Basic);
+
+        let is_phrase =
+            query_text.starts_with('"') && query_text.ends_with('"') && query_text.len() > 2;
+
+        let content_query: Box<dyn tantivy::query::Query> = if is_phrase {
+            let phrase_text = &query_text[1..query_text.len() - 1];
+            let phrase_terms =
+                self.tokenize_with(&db_index, tokenizer_name, phrase_text, content_field);
+            if phrase_terms.is_empty() {
+                return vec![];
+            }
+            if phrase_terms.len() == 1 {
+                Box::new(TermQuery::new(
+                    phrase_terms.into_iter().next().unwrap(),
+                    IndexRecordOption::WithFreqs,
+                ))
+            } else {
+                let mut phrase_query = PhraseQuery::new(phrase_terms);
+                if let Some(slop) = phrase_slop {
+                    phrase_query.set_slop(slop);
+                }
+                Box::new(phrase_query)
+            }
+        } else {
+            let terms = self.tokenize_with(&db_index, tokenizer_name, query_text, content_field);
+            if terms.is_empty() {
+                return vec![];
+            }
+            if require_all {
+                let clauses: Vec<(Occur, Box<dyn tantivy::query::Query>)> = terms
+                    .into_iter()
+                    .map(|t| {
+                        if let Some(distance) = fuzzy_distance {
+                            (
+                                Occur::Must,
+                                Box::new(FuzzyTermQuery::new(t, distance, true))
+                                    as Box<dyn tantivy::query::Query>,
+                            )
+                        } else {
+                            (
+                                Occur::Must,
+                                Box::new(TermQuery::new(t, IndexRecordOption::WithFreqs))
+                                    as Box<dyn tantivy::query::Query>,
+                            )
+                        }
+                    })
+                    .collect();
+                Box::new(BooleanQuery::new(clauses))
+            } else {
+                let clauses: Vec<(Occur, Box<dyn tantivy::query::Query>)> = terms
+                    .into_iter()
+                    .map(|t| {
+                        if let Some(distance) = fuzzy_distance {
+                            (
+                                Occur::Should,
+                                Box::new(FuzzyTermQuery::new(t, distance, true))
+                                    as Box<dyn tantivy::query::Query>,
+                            )
+                        } else {
+                            (
+                                Occur::Should,
+                                Box::new(TermQuery::new(t, IndexRecordOption::WithFreqs))
+                                    as Box<dyn tantivy::query::Query>,
+                            )
+                        }
+                    })
+                    .collect();
+                Box::new(BooleanQuery::new(clauses))
+            }
+        };
+
+        let combined = BooleanQuery::new(vec![
+            (
+                Occur::Must,
+                Box::new(field_query) as Box<dyn tantivy::query::Query>,
+            ),
+            (Occur::Must, content_query),
+        ]);
+
+        let reader = match db_index
+            .index
+            .reader_builder()
+            .reload_policy(ReloadPolicy::OnCommitWithDelay)
+            .try_into()
+        {
+            Ok(r) => r,
+            Err(_) => return vec![],
+        };
+
+        let searcher = reader.searcher();
+
+        let mut snippet_generator =
+            match SnippetGenerator::create(&searcher, &combined, content_field) {
+                Ok(sg) => sg,
+                Err(_) => return vec![],
+            };
+        snippet_generator.set_max_num_chars(200);
+
+        let top_docs = match searcher.search(&combined, &TopDocs::with_limit(k)) {
+            Ok(docs) => docs,
+            Err(_) => return vec![],
+        };
+
+        let mut results = Vec::with_capacity(top_docs.len());
+        for (score, doc_address) in top_docs {
+            if let Ok(doc) = searcher.doc::<TantivyDocument>(doc_address) {
+                if let Some(uid_val) = doc.get_first(db_index.uid_field) {
+                    match uid_val {
+                        OwnedValue::U64(uid) => {
+                            let snippet = snippet_generator.snippet_from_doc(&doc);
+                            let fragment_text = snippet.fragment();
+                            let highlighted: Vec<String> = snippet
+                                .highlighted()
+                                .iter()
+                                .filter_map(|range| {
+                                    fragment_text.get(range.clone()).map(|s| s.to_string())
+                                })
+                                .collect();
+                            results.push(SearchResult {
+                                uid: *uid,
+                                score: score as f64,
+                                snippet: Some(snippet.to_html()),
+                                highlighted_terms: highlighted,
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        results
+    }
+
+    pub fn highlight(
+        &self,
+        db_name: &str,
+        query_text: &str,
+        field: &str,
+        strategy: &str,
+        doc_text: &str,
+        max_chars: Option<usize>,
+    ) -> Option<String> {
+        let db_index = self.get_or_create_index(db_name).ok()?;
+
+        {
+            let mut writer = db_index.writer.lock();
+            let _ = writer.commit();
+        }
+
+        let content_field = if strategy == "term" {
+            db_index.term_content_field
+        } else {
+            db_index.fulltext_content_field
+        };
+        let tokenizer_name = if strategy == "term" {
+            "term_tokenizer"
+        } else {
+            "fulltext_tokenizer"
+        };
+
+        let field_name_term = tantivy::Term::from_field_text(db_index.field_name_field, field);
+        let field_query = TermQuery::new(field_name_term, IndexRecordOption::Basic);
+
+        let is_phrase =
+            query_text.starts_with('"') && query_text.ends_with('"') && query_text.len() > 2;
+
+        let content_query: Box<dyn tantivy::query::Query> = if is_phrase {
+            let phrase_text = &query_text[1..query_text.len() - 1];
+            let phrase_terms =
+                self.tokenize_with(&db_index, tokenizer_name, phrase_text, content_field);
+            if phrase_terms.is_empty() {
+                return None;
+            }
+            if phrase_terms.len() == 1 {
+                Box::new(TermQuery::new(
+                    phrase_terms.into_iter().next().unwrap(),
+                    IndexRecordOption::WithFreqs,
+                ))
+            } else {
+                Box::new(PhraseQuery::new(phrase_terms))
+            }
+        } else {
+            let terms = self.tokenize_with(&db_index, tokenizer_name, query_text, content_field);
+            if terms.is_empty() {
+                return None;
+            }
+            let clauses: Vec<(Occur, Box<dyn tantivy::query::Query>)> = terms
+                .into_iter()
+                .map(|t| {
+                    (
+                        Occur::Should,
+                        Box::new(TermQuery::new(t, IndexRecordOption::WithFreqs))
+                            as Box<dyn tantivy::query::Query>,
+                    )
+                })
+                .collect();
+            Box::new(BooleanQuery::new(clauses))
+        };
+
+        let combined = BooleanQuery::new(vec![
+            (
+                Occur::Must,
+                Box::new(field_query) as Box<dyn tantivy::query::Query>,
+            ),
+            (Occur::Must, content_query),
+        ]);
+
+        let reader = db_index
+            .index
+            .reader_builder()
+            .reload_policy(ReloadPolicy::OnCommitWithDelay)
+            .try_into()
+            .ok()?;
+
+        let searcher = reader.searcher();
+
+        let mut snippet_generator =
+            SnippetGenerator::create(&searcher, &combined, content_field).ok()?;
+        if let Some(mc) = max_chars {
+            snippet_generator.set_max_num_chars(mc);
+        }
+
+        let snippet = snippet_generator.snippet(doc_text);
+        let html = snippet.to_html();
+        if html.is_empty() {
+            None
+        } else {
+            Some(html)
+        }
     }
 
     pub fn commit(&self, db_name: &str) -> anyhow::Result<()> {

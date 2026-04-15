@@ -1,7 +1,7 @@
 use crate::engine::resolver::{RequestCache, Resolver};
 use crate::storage::backend::Storage;
 use crate::storage::codec::Codec;
-use crate::storage::tantivy_search::FieldBoost;
+use crate::storage::tantivy_search::{FieldBoost, SearchResult};
 use crate::storage::timestamp::Timestamp;
 use async_graphql::Value;
 use byteorder::{BigEndian, ByteOrder};
@@ -959,6 +959,56 @@ impl SqliteResolver {
             require_all,
             fuzzy_distance,
             phrase_slop,
+        )
+    }
+
+    pub fn search_text_bm25_with_snippets(
+        &self,
+        query: &str,
+        field: &str,
+        strategy: &str,
+        k: usize,
+        require_all: bool,
+        fuzzy_distance: Option<u8>,
+        phrase_slop: Option<u32>,
+    ) -> Vec<SearchResult> {
+        let index_field = if strategy == "term" {
+            field.to_string()
+        } else {
+            format!("{}.{}", field, strategy)
+        };
+        self.storage.search_engine.search_bm25_with_snippets(
+            &self.db_name,
+            query,
+            &index_field,
+            strategy,
+            k,
+            require_all,
+            fuzzy_distance,
+            phrase_slop,
+        )
+    }
+
+    pub fn highlight(
+        &self,
+        query: &str,
+        field: &str,
+        strategy: &str,
+        doc_text: &str,
+        max_chars: Option<usize>,
+    ) -> Option<String> {
+        let index_field = if strategy == "term" {
+            field.to_string()
+        } else {
+            format!("{}.{}", field, strategy)
+        };
+        self.storage.search_engine.highlight(
+            &self.db_name,
+            query,
+            &index_field,
+            strategy,
+            doc_text,
+            max_chars,
         )
     }
 
