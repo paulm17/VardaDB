@@ -1,6 +1,7 @@
 use crate::engine::resolver::{RequestCache, Resolver};
 use crate::storage::backend::Storage;
 use crate::storage::codec::Codec;
+use crate::storage::tantivy_search::FieldBoost;
 use crate::storage::timestamp::Timestamp;
 use async_graphql::Value;
 use byteorder::{BigEndian, ByteOrder};
@@ -925,6 +926,42 @@ impl SqliteResolver {
         )
     }
 
+    pub fn search_text_bm25_multi(
+        &self,
+        query: &str,
+        fields: &[FieldBoost],
+        strategy: &str,
+        k: usize,
+        require_all: bool,
+        fuzzy_distance: Option<u8>,
+        phrase_slop: Option<u32>,
+    ) -> Vec<(u64, f64)> {
+        let indexed_fields: Vec<FieldBoost> = fields
+            .iter()
+            .map(|fb| {
+                let index_field = if strategy == "term" {
+                    fb.field.clone()
+                } else {
+                    format!("{}.{}", fb.field, strategy)
+                };
+                FieldBoost {
+                    field: index_field,
+                    boost: fb.boost,
+                }
+            })
+            .collect();
+        self.storage.search_engine.search_bm25_multi(
+            &self.db_name,
+            query,
+            &indexed_fields,
+            strategy,
+            k,
+            require_all,
+            fuzzy_distance,
+            phrase_slop,
+        )
+    }
+
     pub fn search_hybrid(
         &self,
         text_query: &str,
@@ -958,6 +995,55 @@ impl SqliteResolver {
         combined.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         combined.truncate(k);
         combined
+    }
+
+    fn parse_field_boosts_from_value(fields_val: &Value) -> Option<Vec<FieldBoost>> {
+        let items = match fields_val {
+            Value::List(list) => list,
+            _ => return None,
+        };
+        let boosts: Vec<FieldBoost> = items
+            .iter()
+            .filter_map(|v| {
+                if let Value::Object(fmap) = v {
+                    let field_name = fmap.get("field").and_then(|fv| {
+                        if let Value::String(s) = fv {
+                            Some(s.clone())
+                        } else {
+                            None
+                        }
+                    })?;
+                    let boost = fmap
+                        .get("boost")
+                        .and_then(|bv| {
+                            if let Value::Number(n) = bv {
+                                n.as_f64().map(|f| f as f32)
+                            } else {
+                                Some(1.0)
+                            }
+                        })
+                        .unwrap_or(1.0);
+                    Some(FieldBoost {
+                        field: field_name,
+                        boost,
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect();
+        if boosts.is_empty() {
+            None
+        } else {
+            Some(boosts)
+        }
+    }
+
+    fn parse_field_boosts(
+        map: &indexmap::IndexMap<async_graphql::Name, Value>,
+    ) -> Option<Vec<FieldBoost>> {
+        map.get("fields")
+            .and_then(|v| Self::parse_field_boosts_from_value(v))
     }
 
     fn check_condition(&self, stored_val: &Option<Value>, condition: &Value) -> bool {
@@ -1503,6 +1589,7 @@ impl SqliteResolver {
                         "anyoftext",
                         "fuzzy",
                         "phrase",
+                        "fields",
                     ]
                     .contains(&k.as_str())
                 });
@@ -1558,39 +1645,46 @@ impl SqliteResolver {
                         }
                     }
                 }
-                // Handle "allofterms"
                 if let Some(Value::String(terms_str)) = map.get("allofterms") {
-                    let terms = crate::engine::tokenizer::Tokenizer::tokenize(terms_str, "term");
-                    let mut field_uids = std::collections::HashSet::new();
-                    let mut first_term = true;
-
-                    for term in terms {
-                        let prefix = Codec::encode_term_index_prefix(field, &term);
-                        let (main_ks, _) = match self.storage.get_database(&self.db_name) {
-                            Some(d) => d,
-                            None => return Some(std::collections::HashSet::new()),
-                        };
-                        let iter = main_ks.prefix(&prefix);
-
-                        let mut term_uids = std::collections::HashSet::new();
-                        for (key, _val) in iter {
-                            if !key.starts_with(&prefix) {
-                                break;
+                    let field_uids: std::collections::HashSet<u64> = if let Some(boosts) =
+                        Self::parse_field_boosts(map)
+                    {
+                        self.search_text_bm25_multi(
+                            terms_str, &boosts, "term", 100_000, true, None, None,
+                        )
+                        .into_iter()
+                        .map(|(uid, _)| uid)
+                        .collect()
+                    } else {
+                        let terms =
+                            crate::engine::tokenizer::Tokenizer::tokenize(terms_str, "term");
+                        let mut uids = std::collections::HashSet::new();
+                        let mut first_term = true;
+                        for term in terms {
+                            let prefix = Codec::encode_term_index_prefix(field, &term);
+                            let (main_ks, _) = match self.storage.get_database(&self.db_name) {
+                                Some(d) => d,
+                                None => return Some(std::collections::HashSet::new()),
+                            };
+                            let iter = main_ks.prefix(&prefix);
+                            let mut term_uids = std::collections::HashSet::new();
+                            for (key, _val) in iter {
+                                if !key.starts_with(&prefix) {
+                                    break;
+                                }
+                                if key.len() >= 8 {
+                                    term_uids.insert(BigEndian::read_u64(&key[key.len() - 8..]));
+                                }
                             }
-                            if key.len() >= 8 {
-                                let uid = BigEndian::read_u64(&key[key.len() - 8..]);
-                                term_uids.insert(uid);
+                            if first_term {
+                                uids = term_uids;
+                                first_term = false;
+                            } else {
+                                uids.retain(|u| term_uids.contains(u));
                             }
                         }
-
-                        if first_term {
-                            field_uids = term_uids;
-                            first_term = false;
-                        } else {
-                            field_uids.retain(|u| term_uids.contains(u));
-                        }
-                    }
-
+                        uids
+                    };
                     if let Some(current) = candidates {
                         candidates = Some(
                             current
@@ -1605,27 +1699,36 @@ impl SqliteResolver {
 
                 // Handle "anyofterms"
                 if let Some(Value::String(terms_str)) = map.get("anyofterms") {
-                    let terms = crate::engine::tokenizer::Tokenizer::tokenize(terms_str, "term");
-                    let mut field_uids = std::collections::HashSet::new();
-
-                    for term in terms {
-                        let prefix = Codec::encode_term_index_prefix(field, &term);
-                        let (main_ks, _) = match self.storage.get_database(&self.db_name) {
-                            Some(d) => d,
-                            None => return Some(std::collections::HashSet::new()),
+                    let field_uids: std::collections::HashSet<u64> =
+                        if let Some(boosts) = Self::parse_field_boosts(map) {
+                            self.search_text_bm25_multi(
+                                terms_str, &boosts, "term", 100_000, false, None, None,
+                            )
+                            .into_iter()
+                            .map(|(uid, _)| uid)
+                            .collect()
+                        } else {
+                            let terms =
+                                crate::engine::tokenizer::Tokenizer::tokenize(terms_str, "term");
+                            let mut uids = std::collections::HashSet::new();
+                            for term in terms {
+                                let prefix = Codec::encode_term_index_prefix(field, &term);
+                                let (main_ks, _) = match self.storage.get_database(&self.db_name) {
+                                    Some(d) => d,
+                                    None => return Some(std::collections::HashSet::new()),
+                                };
+                                let iter = main_ks.prefix(&prefix);
+                                for (key, _val) in iter {
+                                    if !key.starts_with(&prefix) {
+                                        break;
+                                    }
+                                    if key.len() >= 8 {
+                                        uids.insert(BigEndian::read_u64(&key[key.len() - 8..]));
+                                    }
+                                }
+                            }
+                            uids
                         };
-                        let iter = main_ks.prefix(&prefix);
-
-                        for (key, _val) in iter {
-                            if !key.starts_with(&prefix) {
-                                break;
-                            }
-                            if key.len() >= 8 {
-                                let uid = BigEndian::read_u64(&key[key.len() - 8..]);
-                                field_uids.insert(uid);
-                            }
-                        }
-                    }
                     if let Some(current) = candidates {
                         candidates = Some(
                             current
@@ -1639,39 +1742,46 @@ impl SqliteResolver {
                 }
 
                 if let Some(Value::String(terms_str)) = map.get("alloftext") {
-                    let terms =
-                        crate::engine::tokenizer::Tokenizer::tokenize(terms_str, "fulltext");
-                    let index_field = format!("{}.fulltext", field);
-                    let mut field_uids = std::collections::HashSet::new();
-                    let mut first_term = true;
-
-                    for term in terms {
-                        let prefix = Codec::encode_term_index_prefix(&index_field, &term);
-                        let (main_ks, _) = match self.storage.get_database(&self.db_name) {
-                            Some(d) => d,
-                            None => return Some(std::collections::HashSet::new()),
-                        };
-                        let iter = main_ks.prefix(&prefix);
-
-                        let mut term_uids = std::collections::HashSet::new();
-                        for (key, _val) in iter {
-                            if !key.starts_with(&prefix) {
-                                break;
+                    let field_uids: std::collections::HashSet<u64> = if let Some(boosts) =
+                        Self::parse_field_boosts(map)
+                    {
+                        self.search_text_bm25_multi(
+                            terms_str, &boosts, "fulltext", 100_000, true, None, None,
+                        )
+                        .into_iter()
+                        .map(|(uid, _)| uid)
+                        .collect()
+                    } else {
+                        let terms =
+                            crate::engine::tokenizer::Tokenizer::tokenize(terms_str, "fulltext");
+                        let index_field = format!("{}.fulltext", field);
+                        let mut uids = std::collections::HashSet::new();
+                        let mut first_term = true;
+                        for term in terms {
+                            let prefix = Codec::encode_term_index_prefix(&index_field, &term);
+                            let (main_ks, _) = match self.storage.get_database(&self.db_name) {
+                                Some(d) => d,
+                                None => return Some(std::collections::HashSet::new()),
+                            };
+                            let iter = main_ks.prefix(&prefix);
+                            let mut term_uids = std::collections::HashSet::new();
+                            for (key, _val) in iter {
+                                if !key.starts_with(&prefix) {
+                                    break;
+                                }
+                                if key.len() >= 8 {
+                                    term_uids.insert(BigEndian::read_u64(&key[key.len() - 8..]));
+                                }
                             }
-                            if key.len() >= 8 {
-                                let uid = BigEndian::read_u64(&key[key.len() - 8..]);
-                                term_uids.insert(uid);
+                            if first_term {
+                                uids = term_uids;
+                                first_term = false;
+                            } else {
+                                uids.retain(|u| term_uids.contains(u));
                             }
                         }
-
-                        if first_term {
-                            field_uids = term_uids;
-                            first_term = false;
-                        } else {
-                            field_uids.retain(|u| term_uids.contains(u));
-                        }
-                    }
-
+                        uids
+                    };
                     if let Some(current) = candidates {
                         candidates = Some(
                             current
@@ -1686,29 +1796,38 @@ impl SqliteResolver {
 
                 // Handle "anyoftext" (Stemmed)
                 if let Some(Value::String(terms_str)) = map.get("anyoftext") {
-                    let terms =
-                        crate::engine::tokenizer::Tokenizer::tokenize(terms_str, "fulltext");
-                    let index_field = format!("{}.fulltext", field);
-                    let mut field_uids = std::collections::HashSet::new();
-
-                    for term in terms {
-                        let prefix = Codec::encode_term_index_prefix(&index_field, &term);
-                        let (main_ks, _) = match self.storage.get_database(&self.db_name) {
-                            Some(d) => d,
-                            None => return Some(std::collections::HashSet::new()),
-                        };
-                        let iter = main_ks.prefix(&prefix);
-
-                        for (key, _val) in iter {
-                            if !key.starts_with(&prefix) {
-                                break;
-                            }
-                            if key.len() >= 8 {
-                                let uid = BigEndian::read_u64(&key[key.len() - 8..]);
-                                field_uids.insert(uid);
+                    let field_uids: std::collections::HashSet<u64> = if let Some(boosts) =
+                        Self::parse_field_boosts(map)
+                    {
+                        self.search_text_bm25_multi(
+                            terms_str, &boosts, "fulltext", 100_000, false, None, None,
+                        )
+                        .into_iter()
+                        .map(|(uid, _)| uid)
+                        .collect()
+                    } else {
+                        let terms =
+                            crate::engine::tokenizer::Tokenizer::tokenize(terms_str, "fulltext");
+                        let index_field = format!("{}.fulltext", field);
+                        let mut uids = std::collections::HashSet::new();
+                        for term in terms {
+                            let prefix = Codec::encode_term_index_prefix(&index_field, &term);
+                            let (main_ks, _) = match self.storage.get_database(&self.db_name) {
+                                Some(d) => d,
+                                None => return Some(std::collections::HashSet::new()),
+                            };
+                            let iter = main_ks.prefix(&prefix);
+                            for (key, _val) in iter {
+                                if !key.starts_with(&prefix) {
+                                    break;
+                                }
+                                if key.len() >= 8 {
+                                    uids.insert(BigEndian::read_u64(&key[key.len() - 8..]));
+                                }
                             }
                         }
-                    }
+                        uids
+                    };
                     if let Some(current) = candidates {
                         candidates = Some(
                             current
@@ -1728,19 +1847,34 @@ impl SqliteResolver {
                             _ => 1,
                         };
 
-                        let field_uids: std::collections::HashSet<u64> = self
-                            .search_text_bm25(
-                                terms_str,
-                                field,
-                                "term",
-                                100_000,
-                                false,
-                                Some(distance),
-                                None,
-                            )
-                            .into_iter()
-                            .map(|(uid, _)| uid)
-                            .collect();
+                        let field_uids: std::collections::HashSet<u64> =
+                            if let Some(boosts) = Self::parse_field_boosts(map) {
+                                self.search_text_bm25_multi(
+                                    terms_str,
+                                    &boosts,
+                                    "term",
+                                    100_000,
+                                    false,
+                                    Some(distance),
+                                    None,
+                                )
+                                .into_iter()
+                                .map(|(uid, _)| uid)
+                                .collect()
+                            } else {
+                                self.search_text_bm25(
+                                    terms_str,
+                                    field,
+                                    "term",
+                                    100_000,
+                                    false,
+                                    Some(distance),
+                                    None,
+                                )
+                                .into_iter()
+                                .map(|(uid, _)| uid)
+                                .collect()
+                            };
 
                         if let Some(current) = candidates {
                             candidates = Some(
@@ -1763,19 +1897,34 @@ impl SqliteResolver {
                         };
 
                         let quoted_query = format!("\"{}\"", terms_str);
-                        let field_uids: std::collections::HashSet<u64> = self
-                            .search_text_bm25(
-                                &quoted_query,
-                                field,
-                                "fulltext",
-                                100_000,
-                                true,
-                                None,
-                                slop,
-                            )
-                            .into_iter()
-                            .map(|(uid, _)| uid)
-                            .collect();
+                        let field_uids: std::collections::HashSet<u64> =
+                            if let Some(boosts) = Self::parse_field_boosts(map) {
+                                self.search_text_bm25_multi(
+                                    &quoted_query,
+                                    &boosts,
+                                    "fulltext",
+                                    100_000,
+                                    true,
+                                    None,
+                                    slop,
+                                )
+                                .into_iter()
+                                .map(|(uid, _)| uid)
+                                .collect()
+                            } else {
+                                self.search_text_bm25(
+                                    &quoted_query,
+                                    field,
+                                    "fulltext",
+                                    100_000,
+                                    true,
+                                    None,
+                                    slop,
+                                )
+                                .into_iter()
+                                .map(|(uid, _)| uid)
+                                .collect()
+                            };
 
                         if let Some(current) = candidates {
                             candidates = Some(
@@ -1860,6 +2009,7 @@ impl SqliteResolver {
                                 "anyoftext",
                                 "fuzzy",
                                 "phrase",
+                                "fields",
                             ]
                             .contains(&k.as_str())
                         });
@@ -3152,22 +3302,27 @@ impl SqliteResolver {
         }
 
         let mut text_search: Option<(String, String, String, bool)> = None;
+        let mut multi_field_boosts: Option<Vec<FieldBoost>> = None;
         for (field, val) in &filter {
             if let Value::Object(obj) = val {
                 if let Some(Value::String(s)) = obj.get("allofterms") {
                     text_search = Some((field.clone(), "term".to_string(), s.clone(), true));
+                    multi_field_boosts = Self::parse_field_boosts(obj);
                     break;
                 }
                 if let Some(Value::String(s)) = obj.get("anyofterms") {
                     text_search = Some((field.clone(), "term".to_string(), s.clone(), false));
+                    multi_field_boosts = Self::parse_field_boosts(obj);
                     break;
                 }
                 if let Some(Value::String(s)) = obj.get("alloftext") {
                     text_search = Some((field.clone(), "fulltext".to_string(), s.clone(), true));
+                    multi_field_boosts = Self::parse_field_boosts(obj);
                     break;
                 }
                 if let Some(Value::String(s)) = obj.get("anyoftext") {
                     text_search = Some((field.clone(), "fulltext".to_string(), s.clone(), false));
+                    multi_field_boosts = Self::parse_field_boosts(obj);
                     break;
                 }
             }
@@ -3227,7 +3382,11 @@ impl SqliteResolver {
             }
         } else if let Some((field, strat, query, require_all)) = text_search {
             let k = first.unwrap_or(50) * 4;
-            let results = self.search_text_bm25(&query, &field, &strat, k, require_all, None, None);
+            let results = if let Some(ref boosts) = multi_field_boosts {
+                self.search_text_bm25_multi(&query, boosts, &strat, k, require_all, None, None)
+            } else {
+                self.search_text_bm25(&query, &field, &strat, k, require_all, None, None)
+            };
 
             for (uid, _score) in results {
                 if self.node_exists(type_name, uid)
@@ -3386,22 +3545,27 @@ impl SqliteResolver {
         }
 
         let mut text_search: Option<(String, String, String, bool)> = None;
+        let mut multi_field_boosts: Option<Vec<FieldBoost>> = None;
         for (field, val) in &filter {
             if let Value::Object(obj) = val {
                 if let Some(Value::String(s)) = obj.get("allofterms") {
                     text_search = Some((field.clone(), "term".to_string(), s.clone(), true));
+                    multi_field_boosts = Self::parse_field_boosts(obj);
                     break;
                 }
                 if let Some(Value::String(s)) = obj.get("anyofterms") {
                     text_search = Some((field.clone(), "term".to_string(), s.clone(), false));
+                    multi_field_boosts = Self::parse_field_boosts(obj);
                     break;
                 }
                 if let Some(Value::String(s)) = obj.get("alloftext") {
                     text_search = Some((field.clone(), "fulltext".to_string(), s.clone(), true));
+                    multi_field_boosts = Self::parse_field_boosts(obj);
                     break;
                 }
                 if let Some(Value::String(s)) = obj.get("anyoftext") {
                     text_search = Some((field.clone(), "fulltext".to_string(), s.clone(), false));
+                    multi_field_boosts = Self::parse_field_boosts(obj);
                     break;
                 }
             }
@@ -3448,15 +3612,18 @@ impl SqliteResolver {
         }
 
         if let Some((field, strat, query, require_all)) = text_search {
-            let count = self
-                .search_text_bm25(&query, &field, &strat, 10_000, require_all, None, None)
-                .into_iter()
-                .filter(|(uid, _)| {
-                    self.node_exists(type_name, *uid)
-                        && self.get_node_type(*uid).as_deref() == Some(type_name)
-                        && self.check_filter_recursive_cached(*uid, &filter_im, cache)
-                })
-                .count();
+            let count = if let Some(ref boosts) = multi_field_boosts {
+                self.search_text_bm25_multi(&query, boosts, &strat, 10_000, require_all, None, None)
+            } else {
+                self.search_text_bm25(&query, &field, &strat, 10_000, require_all, None, None)
+            }
+            .into_iter()
+            .filter(|(uid, _)| {
+                self.node_exists(type_name, *uid)
+                    && self.get_node_type(*uid).as_deref() == Some(type_name)
+                    && self.check_filter_recursive_cached(*uid, &filter_im, cache)
+            })
+            .count();
             if crate::debug_logging() && start.elapsed().as_millis() > 10 {
                 eprintln!(
                     "[RESOLVER] count_nodes {}.{} candidates=false candidate_ms={} count={} total_ms={} near_vector=false text_search=true",

@@ -2417,6 +2417,16 @@ impl Schema {
 
         // ... (Filters, etc) ...
 
+        let field_boost_input = dynamic::InputObject::new("FieldBoostInput")
+            .field(dynamic::InputValue::new(
+                "field",
+                dynamic::TypeRef::named_nn(dynamic::TypeRef::STRING),
+            ))
+            .field(dynamic::InputValue::new(
+                "boost",
+                dynamic::TypeRef::named(dynamic::TypeRef::FLOAT),
+            ));
+
         let fuzzy_filter = dynamic::InputObject::new("FuzzyFilter")
             .field(dynamic::InputValue::new(
                 "terms",
@@ -2469,6 +2479,10 @@ impl Schema {
             .field(dynamic::InputValue::new(
                 "phrase",
                 dynamic::TypeRef::named("PhraseFilter"),
+            ))
+            .field(dynamic::InputValue::new(
+                "fields",
+                dynamic::TypeRef::named_list("FieldBoostInput"),
             ))
             .field(dynamic::InputValue::new(
                 "lt",
@@ -2633,6 +2647,7 @@ impl Schema {
                 dynamic::TypeRef::named("DateTime"),
             ));
 
+        schema_builder = schema_builder.register(field_boost_input);
         schema_builder = schema_builder.register(fuzzy_filter);
         schema_builder = schema_builder.register(phrase_filter);
         schema_builder = schema_builder.register(string_filter);

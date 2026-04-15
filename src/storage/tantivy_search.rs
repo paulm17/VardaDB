@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tantivy::collector::TopDocs;
 use tantivy::directory::MmapDirectory;
-use tantivy::query::{BooleanQuery, FuzzyTermQuery, Occur, PhraseQuery, TermQuery};
+use tantivy::query::{BooleanQuery, BoostQuery, FuzzyTermQuery, Occur, PhraseQuery, TermQuery};
 use tantivy::schema::{OwnedValue, *};
 use tantivy::tokenizer::{LowerCaser, SimpleTokenizer, Stemmer, TextAnalyzer, TokenizerManager};
 use tantivy::{doc, Index, IndexWriter, ReloadPolicy, TantivyDocument};
@@ -21,6 +21,12 @@ fn fulltext_tokenizer() -> TextAnalyzer {
         .filter(LowerCaser)
         .filter(Stemmer::default())
         .build()
+}
+
+#[derive(Clone, Debug)]
+pub struct FieldBoost {
+    pub field: String,
+    pub boost: f32,
 }
 
 struct DbIndex {
@@ -326,6 +332,157 @@ impl SearchEngine {
 
         let collector = TopDocs::with_limit(k);
         let top_docs = match searcher.search(&combined, &collector) {
+            Ok(docs) => docs,
+            Err(_) => return vec![],
+        };
+
+        let mut results = Vec::new();
+        for (score, doc_address) in top_docs {
+            if let Ok(doc) = searcher.doc::<TantivyDocument>(doc_address) {
+                if let Some(uid_val) = doc.get_first(db_index.uid_field) {
+                    match uid_val {
+                        OwnedValue::U64(uid) => {
+                            results.push((*uid, score as f64));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        results
+    }
+
+    pub fn search_bm25_multi(
+        &self,
+        db_name: &str,
+        query_text: &str,
+        fields: &[FieldBoost],
+        strategy: &str,
+        k: usize,
+        require_all: bool,
+        fuzzy_distance: Option<u8>,
+        phrase_slop: Option<u32>,
+    ) -> Vec<(u64, f64)> {
+        if fields.is_empty() {
+            return vec![];
+        }
+
+        let db_index = match self.get_or_create_index(db_name) {
+            Ok(idx) => idx,
+            Err(_) => return vec![],
+        };
+
+        {
+            let mut writer = db_index.writer.lock();
+            let _ = writer.commit();
+        }
+
+        let reader = match db_index
+            .index
+            .reader_builder()
+            .reload_policy(ReloadPolicy::OnCommitWithDelay)
+            .try_into()
+        {
+            Ok(r) => r,
+            Err(_) => return vec![],
+        };
+        let searcher = reader.searcher();
+
+        let (content_field, tokenizer_name) = if strategy == "fulltext" {
+            (db_index.fulltext_content_field, "fulltext_tokenizer")
+        } else {
+            (db_index.term_content_field, "term_tokenizer")
+        };
+
+        let is_phrase =
+            query_text.starts_with('"') && query_text.ends_with('"') && query_text.len() > 2;
+
+        let mut field_clauses: Vec<(Occur, Box<dyn tantivy::query::Query>)> = Vec::new();
+
+        for fb in fields {
+            let field_filter_term =
+                tantivy::Term::from_field_text(db_index.field_name_field, &fb.field);
+            let field_filter: Box<dyn tantivy::query::Query> =
+                Box::new(TermQuery::new(field_filter_term, IndexRecordOption::Basic));
+
+            let content_query: Box<dyn tantivy::query::Query> = if is_phrase {
+                let phrase_text = &query_text[1..query_text.len() - 1];
+                let phrase_terms =
+                    self.tokenize_with(&db_index, tokenizer_name, phrase_text, content_field);
+                if phrase_terms.is_empty() {
+                    continue;
+                }
+                let mut phrase_query = PhraseQuery::new(phrase_terms);
+                if let Some(slop) = phrase_slop {
+                    phrase_query.set_slop(slop);
+                }
+                Box::new(phrase_query)
+            } else {
+                let terms =
+                    self.tokenize_with(&db_index, tokenizer_name, query_text, content_field);
+                if terms.is_empty() {
+                    continue;
+                }
+                if require_all {
+                    let clauses: Vec<(Occur, Box<dyn tantivy::query::Query>)> = terms
+                        .into_iter()
+                        .map(|t| {
+                            if let Some(distance) = fuzzy_distance {
+                                (
+                                    Occur::Must,
+                                    Box::new(FuzzyTermQuery::new(t, distance, true))
+                                        as Box<dyn tantivy::query::Query>,
+                                )
+                            } else {
+                                (
+                                    Occur::Must,
+                                    Box::new(TermQuery::new(t, IndexRecordOption::WithFreqs))
+                                        as Box<dyn tantivy::query::Query>,
+                                )
+                            }
+                        })
+                        .collect();
+                    Box::new(BooleanQuery::new(clauses))
+                } else {
+                    let clauses: Vec<(Occur, Box<dyn tantivy::query::Query>)> = terms
+                        .into_iter()
+                        .map(|t| {
+                            if let Some(distance) = fuzzy_distance {
+                                (
+                                    Occur::Should,
+                                    Box::new(FuzzyTermQuery::new(t, distance, true))
+                                        as Box<dyn tantivy::query::Query>,
+                                )
+                            } else {
+                                (
+                                    Occur::Should,
+                                    Box::new(TermQuery::new(t, IndexRecordOption::WithFreqs))
+                                        as Box<dyn tantivy::query::Query>,
+                                )
+                            }
+                        })
+                        .collect();
+                    Box::new(BooleanQuery::new(clauses))
+                }
+            };
+
+            let field_query = BooleanQuery::new(vec![
+                (Occur::Must, field_filter),
+                (Occur::Must, content_query),
+            ]);
+
+            let boosted_query: Box<dyn tantivy::query::Query> =
+                Box::new(BoostQuery::new(Box::new(field_query), fb.boost));
+            field_clauses.push((Occur::Should, boosted_query));
+        }
+
+        if field_clauses.is_empty() {
+            return vec![];
+        }
+
+        let multi_query = BooleanQuery::new(field_clauses);
+
+        let top_docs = match searcher.search(&multi_query, &TopDocs::with_limit(k)) {
             Ok(docs) => docs,
             Err(_) => return vec![],
         };
