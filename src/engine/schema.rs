@@ -585,6 +585,7 @@ impl Schema {
                             uniques: meta.uniques.clone(),
                             inverses: meta.inverses.clone(),
                             relations: meta.relations.clone(),
+                            search_fields: meta.search_fields.clone(),
                         },
                     )
                 })

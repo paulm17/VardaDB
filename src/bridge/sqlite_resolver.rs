@@ -899,6 +899,58 @@ impl SqliteResolver {
         Ok(())
     }
 
+    fn write_trigram_index(&self, uid: u64, field: &str, text: &str) -> Result<(), String> {
+        let trigrams = crate::engine::tokenizer::Tokenizer::tokenize(text, "trigram");
+        for trigram in &trigrams {
+            let key = Codec::encode_trigram_index_key(field, trigram, uid);
+            self.storage
+                .insert(&self.db_name, &key, &[])
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
+    fn remove_trigram_index(&self, uid: u64, field: &str, text: &str) -> Result<(), String> {
+        let trigrams = crate::engine::tokenizer::Tokenizer::tokenize(text, "trigram");
+        for trigram in &trigrams {
+            let key = Codec::encode_trigram_index_key(field, trigram, uid);
+            self.storage
+                .remove(&self.db_name, &key)
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
+    pub fn search_contains(&self, field: &str, substring: &str) -> std::collections::HashSet<u64> {
+        let trigrams = crate::engine::tokenizer::Tokenizer::tokenize(substring, "trigram");
+        if trigrams.is_empty() {
+            return std::collections::HashSet::new();
+        }
+
+        let mut result: Option<std::collections::HashSet<u64>> = None;
+        for trigram in &trigrams {
+            let prefix = Codec::encode_trigram_index_prefix(field, trigram);
+            let mut trigram_uids = std::collections::HashSet::new();
+            if let Some((main_ks, _)) = self.storage.get_database(&self.db_name) {
+                for (key, _val) in main_ks.prefix(&prefix) {
+                    if !key.starts_with(&prefix) {
+                        break;
+                    }
+                    if let Some(uid) = Codec::decode_trigram_index_uid(&key) {
+                        trigram_uids.insert(uid);
+                    }
+                }
+            }
+
+            match result {
+                None => result = Some(trigram_uids),
+                Some(ref mut current) => current.retain(|u| trigram_uids.contains(u)),
+            }
+        }
+
+        result.unwrap_or_default()
+    }
+
     pub fn search_text_bm25(
         &self,
         query: &str,
@@ -1583,7 +1635,25 @@ impl SqliteResolver {
                     // Handle "contains" operator
                     if op.as_str() == "contains" {
                         if let Value::String(substr) = target {
-                            if let Some((main_ks, _)) = self.storage.get_database(&self.db_name) {
+                            let trigram_field = type_meta
+                                .and_then(|m| m.search_fields.get(field))
+                                .map(|v| v.as_slice())
+                                .unwrap_or(&[])
+                                .iter()
+                                .any(|s| s == "trigram");
+
+                            if trigram_field {
+                                let set = self.search_contains(field, substr);
+                                if let Some(current) = candidates {
+                                    candidates =
+                                        Some(current.intersection(&set).copied().collect());
+                                } else {
+                                    candidates = Some(set);
+                                }
+                                handled_by_pushdown = true;
+                            } else if let Some((main_ks, _)) =
+                                self.storage.get_database(&self.db_name)
+                            {
                                 let uids = main_ks.filter_by_field_contains(field, substr);
                                 let set: std::collections::HashSet<u64> =
                                     uids.into_iter().collect();
@@ -2337,7 +2407,14 @@ impl SqliteResolver {
         // 5. Handle Search Indexing after commit.
         for (field, val, tokenizers) in items_to_index {
             for strategy in tokenizers {
-                if let Err(e) = self.write_term_index(uid, &field, &val, &strategy) {
+                if strategy == "trigram" {
+                    if let Err(e) = self.write_trigram_index(uid, &field, &val) {
+                        eprintln!(
+                            "Trigram Indexing Failed (create_node) for uid={}: {}",
+                            uid, e
+                        );
+                    }
+                } else if let Err(e) = self.write_term_index(uid, &field, &val, &strategy) {
                     eprintln!(
                         "Search Indexing Failed (create_node) for uid={}: {}",
                         uid, e
@@ -2664,7 +2741,11 @@ impl SqliteResolver {
                         serde_json::from_slice::<serde_json::Value>(payload)
                     {
                         for strategy in tokenizers {
-                            self.remove_term_index(uid, field, &s, strategy)?;
+                            if strategy == "trigram" {
+                                self.remove_trigram_index(uid, field, &s)?;
+                            } else {
+                                self.remove_term_index(uid, field, &s, strategy)?;
+                            }
                         }
                     }
                 }
@@ -2801,7 +2882,11 @@ impl SqliteResolver {
             if let Some(tokenizers) = search_fields.get(field) {
                 if let serde_json::Value::String(s) = value {
                     for strategy in tokenizers {
-                        self.write_term_index(uid, field, s, strategy)?;
+                        if strategy == "trigram" {
+                            self.write_trigram_index(uid, field, s)?;
+                        } else {
+                            self.write_term_index(uid, field, s, strategy)?;
+                        }
                     }
                 }
             }
@@ -2956,7 +3041,11 @@ impl SqliteResolver {
                     serde_json::from_slice::<serde_json::Value>(payload)
                 {
                     for strategy in tokenizers {
-                        self.remove_term_index(uid, field, &s, strategy)?;
+                        if strategy == "trigram" {
+                            self.remove_trigram_index(uid, field, &s)?;
+                        } else {
+                            self.remove_term_index(uid, field, &s, strategy)?;
+                        }
                     }
                 }
             }
