@@ -830,4 +830,18 @@ impl SearchEngine {
         }
         Ok(())
     }
+
+    pub fn flush_deletes(&self, db_name: &str) -> anyhow::Result<()> {
+        if let Some(entry) = self.indexes.get(db_name) {
+            let mut writer = entry.value().writer.lock();
+            writer.commit()?;
+            let mut batch = entry.value().indexed_this_batch.lock();
+            batch.clear();
+        }
+        Ok(())
+    }
+
+    pub fn flush_deletes_all(&self) -> anyhow::Result<()> {
+        self.commit_all()
+    }
 }
