@@ -166,3 +166,81 @@ async fn test_geo_support() {
         "Store area should intersect query polygon"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_geo_near_with_geohash_index() {
+    let schema = vardadb::engine::schema::Schema::load_from_sdl(
+        "
+        type Place {
+            id: ID
+            name: String
+            location: GeoPoint @search(by: [geo])
+        }
+        ",
+    )
+    .unwrap();
+
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let storage = Arc::new(Storage::new(tmp_dir.path(), None).unwrap());
+    let resolver = SqliteResolver::new(storage.clone(), "default");
+
+    let places = vec![
+        ("NYC", 40.7128, -74.0060),
+        ("Jersey City", 40.7178, -74.0430),
+        ("LA", 34.0522, -118.2437),
+        ("Chicago", 41.8781, -87.6298),
+        ("Brooklyn", 40.6782, -73.9442),
+    ];
+
+    for (name, lat, lng) in &places {
+        let mutation = format!(
+            r#"
+            mutation {{
+                createPlace(input: {{
+                    name: "{}",
+                    location: {{ latitude: {}, longitude: {} }}
+                }}) {{
+                    uid
+                }}
+            }}
+            "#,
+            name, lat, lng
+        );
+        let req = Request::new(&mutation).data(Box::new(resolver.clone()) as Box<dyn vardadb::engine::resolver::Resolver + Send + Sync>);
+        let resp = schema.execute(req).await;
+        assert!(resp.errors.is_empty(), "Create {} failed: {:?}", name, resp.errors);
+    }
+
+    // Query places near NYC within 15km — should find NYC, Jersey City, Brooklyn
+    let query_near = r#"
+        query {
+            queryPlace(filter: {
+                location: {
+                    near: {
+                        distance: 15000,
+                        coordinate: { latitude: 40.7128, longitude: -74.0060 }
+                    }
+                }
+            }) {
+                name
+            }
+        }
+    "#;
+    let result_json = schema
+        .execute_with_resolver(query_near, Box::new(resolver.clone()))
+        .await;
+    let result: Value = serde_json::from_str(&result_json).unwrap();
+    let found = result["data"]["queryPlace"]
+        .as_array()
+        .expect("Expected array for near query");
+    let names: Vec<&str> = found
+        .iter()
+        .map(|p| p.get("name").unwrap().as_str().unwrap())
+        .collect();
+
+    assert!(names.contains(&"NYC"), "Should find NYC: {:?}", names);
+    assert!(names.contains(&"Jersey City"), "Should find Jersey City: {:?}", names);
+    assert!(names.contains(&"Brooklyn"), "Should find Brooklyn: {:?}", names);
+    assert!(!names.contains(&"LA"), "Should NOT find LA: {:?}", names);
+    assert!(!names.contains(&"Chicago"), "Should NOT find Chicago: {:?}", names);
+}

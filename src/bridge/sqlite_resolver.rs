@@ -951,6 +951,65 @@ impl SqliteResolver {
         result.unwrap_or_default()
     }
 
+    fn write_geo_index(&self, uid: u64, field: &str, lat: f64, lng: f64) -> Result<(), String> {
+        let hash = crate::storage::geohash::encode(lat, lng, 12);
+        let key = Codec::encode_geo_index_key(field, &hash, uid);
+        self.storage
+            .insert(&self.db_name, &key, &[])
+            .map_err(|e| e.to_string())
+    }
+
+    fn remove_geo_index(&self, uid: u64, field: &str) -> Result<(), String> {
+        let prefix = Codec::encode_geo_field_prefix(field);
+        if let Some((main_ks, _)) = self.storage.get_database(&self.db_name) {
+            let mut keys_to_remove = Vec::new();
+            for (key, _val) in main_ks.prefix(&prefix) {
+                if !key.starts_with(&prefix) {
+                    break;
+                }
+                if let Some(key_uid) = Codec::decode_geo_index_uid(&key) {
+                    if key_uid == uid {
+                        keys_to_remove.push(key);
+                    }
+                }
+            }
+            drop(main_ks);
+            for key in keys_to_remove {
+                self.storage
+                    .remove(&self.db_name, &key)
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+        Ok(())
+    }
+
+    fn search_near(
+        &self,
+        field: &str,
+        lat: f64,
+        lng: f64,
+        radius_meters: f64,
+    ) -> std::collections::HashSet<u64> {
+        let hashes = crate::storage::geohash::expand_search(lat, lng, radius_meters);
+        let mut result = std::collections::HashSet::new();
+
+        for hash_prefix in &hashes {
+            let prefix = Codec::encode_geo_index_prefix(field, hash_prefix);
+            if let Some((main_ks, _)) = self.storage.get_database(&self.db_name) {
+                for (key, _val) in main_ks.prefix(&prefix) {
+                    if !key.starts_with(&prefix) {
+                        break;
+                    }
+                    if let Some(uid) = Codec::decode_geo_index_uid(&key) {
+                        result.insert(uid);
+                    }
+                }
+            }
+        }
+
+        result
+    }
+
     pub fn search_text_bm25(
         &self,
         query: &str,
@@ -1685,6 +1744,46 @@ impl SqliteResolver {
                                     candidates = Some(set);
                                 }
                                 handled_by_pushdown = true;
+                            }
+                        }
+                    }
+
+                    // Handle "near" operator with geo index
+                    if op.as_str() == "near" {
+                        let is_geo = type_meta
+                            .and_then(|m| m.search_fields.get(field))
+                            .map(|v| v.as_slice())
+                            .unwrap_or(&[])
+                            .iter()
+                            .any(|s| s == "geo");
+
+                        if is_geo {
+                            if let Value::Object(near_args) = target {
+                                if let (
+                                    Some(Value::Number(dist_val)),
+                                    Some(Value::Object(coord_map)),
+                                ) = (near_args.get("distance"), near_args.get("coordinate"))
+                                {
+                                    if let (
+                                        Some(Value::Number(lat_val)),
+                                        Some(Value::Number(lon_val)),
+                                    ) = (coord_map.get("latitude"), coord_map.get("longitude"))
+                                    {
+                                        if let (Some(radius), Some(lat), Some(lng)) =
+                                            (dist_val.as_f64(), lat_val.as_f64(), lon_val.as_f64())
+                                        {
+                                            let set = self.search_near(field, lat, lng, radius);
+                                            if let Some(current) = candidates {
+                                                candidates = Some(
+                                                    current.intersection(&set).copied().collect(),
+                                                );
+                                            } else {
+                                                candidates = Some(set);
+                                            }
+                                            handled_by_pushdown = true;
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -2439,6 +2538,28 @@ impl SqliteResolver {
             }
         }
 
+        // 5c. Handle Geo Indexing
+        for (field, tokenizers) in search_fields {
+            if tokenizers.iter().any(|t| t == "geo") {
+                if let Some(serde_json::Value::Object(map)) = fields.get(field) {
+                    if let (
+                        Some(serde_json::Value::Number(lat_v)),
+                        Some(serde_json::Value::Number(lng_v)),
+                    ) = (map.get("latitude"), map.get("longitude"))
+                    {
+                        if let (Some(lat), Some(lng)) = (lat_v.as_f64(), lng_v.as_f64()) {
+                            if let Err(e) = self.write_geo_index(uid, field, lat, lng) {
+                                eprintln!(
+                                    "Geo Indexing Failed (create_node) for uid={}: {}",
+                                    uid, e
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         let total = fn_start.elapsed();
         if crate::debug_logging() && total.as_millis() > 2 {
             eprintln!(
@@ -2793,6 +2914,19 @@ impl SqliteResolver {
                 }
             }
         }
+        // 0c. Remove old geo indexes
+        for (field, _) in &fields {
+            if let Some(tokenizers) = search_fields.get(field) {
+                if tokenizers.iter().any(|t| t == "geo") {
+                    if let Err(e) = self.remove_geo_index(uid, field) {
+                        eprintln!(
+                            "Geo index remove failed (update_node) for uid={}: {}",
+                            uid, e
+                        );
+                    }
+                }
+            }
+        }
         // 1. Unlink Inverses
         for info in inverses {
             if fields.contains_key(&info.field) {
@@ -2914,8 +3048,20 @@ impl SqliteResolver {
                     for strategy in tokenizers {
                         if strategy == "trigram" {
                             self.write_trigram_index(uid, field, s)?;
-                        } else {
+                        } else if strategy != "geo" {
                             self.write_term_index(uid, field, s, strategy)?;
+                        }
+                    }
+                } else if let serde_json::Value::Object(map) = value {
+                    if tokenizers.iter().any(|t| t == "geo") {
+                        if let (
+                            Some(serde_json::Value::Number(lat_v)),
+                            Some(serde_json::Value::Number(lng_v)),
+                        ) = (map.get("latitude"), map.get("longitude"))
+                        {
+                            if let (Some(lat), Some(lng)) = (lat_v.as_f64(), lng_v.as_f64()) {
+                                self.write_geo_index(uid, field, lat, lng)?;
+                            }
                         }
                     }
                 }
@@ -3116,6 +3262,17 @@ impl SqliteResolver {
                 .remove_facet(&self.db_name, uid, field)
             {
                 eprintln!("Facet remove failed (delete_node) for uid={}: {}", uid, e);
+            }
+        }
+        // 0c. Remove Geo Indexes
+        for (field, tokenizers) in search_fields {
+            if tokenizers.iter().any(|t| t == "geo") {
+                if let Err(e) = self.remove_geo_index(uid, field) {
+                    eprintln!(
+                        "Geo index remove failed (delete_node) for uid={}: {}",
+                        uid, e
+                    );
+                }
             }
         }
         // 1. Handle Inverses (Unlink)

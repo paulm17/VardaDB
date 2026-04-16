@@ -14,6 +14,7 @@ pub struct TypeMetadata {
     pub inverses: Vec<crate::engine::resolver::InverseInfo>,
     pub search_fields: std::collections::HashMap<String, Vec<String>>,
     pub facet_fields: Vec<String>,
+    pub geo_fields: Vec<String>,
     pub cascade_fields: Vec<(String, String)>,
     pub interface_implementations: Vec<String>,
     pub validate_fields: std::collections::HashMap<String, Vec<ValidationRule>>,
@@ -199,6 +200,7 @@ impl Schema {
                         let mut type_search_fields: std::collections::HashMap<String, Vec<String>> =
                             std::collections::HashMap::new();
                         let mut facet_fields: Vec<String> = Vec::new();
+                        let mut geo_fields: Vec<String> = Vec::new();
                         let mut cascade_fields: Vec<(String, String)> = Vec::new();
 
                         let mut vector_config: Option<crate::engine::resolver::VectorConfig> = None;
@@ -254,6 +256,9 @@ impl Schema {
                                 }
                                 if tokenizers.is_empty() {
                                     tokenizers.push("term".to_string());
+                                }
+                                if tokenizers.iter().any(|t| t == "geo") {
+                                    geo_fields.push(field_name.clone());
                                 }
                                 type_search_fields.insert(field_name.clone(), tokenizers);
                             }
@@ -533,6 +538,7 @@ impl Schema {
                                 inverses,
                                 search_fields: type_search_fields,
                                 facet_fields,
+                                geo_fields,
                                 cascade_fields,
                                 interface_implementations: interfaces,
                                 validate_fields,
@@ -551,6 +557,7 @@ impl Schema {
                                 inverses: vec![],
                                 search_fields: std::collections::HashMap::new(),
                                 facet_fields: vec![],
+                                geo_fields: vec![],
                                 cascade_fields: vec![],
                                 interface_implementations: vec![],
                                 validate_fields: std::collections::HashMap::new(),
@@ -574,6 +581,7 @@ impl Schema {
                                 inverses: vec![],
                                 search_fields: std::collections::HashMap::new(),
                                 facet_fields: vec![],
+                                geo_fields: vec![],
                                 cascade_fields: vec![],
                                 interface_implementations: vec![],
                                 validate_fields: std::collections::HashMap::new(),
@@ -600,6 +608,7 @@ impl Schema {
                             inverses: meta.inverses.clone(),
                             relations: meta.relations.clone(),
                             search_fields: meta.search_fields.clone(),
+                            geo_fields: meta.geo_fields.clone(),
                         },
                     )
                 })

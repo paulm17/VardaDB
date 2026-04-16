@@ -25,6 +25,7 @@ pub struct QueryTypeMetadata {
     pub inverses: Vec<InverseInfo>,
     pub relations: HashMap<String, String>,
     pub search_fields: HashMap<String, Vec<String>>,
+    pub geo_fields: Vec<String>,
 }
 
 #[derive(Default)]

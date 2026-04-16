@@ -321,4 +321,55 @@ impl Codec {
             None
         }
     }
+
+    // --- Geo Index ---
+    // Prefix: 0x0C
+    // Key: [0x0C][Field][0x00][Geohash][0x00][UID:8BE]
+
+    pub fn encode_geo_index_key(field: &str, geohash: &str, uid: u64) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(1 + field.len() + 1 + geohash.len() + 1 + 8);
+        buf.push(0x0C);
+        buf.extend_from_slice(field.as_bytes());
+        buf.push(0x00);
+        buf.extend_from_slice(geohash.as_bytes());
+        buf.push(0x00);
+        buf.write_u64::<BigEndian>(uid).unwrap();
+        buf
+    }
+
+    pub fn encode_geo_index_prefix(field: &str, geohash_prefix: &str) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(1 + field.len() + 1 + geohash_prefix.len());
+        buf.push(0x0C);
+        buf.extend_from_slice(field.as_bytes());
+        buf.push(0x00);
+        buf.extend_from_slice(geohash_prefix.as_bytes());
+        buf
+    }
+
+    pub fn encode_geo_field_prefix(field: &str) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(1 + field.len() + 1);
+        buf.push(0x0C);
+        buf.extend_from_slice(field.as_bytes());
+        buf.push(0x00);
+        buf
+    }
+
+    pub fn decode_geo_index_uid(key: &[u8]) -> Option<u64> {
+        if key.len() >= 8 {
+            Some(BigEndian::read_u64(&key[key.len() - 8..]))
+        } else {
+            None
+        }
+    }
+
+    pub fn decode_geo_index(key: &[u8]) -> Option<(String, u64)> {
+        if key.len() < 1 + 1 + 1 + 1 + 8 || key[0] != 0x0C {
+            return None;
+        }
+        let uid = BigEndian::read_u64(&key[key.len() - 8..]);
+        let rest = &key[1..key.len() - 8 - 1]; // skip prefix, and trailing 0x00+UID
+        let null_pos = rest.iter().position(|&b| b == 0x00)?;
+        let geohash = std::str::from_utf8(&rest[null_pos + 1..]).ok()?.to_string();
+        Some((geohash, uid))
+    }
 }
