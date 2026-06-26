@@ -101,8 +101,8 @@ blake3 = "1.8.3"
 tokio-util = "0.7.18"
 bytes = "1.11.1"
 permissions = { version = "0.1.0", path = "permissions" }
-mlx-lm = { version = "0.1.0", path = "../mlx-rs/crates/mlx-lm" }
-mlx-core = { path = "../mlx-rs/crates/mlx-core" }
+mlx-lm = { version = "0.1.0", path = "../mlx-rs/mlx-rs/crates/mlx-lm" }
+mlx-core = { path = "../mlx-rs/mlx-rs/crates/mlx-core" }
 
 [dev-dependencies]
 

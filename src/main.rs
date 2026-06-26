@@ -160,7 +160,7 @@ async fn main() {
             }
         }
         Some(Commands::Db(cmd)) => {
-            if let Err(e) = vardadb::cli::handle_db_command(&cmd, &config).await {
+            if let Err(e) = vardadb::cli::handle_db_command_direct(&cmd, &config) {
                 eprintln!("Command failed: {}", e);
                 std::process::exit(1);
             }

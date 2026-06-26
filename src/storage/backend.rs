@@ -450,6 +450,15 @@ impl Storage {
         if name == "default" {
             return Err(anyhow::anyhow!("Cannot delete default database"));
         }
+
+        let registry_key = format!("db:{}", name);
+        let db_path: Option<String> = self
+            .sys_table
+            .get(registry_key.as_bytes())
+            .ok()
+            .flatten()
+            .map(|bytes| String::from_utf8(bytes).unwrap_or_default());
+
         {
             let mut lock = self.keyspaces.write().unwrap();
             if lock.remove(name).is_none() {
@@ -464,8 +473,19 @@ impl Storage {
             let _ = backend.drop_table(&history_name);
         }
 
-        let registry_key = format!("db:{}", name);
         let _ = self.sys_table.remove(registry_key.as_bytes());
+
+        if let Some(path) = db_path {
+            if !path.is_empty() {
+                let db_file = std::path::PathBuf::from(&path);
+                let _ = std::fs::remove_file(&db_file);
+                let _ = std::fs::remove_file(db_file.with_extension("db-wal"));
+                let _ = std::fs::remove_file(db_file.with_extension("db-shm"));
+            }
+        }
+
+        let schema_path = self.base_path.join(format!("{}_schema.graphql", name));
+        let _ = std::fs::remove_file(&schema_path);
 
         Ok(())
     }
