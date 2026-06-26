@@ -41,8 +41,8 @@ impl MlxEngine {
         register_process_exit_hook();
 
         let server_path = resolve_mlx_server_path(&config);
-        let bind = format!("127.0.0.1:{}", config.port);
-        let base_url = format!("http://{}", bind);
+        let bind = "127.0.0.1";
+        let base_url = format!("http://{}:{}", bind, config.port);
         let config_path = write_mlx_server_config(&config, &bind)?;
 
         let mut command = Command::new(&server_path);
@@ -54,7 +54,7 @@ impl MlxEngine {
 
         let mut child = command.spawn().map_err(|e| {
             format!(
-                "failed to start mlx-server at {}: {}",
+                "failed to start llama server at {}: {}",
                 server_path.display(),
                 e
             )
@@ -69,7 +69,7 @@ impl MlxEngine {
             target: "vardadb::llm::proxy",
             base_url = base_url.as_str(),
             server_path = server_path.display().to_string(),
-            "started managed mlx-server"
+            "started managed llama server"
         );
 
         let engine = Arc::new(Self {
@@ -181,23 +181,25 @@ fn resolve_mlx_server_path(config: &LLMConfig) -> PathBuf {
         return PathBuf::from(path);
     }
 
-    let release = PathBuf::from("../mlx-rs/target/release/mlx-server");
-    if release.exists() {
-        return release;
+    for candidate in [
+        "../mlx-rs/target/release/llama-server",
+        "../mlx-rs/target/debug/llama-server",
+        "../mlx-rs/target/release/mlx-server",
+        "../mlx-rs/target/debug/mlx-server",
+    ] {
+        let path = PathBuf::from(candidate);
+        if path.exists() {
+            return path;
+        }
     }
 
-    let debug = PathBuf::from("../mlx-rs/target/debug/mlx-server");
-    if debug.exists() {
-        return debug;
-    }
-
-    PathBuf::from("mlx-server")
+    PathBuf::from("llama-server")
 }
 
 fn write_mlx_server_config(config: &LLMConfig, bind: &str) -> Result<PathBuf> {
     let mut content = format!(
-        "[server]\nbind = \"{}\"\nembeddings_batch_size = {}\n",
-        bind, EMBEDDINGS_BATCH_SIZE
+        "[server]\nbind = \"{}\"\nport = {}\nembeddings_batch_size = {}\n",
+        bind, config.port, EMBEDDINGS_BATCH_SIZE
     );
 
     if !config.model.is_empty() && config.model != "llama3" {
@@ -231,7 +233,7 @@ fn wait_for_mlx_server(port: u16) -> Result<()> {
             return Ok(());
         }
         if started.elapsed() >= MLX_SERVER_START_TIMEOUT {
-            anyhow::bail!("mlx-server on port {port} did not become ready within 10 seconds");
+            anyhow::bail!("llama server on port {port} did not become ready within 10 seconds");
         }
         thread::sleep(MLX_SERVER_POLL_INTERVAL);
     }
@@ -307,7 +309,7 @@ async fn proxy_request(
     let upstream = request.send().await.map_err(|e| {
         (
             StatusCode::BAD_GATEWAY,
-            format!("mlx-server request failed: {}", e),
+            format!("llama server request failed: {}", e),
         )
     })?;
 
