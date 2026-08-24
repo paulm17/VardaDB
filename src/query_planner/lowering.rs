@@ -204,6 +204,23 @@ pub fn lower_root_query(
     query
 }
 
+/// Lower a raw GraphQL `sort` map (`{ field: ASC|DESC }`) into order keys.
+pub fn lower_sort_map(sort_map: &HashMap<String, Value>) -> Vec<OrderKey> {
+    let mut keys = Vec::new();
+    for (field, direction) in sort_map {
+        let dir = match direction {
+            Value::String(s) if s == "DESC" => SortDirection::Desc,
+            Value::Enum(n) if n.as_str() == "DESC" => SortDirection::Desc,
+            _ => SortDirection::Asc,
+        };
+        keys.push(OrderKey {
+            path: crate::query_planner::ir::FieldPath::field(field.clone()),
+            direction: dir,
+        });
+    }
+    keys
+}
+
 pub fn lower_count_query(type_name: &str, filter_map: &RawFilterMap) -> LogicalQuery {
     let mut query = lower_root_query(type_name, filter_map, &HashMap::new(), None, None, None);
     query.aggregates = vec![AggregateSpec {

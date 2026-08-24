@@ -646,3 +646,63 @@ pub fn build_source_tree(
         }
     }
 }
+
+/// Materialized id set emitted as a single batch. Used by the pipeline builder
+/// for sources that are resolved eagerly (relation-expansion parity bridge in
+/// M5, ordered-index probe results). Can declare an ordering so downstream
+/// sort elimination still applies.
+pub struct VecSource {
+    pub label: String,
+    pub ids: Vec<EntityId>,
+    pub ordering: OutputOrdering,
+}
+
+impl VecSource {
+    pub fn new(label: impl Into<String>, ids: Vec<u64>) -> Self {
+        VecSource {
+            label: label.into(),
+            ids: ids.into_iter().map(EntityId::from).collect(),
+            ordering: OutputOrdering::Unordered,
+        }
+    }
+
+    pub fn ordered(
+        label: impl Into<String>,
+        ids: Vec<u64>,
+        field: impl Into<String>,
+        direction: SortDirection,
+    ) -> Self {
+        VecSource {
+            label: label.into(),
+            ids: ids.into_iter().map(EntityId::from).collect(),
+            ordering: OutputOrdering::Sorted {
+                field: field.into(),
+                direction,
+            },
+        }
+    }
+}
+
+impl ExecOperator for VecSource {
+    fn kind(&self) -> OperatorKind {
+        OperatorKind::Scan
+    }
+    fn detail(&self) -> String {
+        format!("vec_source {} n={}", self.label, self.ids.len())
+    }
+    fn cardinality(&self) -> CardinalityHint {
+        CardinalityHint::Bounded(self.ids.len())
+    }
+    fn output_ordering(&self) -> OutputOrdering {
+        self.ordering.clone()
+    }
+    fn children(&self) -> Vec<&dyn ExecOperator> {
+        vec![]
+    }
+    fn execute(&self, ctx: &mut ExecContext) -> FlowResult<Vec<RowBatch>> {
+        let start = std::time::Instant::now();
+        let out = vec![RowBatch(self.ids.clone())];
+        record(ctx, "scan", self.detail(), out[0].len(), start);
+        FlowResult::Rows(out)
+    }
+}

@@ -340,75 +340,6 @@ impl SqliteResolver {
         Ok(())
     }
 
-    fn sorted_index_scan(
-        &self,
-        type_name: &str,
-        field: &str,
-        asc: bool,
-        filter: &std::collections::HashMap<String, Value>,
-        filter_im: &indexmap::IndexMap<async_graphql::Name, Value>,
-        first: Option<usize>,
-        after: Option<String>,
-        offset: Option<usize>,
-        candidate_set: Option<&std::collections::HashSet<u64>>,
-        cache: Option<&RequestCache>,
-    ) -> Option<Vec<u64>> {
-        let descending = !asc;
-        let prefix = Codec::encode_order_index_prefix(type_name, field, descending);
-        let (main_ks, _) = self.storage.get_database(&self.db_name)?;
-
-        if main_ks.count_prefix(&prefix).ok()? == 0 {
-            self.rebuild_order_index_for_field(type_name, field).ok()?;
-            if main_ks.count_prefix(&prefix).ok()? == 0 {
-                return None;
-            }
-        }
-
-        let mut matched = Vec::new();
-        let mut seen_after = after.is_none();
-        let mut skipped = 0usize;
-
-        for (key, _val) in main_ks.prefix(&prefix) {
-            if !key.starts_with(&prefix) {
-                break;
-            }
-            let Some(uid) = Codec::decode_order_index_uid(&key) else {
-                continue;
-            };
-
-            if let Some(candidates) = candidate_set {
-                if !candidates.contains(&uid) {
-                    continue;
-                }
-            }
-
-            if !seen_after {
-                if after.as_deref() == Some(&uid.to_string()) {
-                    seen_after = true;
-                }
-                continue;
-            }
-
-            if !filter.is_empty() && !self.check_filter_recursive_cached(uid, filter_im, cache) {
-                continue;
-            }
-
-            if skipped < offset.unwrap_or(0) {
-                skipped += 1;
-                continue;
-            }
-
-            matched.push(uid);
-            if let Some(limit) = first {
-                if matched.len() >= limit {
-                    break;
-                }
-            }
-        }
-
-        Some(matched)
-    }
-
     pub(crate) fn rebuild_order_index_for_field(&self, type_name: &str, field: &str) -> Result<(), String> {
         let (main_ks, _) = self
             .storage
@@ -2757,8 +2688,31 @@ impl SqliteResolver {
         Ok(uids)
     }
 
-    /// Legacy read execution entry. Superseded by the planner pipeline from
-    /// Stage 2 onward; kept public for the Phase-1 parity bridge and tests.
+    /// Shared legacy text-predicate detection over the raw GraphQL filter map.
+    /// Returns `(field, strategy, query, require_all)`.
+    fn detect_text_search(
+        filter: &std::collections::HashMap<String, Value>,
+    ) -> Option<(String, String, String, bool)> {
+        for (field, val) in filter {
+            if let Value::Object(obj) = val {
+                if let Some(Value::String(s)) = obj.get("allofterms") {
+                    return Some((field.clone(), "term".to_string(), s.clone(), true));
+                }
+                if let Some(Value::String(s)) = obj.get("anyofterms") {
+                    return Some((field.clone(), "term".to_string(), s.clone(), false));
+                }
+                if let Some(Value::String(s)) = obj.get("alloftext") {
+                    return Some((field.clone(), "fulltext".to_string(), s.clone(), true));
+                }
+                if let Some(Value::String(s)) = obj.get("anyoftext") {
+                    return Some((field.clone(), "fulltext".to_string(), s.clone(), false));
+                }
+            }
+        }
+        None
+    }
+
+    /// Thin dispatcher over the planner operator pipeline (Stage 2.1 cutover).
     pub fn scan_nodes_internal(
         &self,
         type_name: &str,
@@ -2776,238 +2730,53 @@ impl SqliteResolver {
         cache: Option<&RequestCache>,
     ) -> Vec<u64> {
         let start = std::time::Instant::now();
-        let mut uids = Vec::new();
-        let mut filter_im = indexmap::IndexMap::new();
-        for (k, v) in &filter {
-            filter_im.insert(async_graphql::Name::new(k), v.clone());
-        }
-
-        let mut text_search: Option<(String, String, String, bool)> = None;
-        for (field, val) in &filter {
-            if let Value::Object(obj) = val {
-                if let Some(Value::String(s)) = obj.get("allofterms") {
-                    text_search = Some((field.clone(), "term".to_string(), s.clone(), true));
-                    break;
-                }
-                if let Some(Value::String(s)) = obj.get("anyofterms") {
-                    text_search = Some((field.clone(), "term".to_string(), s.clone(), false));
-                    break;
-                }
-                if let Some(Value::String(s)) = obj.get("alloftext") {
-                    text_search = Some((field.clone(), "fulltext".to_string(), s.clone(), true));
-                    break;
-                }
-                if let Some(Value::String(s)) = obj.get("anyoftext") {
-                    text_search = Some((field.clone(), "fulltext".to_string(), s.clone(), false));
-                    break;
-                }
-            }
-        }
-
+        let text_search = Self::detect_text_search(&filter);
         let has_text_search = text_search.is_some();
+
         let candidate_start = std::time::Instant::now();
-        let planner_plan = if near_vector.is_none() && !has_text_search {
-            Some(crate::query_planner::plan_candidates(
-                &self.db_name,
-                type_name,
-                &filter,
-                uniques,
-                query_metadata,
-            ))
-        } else {
-            None
-        };
-        let candidate_set: Option<std::collections::HashSet<u64>> = match &planner_plan {
-            Some(plan) => {
-                let runtime = crate::query_planner::adapters::runtime_for(self, query_metadata);
-                plan.execute_uids(&runtime).map(std::collections::HashSet::from_iter)
-            }
-            None => None,
-        };
+        let runtime = crate::query_planner::adapters::runtime_for(self, query_metadata);
+        let mut ctx =
+            crate::query_planner::operators::ExecContext::new(&runtime, &self.db_name);
+        let built = crate::query_planner::operators::build_scan_pipeline(
+            &self.db_name,
+            type_name,
+            &filter,
+            &sort,
+            first,
+            after.as_deref(),
+            offset,
+            near_vector.as_ref(),
+            text_search.as_ref(),
+            uniques,
+            query_metadata,
+            &runtime,
+            &mut ctx,
+        );
         let candidate_time = candidate_start.elapsed();
-        let used_candidates = candidate_set.is_some();
         metrics::histogram!("vardadb_planner_candidate_duration_seconds")
             .record(candidate_time.as_secs_f64());
-        let access_shape: &str = match (&planner_plan, used_candidates) {
-            (Some(plan), true) => plan.source.kind(),
-            (Some(_), false) => "full_type_scan_streaming",
-            (None, _) if near_vector.is_some() && has_text_search => "hybrid_search",
-            (None, _) if near_vector.is_some() => "vector_search",
-            (None, _) => "text_bm25",
-        };
-        metrics::counter!("vardadb_planner_access_total", "shape" => access_shape.to_string())
+        metrics::counter!("vardadb_planner_access_total", "shape" => built.shape.clone())
             .increment(1);
         if crate::debug_logging() {
-            if let Some(plan) = &planner_plan {
+            if let Some(plan) = &built.plan {
                 eprintln!(
                     "[PLANNER] candidate plan {}.{} shape={}:\n{}",
                     self.db_name,
                     type_name,
-                    access_shape,
+                    built.shape,
                     crate::query_planner::render_candidate_plan(plan)
                 );
             }
         }
 
-        if near_vector.is_none() && !has_text_search && !sort.is_empty() {
-            if let Some((field, direction)) = sort.iter().next() {
-                let asc = match direction {
-                    Value::String(s) => s == "ASC",
-                    Value::Enum(n) => n.as_str() == "ASC",
-                    _ => true,
-                };
-                if let Some(sorted_uids) = self.sorted_index_scan(
-                    type_name,
-                    field,
-                    asc,
-                    &filter,
-                    &filter_im,
-                    first,
-                    after.clone(),
-                    offset,
-                    candidate_set.as_ref(),
-                    cache,
-                ) {
-                    metrics::counter!("vardadb_planner_access_total", "shape" => "ordered_index_scan".to_string())
-                        .increment(1);
-                    return sorted_uids;
-                }
-            }
-        }
-
-        if let Some(ref vec) = near_vector {
-            let k = first.unwrap_or(50) * 4;
-            let search_results =
-                if let Some((field, _strat, query, require_all)) = text_search.clone() {
-                    self.search_hybrid(&query, &field, vec, k, require_all)
-                } else {
-                    self.search_vectors(vec, k)
-                };
-
-            for (uid, _dist) in search_results {
-                if self.node_exists(type_name, uid)
-                    && self.get_node_type(uid).as_deref() == Some(type_name)
-                    && (filter.is_empty()
-                        || self.check_filter_recursive_cached(uid, &filter_im, cache))
-                {
-                    uids.push(uid);
-                }
-            }
-        } else if let Some((field, strat, query, require_all)) = text_search {
-            let k = first.unwrap_or(50) * 4;
-            let results = self.search_text_bm25(&query, &field, &strat, k, require_all);
-
-            for (uid, _score) in results {
-                if self.node_exists(type_name, uid)
-                    && self.get_node_type(uid).as_deref() == Some(type_name)
-                    && self.check_filter_recursive_cached(uid, &filter_im, cache)
-                {
-                    uids.push(uid);
-                }
-            }
-        } else if let Some(candidates) = candidate_set.clone() {
-            use rayon::prelude::*;
-
-            let mut matched_uids: Vec<u64> = candidates
-                .par_iter()
-                .filter(|uid| {
-                    filter.is_empty()
-                        || self.check_filter_recursive_cached(**uid, &filter_im, cache)
-                })
-                .cloned()
-                .collect();
-
-            uids.append(&mut matched_uids);
-            if sort.is_empty() {
-                uids.sort();
-            }
-        } else {
-            let prefix = Codec::encode_type_prefix(type_name);
-            let needs_sorting = !sort.is_empty();
-            let mut skipped = 0usize;
-            let skip_target = offset.unwrap_or(0);
-
-            let start_key = if !needs_sorting {
-                if let Some(cursor) = after.clone() {
-                    let uid = cursor.parse::<u64>().unwrap_or(0);
-                    if uid == u64::MAX {
-                        return vec![];
-                    }
-                    Codec::encode_type_index_key(type_name, uid + 1)
-                } else {
-                    prefix.clone()
-                }
-            } else {
-                prefix.clone()
-            };
-
-            if let Some((main_ks, _)) = self.storage.get_database(&self.db_name) {
-                let upper = crate::storage::sqlite_backend::compute_prefix_upper_bound(&prefix)
-                    .expect("valid prefix bounds");
-                for (key, _val) in main_ks.range(&start_key, &upper) {
-                    if !key.starts_with(&prefix) {
-                        break;
-                    }
-                    if key.len() < 8 {
-                        continue;
-                    }
-
-                    let uid = BigEndian::read_u64(&key[key.len() - 8..]);
-                    if !filter.is_empty()
-                        && !self.check_filter_recursive_cached(uid, &filter_im, cache)
-                    {
-                        continue;
-                    }
-
-                    if !needs_sorting && near_vector.is_none() {
-                        if skipped < skip_target {
-                            skipped += 1;
-                            continue;
-                        }
-                        uids.push(uid);
-                        if let Some(limit) = first {
-                            if uids.len() >= limit {
-                                break;
-                            }
-                        }
-                    } else {
-                        uids.push(uid);
-                    }
-                }
-            }
-        }
-
-        if !sort.is_empty() {
-            if let Some((field, direction)) = sort.iter().next() {
-                let asc = match direction {
-                    Value::String(s) => s == "ASC",
-                    _ => true,
-                };
-                self.sort_uids_by_field(&mut uids, field, asc, cache);
-            }
-        } else if near_vector.is_none() && used_candidates {
-            uids.sort();
-        }
-
-        if let Some(cursor_uid_str) = after {
-            if let Ok(cursor_uid) = cursor_uid_str.parse::<u64>() {
-                if let Some(pos) = uids.iter().position(|u| *u == cursor_uid) {
-                    uids = uids.into_iter().skip(pos + 1).collect();
-                }
-            }
-        }
-
-        if !(sort.is_empty() && near_vector.is_none() && candidate_set.is_none()) {
-            if let Some(skip_count) = offset {
-                if skip_count > 0 {
-                    uids = uids.into_iter().skip(skip_count).collect();
-                }
-            }
-        }
-
-        if let Some(limit) = first {
-            uids.truncate(limit);
-        }
+        let batches = match built.root.execute(&mut ctx) {
+            crate::query_planner::operators::FlowResult::Rows(batches) => batches,
+            _ => Vec::new(),
+        };
+        let uids: Vec<u64> = batches
+            .into_iter()
+            .flat_map(|b| b.0.into_iter().map(|e| e.uid))
+            .collect();
 
         if let Some(cache) = cache {
             self.preload_objects_for_uids(&uids, cache);
@@ -3023,20 +2792,21 @@ impl SqliteResolver {
                 !sort.is_empty(),
                 first,
                 offset,
-                used_candidates,
+                built.used_candidates,
                 candidate_time.as_millis(),
                 uids.len(),
                 total.as_millis(),
                 near_vector.is_some(),
                 has_text_search,
-                access_shape,
+                built.shape,
             );
         }
 
         uids
     }
 
-    fn count_nodes_internal(
+    /// Legacy count dispatcher kept public for the Phase-1 parity bridge/tests.
+    pub fn count_nodes_internal(
         &self,
         type_name: &str,
         filter: std::collections::HashMap<String, Value>,
@@ -3046,177 +2816,61 @@ impl SqliteResolver {
             String,
             crate::engine::resolver::QueryTypeMetadata,
         >,
-        cache: Option<&RequestCache>,
+        _cache: Option<&RequestCache>,
     ) -> usize {
         let start = std::time::Instant::now();
-        let mut filter_im = indexmap::IndexMap::new();
-        for (k, v) in &filter {
-            filter_im.insert(async_graphql::Name::new(k), v.clone());
-        }
-
-        let mut text_search: Option<(String, String, String, bool)> = None;
-        for (field, val) in &filter {
-            if let Value::Object(obj) = val {
-                if let Some(Value::String(s)) = obj.get("allofterms") {
-                    text_search = Some((field.clone(), "term".to_string(), s.clone(), true));
-                    break;
-                }
-                if let Some(Value::String(s)) = obj.get("anyofterms") {
-                    text_search = Some((field.clone(), "term".to_string(), s.clone(), false));
-                    break;
-                }
-                if let Some(Value::String(s)) = obj.get("alloftext") {
-                    text_search = Some((field.clone(), "fulltext".to_string(), s.clone(), true));
-                    break;
-                }
-                if let Some(Value::String(s)) = obj.get("anyoftext") {
-                    text_search = Some((field.clone(), "fulltext".to_string(), s.clone(), false));
-                    break;
-                }
-            }
-        }
-
+        let text_search = Self::detect_text_search(&filter);
         let has_text_search = text_search.is_some();
-        let candidate_start = std::time::Instant::now();
-        let planner_plan = if near_vector.is_none() && !has_text_search {
-            Some(crate::query_planner::plan_candidates(
-                &self.db_name,
-                type_name,
-                &filter,
-                uniques,
-                query_metadata,
-            ))
-        } else {
-            None
-        };
-        let candidate_set: Option<std::collections::HashSet<u64>> = match &planner_plan {
-            Some(plan) => {
-                let runtime = crate::query_planner::adapters::runtime_for(self, query_metadata);
-                plan.execute_uids(&runtime).map(std::collections::HashSet::from_iter)
-            }
-            None => None,
-        };
-        let candidate_time = candidate_start.elapsed();
-        metrics::histogram!("vardadb_planner_candidate_duration_seconds")
-            .record(candidate_time.as_secs_f64());
-        let access_shape: &str = match (&planner_plan, candidate_set.is_some()) {
-            (Some(plan), true) => plan.source.kind(),
-            (Some(_), false) => "full_type_scan_streaming",
-            (None, _) if has_text_search => "text_bm25",
-            (None, _) => "vector_search",
-        };
-        metrics::counter!("vardadb_planner_access_total", "shape" => access_shape.to_string())
-            .increment(1);
 
-        if let Some(ref vec) = near_vector {
-            let search_results =
-                if let Some((field, _strat, query, require_all)) = text_search.clone() {
-                    self.search_hybrid(&query, &field, vec, 10_000, require_all)
-                } else {
-                    self.search_vectors(vec, 10_000)
-                };
-
-            let count = search_results
-                .into_iter()
-                .filter(|(uid, _)| {
-                    self.node_exists(type_name, *uid)
-                        && self.get_node_type(*uid).as_deref() == Some(type_name)
-                        && (filter.is_empty()
-                            || self.check_filter_recursive_cached(*uid, &filter_im, cache))
-                })
-                .count();
-            if crate::debug_logging() && start.elapsed().as_millis() > 10 {
-                eprintln!(
-                    "[RESOLVER] count_nodes {}.{} candidates=false candidate_ms={} count={} total_ms={} near_vector=true text_search={}",
-                    self.db_name,
-                    type_name,
-                    candidate_time.as_millis(),
-                    count,
-                    start.elapsed().as_millis(),
-                    has_text_search,
-                );
-            }
-            return count;
-        }
-
-        if let Some((field, strat, query, require_all)) = text_search {
-            let count = self
-                .search_text_bm25(&query, &field, &strat, 10_000, require_all)
-                .into_iter()
-                .filter(|(uid, _)| {
-                    self.node_exists(type_name, *uid)
-                        && self.get_node_type(*uid).as_deref() == Some(type_name)
-                        && self.check_filter_recursive_cached(*uid, &filter_im, cache)
-                })
-                .count();
-            if crate::debug_logging() && start.elapsed().as_millis() > 10 {
-                eprintln!(
-                    "[RESOLVER] count_nodes {}.{} candidates=false candidate_ms={} count={} total_ms={} near_vector=false text_search=true",
-                    self.db_name,
-                    type_name,
-                    candidate_time.as_millis(),
-                    count,
-                    start.elapsed().as_millis(),
-                );
-            }
-            return count;
-        }
-
-        if let Some(candidates) = candidate_set {
-            let count = candidates
-                .into_iter()
-                .filter(|uid| {
-                    filter.is_empty() || self.check_filter_recursive_cached(*uid, &filter_im, cache)
-                })
-                .count();
-            if crate::debug_logging() && start.elapsed().as_millis() > 10 {
-                eprintln!(
-                    "[RESOLVER] count_nodes {}.{} candidates=true candidate_ms={} count={} total_ms={} near_vector=false text_search=false",
-                    self.db_name,
-                    type_name,
-                    candidate_time.as_millis(),
-                    count,
-                    start.elapsed().as_millis(),
-                );
-            }
-            return count;
-        }
-
-        let prefix = Codec::encode_type_prefix(type_name);
-        if filter.is_empty() {
+        // Fast path preserved from legacy: an unfiltered plain count uses the
+        // O(prefix) SQL counter without assembling a pipeline.
+        if filter.is_empty() && near_vector.is_none() && !has_text_search {
             if let Some((main_ks, _)) = self.storage.get_database(&self.db_name) {
-                return main_ks.count_prefix(&prefix).unwrap_or(0);
+                return main_ks
+                    .count_prefix(&Codec::encode_type_prefix(type_name))
+                    .unwrap_or(0);
             }
             return 0;
         }
 
-        let mut count = 0usize;
-        if let Some((main_ks, _)) = self.storage.get_database(&self.db_name) {
-            let upper = crate::storage::sqlite_backend::compute_prefix_upper_bound(&prefix)
-                .expect("valid prefix bounds");
-            for (key, _val) in main_ks.range(&prefix, &upper) {
-                if !key.starts_with(&prefix) {
-                    break;
-                }
-                if key.len() < 8 {
-                    continue;
-                }
+        let candidate_start = std::time::Instant::now();
+        let runtime = crate::query_planner::adapters::runtime_for(self, query_metadata);
+        let mut ctx =
+            crate::query_planner::operators::ExecContext::new(&runtime, &self.db_name);
+        let built = crate::query_planner::operators::build_count_pipeline(
+            &self.db_name,
+            type_name,
+            &filter,
+            near_vector.as_ref(),
+            text_search.as_ref(),
+            uniques,
+            query_metadata,
+            &runtime,
+        );
+        let candidate_time = candidate_start.elapsed();
+        metrics::histogram!("vardadb_planner_candidate_duration_seconds")
+            .record(candidate_time.as_secs_f64());
+        metrics::counter!("vardadb_planner_access_total", "shape" => built.shape.clone())
+            .increment(1);
 
-                let uid = BigEndian::read_u64(&key[key.len() - 8..]);
-                if self.check_filter_recursive_cached(uid, &filter_im, cache) {
-                    count += 1;
-                }
+        let count = match built.root.execute(&mut ctx) {
+            crate::query_planner::operators::FlowResult::Rows(batches) => {
+                batches.into_iter().map(|b| b.len()).sum()
             }
-        }
+            _ => 0,
+        };
 
         if crate::debug_logging() && start.elapsed().as_millis() > 10 {
             eprintln!(
-                "[RESOLVER] count_nodes {}.{} candidates=false candidate_ms={} count={} total_ms={} near_vector=false text_search=false",
+                "[RESOLVER] count_nodes {}.{} candidates={} candidate_ms={} count={} total_ms={} near_vector={} text_search={}",
                 self.db_name,
                 type_name,
+                built.used_candidates,
                 candidate_time.as_millis(),
                 count,
                 start.elapsed().as_millis(),
+                near_vector.is_some(),
+                has_text_search,
             );
         }
 

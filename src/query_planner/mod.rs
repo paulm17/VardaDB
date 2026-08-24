@@ -19,7 +19,7 @@ pub use ir::{
     OrderKey, Pagination, ProjectField, Projection, QueryRecord, QueryRoot, QueryValue,
     RelationPlan, SortDirection, UnaryOp,
 };
-pub use lowering::{lower_count_query, lower_filter_map, lower_get_query, lower_root_query};
+pub use lowering::{lower_count_query, lower_filter_map, lower_get_query, lower_root_query, lower_sort_map};
 pub use plan::{AccessPathNote, CandidateOutcome, CandidatePlan, CandidateSource};
 pub use planner::{build_candidate_plan, plan_candidates};
 pub use traits::{

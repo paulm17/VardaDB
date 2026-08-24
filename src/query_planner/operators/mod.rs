@@ -27,10 +27,12 @@
 use crate::query_planner::ir::{EntityId, OrderKey, SortDirection};
 use crate::query_planner::traits::PlannerRuntime;
 
+pub mod builder;
 pub mod filter;
 pub mod pagination;
 pub mod sort;
 pub mod source;
+pub use builder::{build_count_pipeline, build_scan_pipeline, BuiltPipeline};
 pub use filter::{count_conditions, FilterOperator};
 pub use pagination::{CursorSkipOperator, LimitOperator, OffsetOperator};
 pub use sort::{compare_stored, SortOperator};
