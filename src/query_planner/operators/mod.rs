@@ -27,7 +27,9 @@
 use crate::query_planner::ir::{EntityId, OrderKey, SortDirection};
 use crate::query_planner::traits::PlannerRuntime;
 
+pub mod filter;
 pub mod source;
+pub use filter::{count_conditions, FilterOperator};
 pub use source::{
     build_source_tree, FullTypeScan, HybridSearchScan, IntersectionSources, OrderedIndexScan,
     PredicatePushdownSource, TextBM25Scan, UniqueLookupSource, UnionSources, VectorKNNScan,

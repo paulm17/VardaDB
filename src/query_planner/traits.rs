@@ -169,6 +169,24 @@ pub trait PlannerNestedCandidates {
     fn nested_candidates(&self, req: &NestedCandidateRequest) -> Option<Vec<u64>>;
 }
 
+/// Zero-drift bridge to the legacy residual-condition evaluator
+/// (`SqliteResolver::check_condition`). The filter operator evaluates the
+/// structural IR (and/or/not/relation) itself but delegates every leaf
+/// condition comparison to this adapter so operator semantics can never
+/// diverge from the legacy path.
+pub trait PlannerFieldEval {
+    /// Raw stored value for one entity field, including the edge-derived
+    /// list fallback used by relation fields (`load_resolved_value`).
+    fn stored_field(&self, id: &EntityId, field: &str) -> Option<async_graphql::Value>;
+
+    /// Evaluate one legacy condition object/scalar against a stored value.
+    fn eval_condition(
+        &self,
+        stored: &Option<async_graphql::Value>,
+        condition: &async_graphql::Value,
+    ) -> bool;
+}
+
 pub trait PlannerRuntime:
     PlannerCatalog
     + PlannerIndexAccess
@@ -176,6 +194,7 @@ pub trait PlannerRuntime:
     + PlannerRelations
     + PlannerPredicatePushdown
     + PlannerNestedCandidates
+    + PlannerFieldEval
     + Send
     + Sync
 {
@@ -187,6 +206,7 @@ impl<T> PlannerRuntime for T where T: PlannerCatalog
     + PlannerRelations
     + PlannerPredicatePushdown
     + PlannerNestedCandidates
+    + PlannerFieldEval
     + Send
     + Sync
 {

@@ -167,7 +167,7 @@ impl SqliteResolver {
         uids
     }
 
-    fn load_resolved_value(&self, uid: u64, field_name: &str) -> Option<Value> {
+    pub(crate) fn load_resolved_value(&self, uid: u64, field_name: &str) -> Option<Value> {
         if field_name == "id" {
             return Some(Value::String(uid.to_string()));
         }
@@ -1079,7 +1079,7 @@ impl SqliteResolver {
         out
     }
 
-    fn check_condition(&self, stored_val: &Option<Value>, condition: &Value) -> bool {
+    pub(crate) fn check_condition(&self, stored_val: &Option<Value>, condition: &Value) -> bool {
         // If condition is a Map, it's a Filter Object (eq, gt, etc.)
         // If condition is a Scalar, it's an implicit Equality check (Backward Compat / scalar input)
 

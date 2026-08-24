@@ -5,7 +5,7 @@ use crate::query_planner::ir::{
 };
 use crate::query_planner::plan::RawFilterMap;
 use crate::query_planner::traits::{
-    FieldMeta, NestedCandidateRequest, PlannerCatalog, PlannerIndexAccess,
+    FieldMeta, NestedCandidateRequest, PlannerCatalog, PlannerFieldEval, PlannerIndexAccess,
     PlannerNestedCandidates, PlannerPredicatePushdown, PlannerRelations, PlannerStorage,
     RelationMeta, SearchFieldMeta, TypeMeta, VectorFieldMeta,
 };
@@ -432,6 +432,20 @@ impl<'a> PlannerNestedCandidates for SqliteRuntime<'a> {
     }
 }
 
+impl<'a> PlannerFieldEval for SqliteRuntime<'a> {
+    fn stored_field(&self, id: &EntityId, field: &str) -> Option<async_graphql::Value> {
+        self.resolver.load_resolved_value(id.uid, field)
+    }
+
+    fn eval_condition(
+        &self,
+        stored: &Option<async_graphql::Value>,
+        condition: &async_graphql::Value,
+    ) -> bool {
+        self.resolver.check_condition(stored, condition)
+    }
+}
+
 pub fn runtime_for<'a>(
     resolver: &'a SqliteResolver,
     metadata: &'a HashMap<String, QueryTypeMetadata>,
@@ -455,7 +469,7 @@ pub mod test_stub {
         QueryValue, SortDirection,
     };
     use crate::query_planner::traits::{
-        FieldMeta, NestedCandidateRequest, PlannerCatalog, PlannerIndexAccess,
+        FieldMeta, NestedCandidateRequest, PlannerCatalog, PlannerFieldEval, PlannerIndexAccess,
         PlannerNestedCandidates, PlannerPredicatePushdown, PlannerRelations, PlannerStorage,
         RelationMeta, SearchFieldMeta, TypeMeta, VectorFieldMeta,
     };
@@ -599,6 +613,19 @@ pub mod test_stub {
     impl PlannerNestedCandidates for TestRuntime {
         fn nested_candidates(&self, _req: &NestedCandidateRequest) -> Option<Vec<u64>> {
             None
+        }
+    }
+
+    impl PlannerFieldEval for TestRuntime {
+        fn stored_field(&self, _id: &EntityId, _field: &str) -> Option<async_graphql::Value> {
+            None
+        }
+        fn eval_condition(
+            &self,
+            _stored: &Option<async_graphql::Value>,
+            _condition: &async_graphql::Value,
+        ) -> bool {
+            true
         }
     }
 

@@ -302,6 +302,17 @@ mod mock {
     impl PlannerNestedCandidates for KnnRuntime {
         fn nested_candidates(&self, _: &NestedCandidateRequest) -> Option<Vec<u64>> { None }
     }
+
+    impl vardadb::query_planner::traits::PlannerFieldEval for KnnRuntime {
+        fn stored_field(&self, _: &EntityId, _: &str) -> Option<async_graphql::Value> { None }
+        fn eval_condition(
+            &self,
+            _: &Option<async_graphql::Value>,
+            _: &async_graphql::Value,
+        ) -> bool {
+            true
+        }
+    }
 }
 
 #[test]

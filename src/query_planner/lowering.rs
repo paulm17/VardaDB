@@ -93,6 +93,21 @@ fn lower_field_condition(field: &str, condition: &Value) -> LogicalFilter {
         Value::Object(obj) => {
             let mut preds: Vec<LogicalFilter> = Vec::new();
             for (key, val) in obj {
+                if key.as_str() == "between" {
+                    // Legacy semantics: `between: [min, max]` constrains numeric
+                    // fields to the inclusive range. Lower to Ge+Le so residual
+                    // evaluation keeps identical behavior. Wrong-arity payloads
+                    // are ignored entirely (legacy check_condition ignores them).
+                    if let Value::List(items) = val {
+                        if items.len() == 2 {
+                            preds.push(pred(field, FilterOp::Ge, &items[0]));
+                            preds.push(pred(field, FilterOp::Le, &items[1]));
+                        }
+                    }
+                    continue;
+                }
+                // `nearVector` is always a top-level query argument in VardaDB;
+                // inside a filter map only the geo `near` op exists.
                 let op = match key.as_str() {
                     "eq" => Some(FilterOp::Eq),
                     "ne" => Some(FilterOp::Ne),
@@ -106,7 +121,7 @@ fn lower_field_condition(field: &str, condition: &Value) -> LogicalFilter {
                     "anyofterms" => Some(FilterOp::AnyOfTerms),
                     "alloftext" => Some(FilterOp::AllOfText),
                     "anyoftext" => Some(FilterOp::AnyOfText),
-                    "nearVector" | "near" => Some(FilterOp::NearVector),
+                    "near" => Some(FilterOp::NearVector),
                     "within" => Some(FilterOp::Within),
                     "intersects" => Some(FilterOp::Intersects),
                     _ => None,
@@ -121,6 +136,11 @@ fn lower_field_condition(field: &str, condition: &Value) -> LogicalFilter {
                 } else {
                     LogicalFilter::And(preds)
                 }
+            } else if is_operator_map(obj) {
+                // Operator-shaped object whose ops are all unsupported by the
+                // IR: legacy check_condition ignores unknown ops (vacuous pass),
+                // so lower to an empty conjunction instead of relation traversal.
+                LogicalFilter::And(Vec::new())
             } else {
                 LogicalFilter::Relation {
                     field: field.to_string(),
