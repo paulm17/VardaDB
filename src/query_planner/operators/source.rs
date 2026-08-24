@@ -17,9 +17,10 @@
 //!   behavior of sorting by uid when no explicit sort is requested.
 
 use crate::query_planner::ir::{CursorValue, EntityId, FilterOp, FilterPredicate, QueryValue, SortDirection};
+use crate::query_planner::lower_filter_map;
 use crate::query_planner::operators::{
-    CardinalityHint, ExecContext, ExecOperator, FlowResult, OperatorKind, OperatorStat,
-    OutputOrdering, PlannerError, RowBatch,
+    CardinalityHint, ExecContext, ExecOperator, FilterOperator, FlowResult, OperatorKind,
+    OperatorStat, OutputOrdering, PlannerError, RowBatch,
 };
 use crate::query_planner::plan::{CandidatePlan, CandidateSource};
 
@@ -589,9 +590,105 @@ impl<T> FlowResultExt<T> for FlowResult<T> {
     }
 }
 
+/// Inverse edge expansion over an executed child pipeline: pulls child ids
+/// from its input subtree, then maps them to parents through
+/// [`PlannerRelations::reverse_related_ids`](crate::query_planner::traits::PlannerRelations).
+/// Replaces the legacy recursive `scan_nodes_internal` re-entry inside
+/// candidate generation (Stage 2.2). Emits deduplicated ascending-uid order,
+/// matching the other set-composition sources.
+pub struct RelationExpandSource {
+    /// Child pipeline producing the nested-side rows.
+    pub input: Box<dyn ExecOperator>,
+    /// Type of the child side (used to resolve inverse edges).
+    pub target_type: String,
+    /// Field on child rows that stores parent references.
+    pub inverse_field: String,
+}
+
+impl ExecOperator for RelationExpandSource {
+    fn kind(&self) -> OperatorKind {
+        OperatorKind::Scan
+    }
+    fn detail(&self) -> String {
+        format!(
+            "relation_expand target={} inverse_field={}",
+            self.target_type, self.inverse_field
+        )
+    }
+    fn cardinality(&self) -> CardinalityHint {
+        CardinalityHint::Unbounded
+    }
+    fn output_ordering(&self) -> OutputOrdering {
+        OutputOrdering::Unordered
+    }
+    fn children(&self) -> Vec<&dyn ExecOperator> {
+        vec![self.input.as_ref()]
+    }
+
+    fn execute(&self, ctx: &mut ExecContext) -> FlowResult<Vec<RowBatch>> {
+        let start = std::time::Instant::now();
+        // Cycle guard: bounded nesting depth for pathological self-referential
+        // plans (upstream `cycle_guard.rs` analog; full graph traversal lands
+        // in Stage 3.3).
+        if !ctx.enter_nested() {
+            return FlowResult::Error(PlannerError::Unsupported(format!(
+                "relation expansion nesting exceeds depth {}",
+                ExecContext::MAX_DEPTH
+            )));
+        }
+        let mut child_ids: Vec<u64> = Vec::new();
+        let flow = match self.input.execute(ctx) {
+            FlowResult::Rows(batches) => {
+                for batch in batches {
+                    for id in batch.0 {
+                        child_ids.push(id.uid);
+                    }
+                }
+                FlowResult::Rows(Vec::new())
+            }
+            FlowResult::Break => FlowResult::Rows(Vec::new()),
+            FlowResult::Continue => FlowResult::Rows(Vec::new()),
+            flow @ FlowResult::Error(_) => flow,
+        };
+        ctx.exit_nested();
+        let flow = match flow {
+            FlowResult::Error(e) => return FlowResult::Error(e),
+            other => other,
+        };
+
+        let child_refs: Vec<EntityId> = child_ids.iter().map(|uid| EntityId::new(*uid)).collect();
+        let mut parents: Vec<EntityId> =
+            match ctx.runtime.reverse_related_ids(&self.target_type, &self.inverse_field, &child_refs) {
+                Ok(list) => list,
+                Err(err) => return FlowResult::Error(PlannerError::Storage(err.to_string())),
+            };
+        parents.sort_by_key(|e| e.uid);
+        parents.dedup_by_key(|e| e.uid);
+
+        let rows_in = child_ids.len();
+        let rows_out = parents.len();
+        ctx.explain.record(OperatorStat {
+            kind: "scan".to_string(),
+            detail: self.detail(),
+            rows_in,
+            rows_out,
+            elapsed_us: start.elapsed().as_micros() as u64,
+            notes: vec![format!(
+                "expanded {} children via inverse field {}",
+                rows_in, self.inverse_field
+            )],
+        });
+
+        match flow {
+            _ => FlowResult::Rows(vec![RowBatch(parents)]),
+        }
+    }
+}
+
 /// Compile a planner [`CandidateSource`] into an executable source-operator
-/// tree for `type_name`. `RelationExpansion` stays unsupported until Stage 2.2
-/// operator subplans land.
+/// tree for `type_name`. `RelationExpansion` composes its child subplan in
+/// place (Stage 2.2): child source tree plus residual nested filter, wrapped
+/// in inverse-edge expansion.
 pub fn build_source_tree(
     type_name: &str,
     source: &CandidateSource,
@@ -627,9 +724,32 @@ pub fn build_source_tree(
             query: query.clone(),
             limit: None,
         })),
-        CandidateSource::RelationExpansion { .. } => Err(PlannerError::Unsupported(
-            "relation expansion requires Stage 2.2 operator subplans".to_string(),
-        )),
+        CandidateSource::RelationExpansion {
+            target_type,
+            child_plan,
+            inverse_field,
+            child_raw_filter,
+            ..
+        } => {
+            // Stage 2.2: compose the child subplan (its own source applies
+            // text/pushdown narrowing) plus the residual nested filter, then
+            // invert through the parent edge. Candidate-level execution uses
+            // the same composition via `plan.rs`, keeping both paths aligned.
+            let child_tree = build_source_tree(&child_plan.type_name, &child_plan.source)?;
+            let node: Box<dyn ExecOperator> = match child_raw_filter
+                .as_ref()
+                .map(lower_filter_map)
+                .filter(|filter| !filter.is_empty_conjunction())
+            {
+                Some(filter) => FilterOperator::boxed(child_tree, filter),
+                None => child_tree,
+            };
+            Ok(Box::new(RelationExpandSource {
+                input: node,
+                target_type: target_type.clone(),
+                inverse_field: inverse_field.clone(),
+            }))
+        }
         CandidateSource::Intersection(children) => {
             let sources = children
                 .iter()

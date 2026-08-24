@@ -40,7 +40,8 @@ pub use relation::{CosineRerankOperator, RelatedIdsSource};
 pub use sort::{compare_stored, SortOperator};
 pub use source::{
     build_source_tree, FullTypeScan, HybridSearchScan, IntersectionSources, OrderedIndexScan,
-    PredicatePushdownSource, TextBM25Scan, UniqueLookupSource, UnionSources, VectorKNNScan,
+    PredicatePushdownSource, RelationExpandSource, TextBM25Scan, UniqueLookupSource, UnionSources,
+    VectorKNNScan,
 };
 
 /// A batch of rows flowing between operators.

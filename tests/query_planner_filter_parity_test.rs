@@ -173,23 +173,16 @@ fn assert_parity(fx: &Fixture, type_name: &str, filter_map: &HashMap<String, asy
     );
 
     let plan = plan_candidates("default", type_name, filter_map, &uniques, &fx.metadata);
-    let rt = runtime_for(&fx.resolver, &fx.metadata);
-    let got: Vec<u64> = match build_source_tree(type_name, &plan.source) {
-        Ok(source) => {
-            // M5 cutover shape: source tree plus residual filter operator.
-            let pipeline: Box<dyn ExecOperator> = match &plan.residual {
-                Some(f) if !f.is_empty_conjunction() => FilterOperator::boxed(source, f.clone()),
-                _ => source,
-            };
-            exec_op(pipeline.as_ref(), fx)
-        }
-        Err(_) if plan.source.kind() == "relation_expansion" => {
-            // Until M7 lands operator subplans, relation-expansion sources
-            // execute through the CandidatePlan bridge (nested candidates +
-            // residual verification inside the planner).
-            plan.execute_uids(&rt).unwrap_or_default()
-        }
-        Err(e) => panic!("source tree failed for {filter_map:?}: {e}"),
+    // M7 shape: every source (relation expansion included) composes into an
+    // operator tree; residual filter stays downstream of the source.
+    let got: Vec<u64> = {
+        let source = build_source_tree(type_name, &plan.source)
+            .unwrap_or_else(|e| panic!("source tree failed for {filter_map:?}: {e}"));
+        let pipeline: Box<dyn ExecOperator> = match &plan.residual {
+            Some(f) if !f.is_empty_conjunction() => FilterOperator::boxed(source, f.clone()),
+            _ => source,
+        };
+        exec_op(pipeline.as_ref(), fx)
     };
     let mut got = got;
     got.sort_unstable();

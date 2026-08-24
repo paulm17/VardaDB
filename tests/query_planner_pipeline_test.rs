@@ -299,10 +299,6 @@ mod mock {
         fn candidate_ids(&self, _: &str, _: &FilterPredicate) -> anyhow::Result<Option<Vec<EntityId>>> { Ok(None) }
     }
 
-    impl PlannerNestedCandidates for KnnRuntime {
-        fn nested_candidates(&self, _: &NestedCandidateRequest) -> Option<Vec<u64>> { None }
-    }
-
     impl vardadb::query_planner::traits::PlannerFieldEval for KnnRuntime {
         fn stored_field(&self, _: &EntityId, _: &str) -> Option<async_graphql::Value> { None }
         fn eval_condition(
@@ -397,9 +393,38 @@ fn union_dedups_and_intersection_intersects() {
 }
 
 #[test]
-fn build_source_tree_rejects_relation_expansion_until_m7() {
+fn build_source_tree_composes_relation_expansion() {
     use vardadb::query_planner::CandidateSource;
-    let source = CandidateSource::RelationExpansion {
+    let fx = build_fixture();
+
+    // Child subplan: text-narrowed Book scan; expansion surfaces its authors.
+    let mut child_filter = HashMap::new();
+    child_filter.insert(
+        "title".to_string(),
+        op_obj("allofterms", async_graphql::Value::String("planner".into())),
+    );
+    let narrowed = CandidateSource::RelationExpansion {
+        field: "books".to_string(),
+        target_type: "Book".to_string(),
+        child_plan: Box::new(vardadb::query_planner::plan_candidates(
+            "default",
+            "Book",
+            &child_filter,
+            &[],
+            &fx.metadata,
+        )),
+        inverse_field: "author".to_string(),
+        child_raw_filter: None,
+        child_uniques: vec![],
+    };
+    assert_eq!(
+        exec_uids(build_source_tree("Author", &narrowed).unwrap().as_ref(), &fx),
+        vec![fx.paul],
+        "authors of books matching allofterms(planner) => Paul"
+    );
+
+    // Unfiltered child scan expands to every author that owns a book.
+    let all = CandidateSource::RelationExpansion {
         field: "books".to_string(),
         target_type: "Book".to_string(),
         child_plan: Box::new(vardadb::query_planner::plan_candidates(
@@ -407,19 +432,15 @@ fn build_source_tree_rejects_relation_expansion_until_m7() {
             "Book",
             &HashMap::new(),
             &[],
-            &HashMap::new(),
+            &fx.metadata,
         )),
         inverse_field: "author".to_string(),
         child_raw_filter: None,
         child_uniques: vec![],
     };
-    match build_source_tree("Author", &source) {
-        Ok(_) => panic!("relation expansion must stay unsupported until M7"),
-        Err(err) => assert!(
-            matches!(err, vardadb::query_planner::operators::PlannerError::Unsupported(_)),
-            "unexpected error: {err}"
-        ),
-    }
+    let mut uids = exec_uids(build_source_tree("Author", &all).unwrap().as_ref(), &fx);
+    uids.sort_unstable();
+    assert_eq!(uids, vec![fx.paul, fx.ada], "Bob authored nothing");
 }
 
 // -- small GraphQL arg helpers ------------------------------------------------

@@ -155,20 +155,6 @@ pub trait PlannerPredicatePushdown {
     ) -> anyhow::Result<Option<Vec<EntityId>>>;
 }
 
-/// Phase-1 parity bridge: lets the planner delegate nested-relation child
-/// candidate generation to the existing (residual-verifying) scan pipeline.
-/// Removed once Stage 2.2 operator subplans replace recursive re-entry.
-pub struct NestedCandidateRequest {
-    pub target_type: String,
-    pub filter: std::collections::HashMap<String, async_graphql::Value>,
-    pub uniques: Vec<String>,
-}
-
-pub trait PlannerNestedCandidates {
-    /// `None` mirrors "no narrowing" so callers keep their streaming fallback.
-    fn nested_candidates(&self, req: &NestedCandidateRequest) -> Option<Vec<u64>>;
-}
-
 /// Zero-drift bridge to the legacy residual-condition evaluator
 /// (`SqliteResolver::check_condition`). The filter operator evaluates the
 /// structural IR (and/or/not/relation) itself but delegates every leaf
@@ -193,7 +179,6 @@ pub trait PlannerRuntime:
     + PlannerStorage
     + PlannerRelations
     + PlannerPredicatePushdown
-    + PlannerNestedCandidates
     + PlannerFieldEval
     + Send
     + Sync
@@ -205,7 +190,6 @@ impl<T> PlannerRuntime for T where T: PlannerCatalog
     + PlannerStorage
     + PlannerRelations
     + PlannerPredicatePushdown
-    + PlannerNestedCandidates
     + PlannerFieldEval
     + Send
     + Sync

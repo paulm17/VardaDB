@@ -23,8 +23,8 @@ pub use lowering::{lower_count_query, lower_filter_map, lower_get_query, lower_r
 pub use plan::{AccessPathNote, CandidateOutcome, CandidatePlan, CandidateSource};
 pub use planner::{build_candidate_plan, plan_candidates};
 pub use traits::{
-    AuthPrincipal, FieldMeta, NestedCandidateRequest, PlannerAuthorization, PlannerCatalog,
-    PlannerGeoAccess, PlannerIndexAccess, PlannerInference, PlannerNestedCandidates,
+    AuthPrincipal, FieldMeta, PlannerAuthorization, PlannerCatalog,
+    PlannerGeoAccess, PlannerIndexAccess, PlannerInference,
     PlannerPredicatePushdown, PlannerRelations, PlannerRuntime, PlannerStorage, RelationMeta,
     SearchFieldMeta, SearchStrategy, TypeMeta, VectorFieldMeta,
 };

@@ -3,11 +3,9 @@ use crate::engine::resolver::{QueryTypeMetadata, Resolver};
 use crate::query_planner::ir::{
     CursorValue, EntityId, FieldPath, FilterOp, QueryRecord, QueryValue, SortDirection,
 };
-use crate::query_planner::plan::RawFilterMap;
 use crate::query_planner::traits::{
-    FieldMeta, NestedCandidateRequest, PlannerCatalog, PlannerFieldEval, PlannerIndexAccess,
-    PlannerNestedCandidates, PlannerPredicatePushdown, PlannerRelations, PlannerStorage,
-    RelationMeta, SearchFieldMeta, TypeMeta, VectorFieldMeta,
+    FieldMeta, PlannerCatalog, PlannerFieldEval, PlannerIndexAccess, PlannerPredicatePushdown,
+    PlannerRelations, PlannerStorage, RelationMeta, SearchFieldMeta, TypeMeta, VectorFieldMeta,
 };
 use crate::storage::codec::Codec;
 use byteorder::ByteOrder;
@@ -414,24 +412,6 @@ impl<'a> PlannerPredicatePushdown for SqliteRuntime<'a> {
     }
 }
 
-impl<'a> PlannerNestedCandidates for SqliteRuntime<'a> {
-    fn nested_candidates(&self, req: &NestedCandidateRequest) -> Option<Vec<u64>> {
-        let filter: RawFilterMap = req.filter.clone();
-        Some(self.resolver.scan_nodes_internal(
-            &req.target_type,
-            filter,
-            HashMap::new(),
-            None,
-            None,
-            None,
-            &req.uniques,
-            None,
-            self.metadata,
-            None,
-        ))
-    }
-}
-
 impl<'a> PlannerFieldEval for SqliteRuntime<'a> {
     fn stored_field(&self, id: &EntityId, field: &str) -> Option<async_graphql::Value> {
         self.resolver.load_resolved_value(id.uid, field)
@@ -469,9 +449,8 @@ pub mod test_stub {
         QueryValue, SortDirection,
     };
     use crate::query_planner::traits::{
-        FieldMeta, NestedCandidateRequest, PlannerCatalog, PlannerFieldEval, PlannerIndexAccess,
-        PlannerNestedCandidates, PlannerPredicatePushdown, PlannerRelations, PlannerStorage,
-        RelationMeta, SearchFieldMeta, TypeMeta, VectorFieldMeta,
+        FieldMeta, PlannerCatalog, PlannerFieldEval, PlannerIndexAccess, PlannerPredicatePushdown,
+        PlannerRelations, PlannerStorage, RelationMeta, SearchFieldMeta, TypeMeta, VectorFieldMeta,
     };
 
     #[derive(Default)]
@@ -607,12 +586,6 @@ pub mod test_stub {
             _predicate: &FilterPredicate,
         ) -> anyhow::Result<Option<Vec<EntityId>>> {
             Ok(None)
-        }
-    }
-
-    impl PlannerNestedCandidates for TestRuntime {
-        fn nested_candidates(&self, _req: &NestedCandidateRequest) -> Option<Vec<u64>> {
-            None
         }
     }
 

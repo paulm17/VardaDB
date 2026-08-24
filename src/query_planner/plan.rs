@@ -213,36 +213,23 @@ impl CandidatePlan {
                 target_type,
                 child_plan,
                 inverse_field,
-                child_raw_filter,
-                child_uniques,
+                child_raw_filter: _,
+                child_uniques: _,
             } => {
-                let child_ids: Vec<EntityId> =
-                    if let Some(raw) = child_raw_filter {
-                        use crate::query_planner::traits::NestedCandidateRequest;
-                        let req = NestedCandidateRequest {
-                            target_type: target_type.clone(),
-                            filter: raw.clone(),
-                            uniques: child_uniques.clone(),
-                        };
-                        match runtime.nested_candidates(&req) {
-                            Some(uids) => uids.into_iter().map(EntityId::new).collect(),
-                            None => match runtime.scan_type(target_type, None, None) {
-                                Ok(list) => list,
-                                Err(_) => return narrowed(vec![]),
-                            },
-                        }
-                    } else {
-                        let child_outcome = child_plan.exec_inner(runtime, true);
-                        match child_outcome {
-                            CandidateOutcome::Narrowed(ids) => ids,
-                            CandidateOutcome::NoNarrowing => {
-                                match runtime.scan_type(target_type, None, None) {
-                                    Ok(list) => list,
-                                    Err(_) => return narrowed(vec![]),
-                                }
-                            }
-                        }
-                    };
+                // Stage 2.2: nested candidate generation runs the child plan
+                // directly (its own source applies text/pushdown narrowing).
+                // Residual verification of `child_raw_filter` stays downstream
+                // in the filter operator's Relation arm.
+                let child_ids: Vec<EntityId> = {
+                    let child_outcome = child_plan.exec_inner(runtime, true);
+                    match child_outcome {
+                        CandidateOutcome::Narrowed(ids) => ids,
+                        CandidateOutcome::NoNarrowing => match runtime.scan_type(target_type, None, None) {
+                            Ok(list) => list,
+                            Err(_) => return narrowed(vec![]),
+                        },
+                    }
+                };
                 match runtime.reverse_related_ids(target_type, inverse_field, &child_ids) {
                     Ok(parents) => {
                         metrics::counter!("vardadb_planner_relation_expansion_total").increment(1);
