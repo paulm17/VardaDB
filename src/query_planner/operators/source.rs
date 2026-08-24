@@ -158,7 +158,12 @@ impl ExecOperator for PredicatePushdownSource {
     fn execute(&self, ctx: &mut ExecContext) -> FlowResult<Vec<RowBatch>> {
         let start = std::time::Instant::now();
         match ctx.runtime.candidate_ids(&self.type_name, &self.predicate) {
-            Ok(Some(ids)) => {
+            Ok(Some(mut ids)) => {
+                // Legacy parity: candidate sets are emitted in ascending uid
+                // order (the old candidates branch sorted the HashSet before
+                // pagination). Set-based sources are the only ones allowed to
+                // reorder like this; ordered scans keep their declared order.
+                ids.sort_by_key(|id| id.uid);
                 let out = vec![RowBatch(ids)];
                 let n = out[0].len();
                 record(ctx, "scan", self.detail(), n, start);

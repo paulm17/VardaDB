@@ -223,7 +223,6 @@ mod tests {
     use super::*;
     use crate::query_planner::adapters::runtime_for_test_stub;
     use crate::query_planner::ir::{FieldPath, FieldSegment, FilterPredicate, QueryValue};
-    use crate::query_planner::operators::CardinalityHint;
 
     fn eq_pred(field: &str, v: i64) -> LogicalFilter {
         LogicalFilter::Predicate(FilterPredicate {

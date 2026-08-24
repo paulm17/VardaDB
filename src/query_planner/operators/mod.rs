@@ -28,8 +28,12 @@ use crate::query_planner::ir::{EntityId, OrderKey, SortDirection};
 use crate::query_planner::traits::PlannerRuntime;
 
 pub mod filter;
+pub mod pagination;
+pub mod sort;
 pub mod source;
 pub use filter::{count_conditions, FilterOperator};
+pub use pagination::{CursorSkipOperator, LimitOperator, OffsetOperator};
+pub use sort::{compare_stored, SortOperator};
 pub use source::{
     build_source_tree, FullTypeScan, HybridSearchScan, IntersectionSources, OrderedIndexScan,
     PredicatePushdownSource, TextBM25Scan, UniqueLookupSource, UnionSources, VectorKNNScan,
