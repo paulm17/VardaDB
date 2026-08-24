@@ -73,7 +73,7 @@ impl SqliteResolver {
         }
     }
 
-    fn load_object_fields(&self, uid: u64) -> std::collections::HashMap<String, Value> {
+    pub(crate) fn load_object_fields(&self, uid: u64) -> std::collections::HashMap<String, Value> {
         let prefix = Codec::encode_data_prefix(uid);
         let mut fields = std::collections::HashMap::new();
         if let Some((main_ks, _)) = self.storage.get_database(&self.db_name) {
@@ -122,7 +122,7 @@ impl SqliteResolver {
         }
     }
 
-    fn load_related_uids(&self, parent_uid: u64, field_name: &str) -> Vec<u64> {
+    pub(crate) fn load_related_uids(&self, parent_uid: u64, field_name: &str) -> Vec<u64> {
         let key = Codec::encode_data_key(parent_uid, field_name);
         let mut uids = self
             .storage
@@ -513,7 +513,7 @@ impl SqliteResolver {
     /// Convert a serde_json::Value to a rusqlite::types::Value for SQL pushdown.
     /// json_extract() returns typed values: TEXT for strings, INTEGER for ints,
     /// REAL for floats, so the comparison parameter must match.
-    fn json_to_sqlite_value(val: &Value) -> rusqlite::types::Value {
+    pub(crate) fn json_to_sqlite_value(val: &Value) -> rusqlite::types::Value {
         match val {
             Value::String(s) => rusqlite::types::Value::Text(s.clone()),
             Value::Number(n) => {
@@ -1425,421 +1425,6 @@ impl SqliteResolver {
                 }
             }
         }
-    }
-
-    fn get_candidates(
-        &self,
-        type_name: &str,
-        filter: &std::collections::HashMap<String, Value>,
-        uniques: &[String],
-        query_metadata: &std::collections::HashMap<
-            String,
-            crate::engine::resolver::QueryTypeMetadata,
-        >,
-    ) -> Option<std::collections::HashSet<u64>> {
-        // println!("Scan: get_candidates called for {} with filter {:?}", type_name, filter);
-        let mut candidates: Option<std::collections::HashSet<u64>> = None;
-        let type_meta = query_metadata.get(type_name);
-
-        for (field, condition) in filter {
-            // Skip logical operators — these are handled by check_filter_recursive, not here
-            if field == "and" || field == "or" || field == "not" {
-                continue;
-            }
-            // 1. Check Unique Indexes (Exact Equality)
-            // { email: { eq: "..." } } OR { email: "..." }
-            let eq_value = match condition {
-                Value::Object(map) => map.get("eq"),
-                val => Some(val), // Scalar equality
-            };
-
-            if let Some(val) = eq_value {
-                // If it IS a unique field, we can optimize heavily
-                if uniques.contains(field) {
-                    if let Ok(val_str) = serde_json::to_string(val) {
-                        let index_pred = format!("{}.{}", type_name, field);
-                        let idx_key = Codec::encode_unique_index_key(&index_pred, &val_str);
-
-                        match self.storage.get(&self.db_name, &idx_key) {
-                            Ok(Some(bytes)) if bytes.len() == 8 => {
-                                let uid = BigEndian::read_u64(&bytes);
-                                let mut set = std::collections::HashSet::new();
-                                set.insert(uid);
-
-                                // Intersection
-                                if let Some(current) = candidates {
-                                    candidates = Some(
-                                        current.into_iter().filter(|u| set.contains(u)).collect(),
-                                    );
-                                } else {
-                                    candidates = Some(set);
-                                }
-                                continue;
-                            }
-                            _ => {
-                                // Unique field queried, but NO entry found -> Return EMPTY set immediately
-                                return Some(std::collections::HashSet::new());
-                            }
-                        }
-                    }
-                }
-
-                // Fallback for non-unique fields or legacy check (kept for safety if uniques list is incomplete?)
-                // Actually, if it's NOT in uniques list, we can't assume index exists, so we skip index lookup unless we know we have an index.
-                // But previously, it blindly tried to look up ANY field as if it were unique?
-                // "We rely on trying to look it up in the Unique Index."
-                // Since we now have explicit metadata, we should rely on it.
-                // However, let's keep the old logic for "maybe there's an index" if we want to be safe,
-                // BUT the specific optimization of returning EMPTY set can only happen if we are SURE it's a unique field.
-
-                if let Ok(val_str) = serde_json::to_string(val) {
-                    let index_pred = format!("{}.{}", type_name, field);
-                    let idx_key = Codec::encode_unique_index_key(&index_pred, &val_str);
-                    if let Ok(Some(bytes)) = self.storage.get(&self.db_name, &idx_key) {
-                        if bytes.len() == 8 {
-                            let uid = BigEndian::read_u64(&bytes);
-                            let mut set = std::collections::HashSet::new();
-                            set.insert(uid);
-
-                            // Intersection
-                            if let Some(current) = candidates {
-                                candidates =
-                                    Some(current.into_iter().filter(|u| set.contains(u)).collect());
-                            } else {
-                                candidates = Some(set);
-                            }
-                            continue; // Optimized this field
-                        }
-                    }
-                }
-
-                // SQL filter pushdown for eq on non-unique fields
-                if let Some((main_ks, _)) = self.storage.get_database(&self.db_name) {
-                    let sqlite_val = Self::json_to_sqlite_value(val);
-                    let uids = main_ks.filter_by_field_value(type_name, field, "=", sqlite_val);
-                    // Even if empty, this is the definitive answer from SQL pushdown
-                    let set: std::collections::HashSet<u64> = uids.into_iter().collect();
-                    if let Some(current) = candidates {
-                        candidates = Some(current.intersection(&set).copied().collect());
-                    } else {
-                        candidates = Some(set);
-                    }
-                    continue;
-                }
-            }
-
-            // 2. SQL Filter Pushdown for comparison operators (gt, lt, ge, le, ne, contains, in)
-            if let Value::Object(map) = condition {
-                let mut handled_by_pushdown = false;
-
-                // Check for simple scalar comparison ops that can be pushed to SQL
-                for (op, target) in map.iter() {
-                    let sql_op = match op.as_str() {
-                        "gt" => Some(">"),
-                        "lt" => Some("<"),
-                        "ge" => Some(">="),
-                        "le" => Some("<="),
-                        "ne" => Some("!="),
-                        _ => None,
-                    };
-
-                    if let Some(sql_op) = sql_op {
-                        if let Some((main_ks, _)) = self.storage.get_database(&self.db_name) {
-                            let sqlite_val = Self::json_to_sqlite_value(target);
-                            let uids =
-                                main_ks.filter_by_field_value(type_name, field, sql_op, sqlite_val);
-                            let set: std::collections::HashSet<u64> = uids.into_iter().collect();
-                            if let Some(current) = candidates {
-                                candidates = Some(current.intersection(&set).copied().collect());
-                            } else {
-                                candidates = Some(set);
-                            }
-                            handled_by_pushdown = true;
-                        }
-                    }
-
-                    // Handle "contains" operator
-                    if op.as_str() == "contains" {
-                        if let Value::String(substr) = target {
-                            if let Some((main_ks, _)) = self.storage.get_database(&self.db_name) {
-                                let uids = main_ks.filter_by_field_contains(field, substr);
-                                let set: std::collections::HashSet<u64> =
-                                    uids.into_iter().collect();
-                                if let Some(current) = candidates {
-                                    candidates =
-                                        Some(current.intersection(&set).copied().collect());
-                                } else {
-                                    candidates = Some(set);
-                                }
-                                handled_by_pushdown = true;
-                            }
-                        }
-                    }
-
-                    // Handle "in" operator
-                    if op.as_str() == "in" {
-                        if let Value::List(list) = target {
-                            let target_values: Vec<rusqlite::types::Value> =
-                                list.iter().map(|v| Self::json_to_sqlite_value(v)).collect();
-                            if let Some((main_ks, _)) = self.storage.get_database(&self.db_name) {
-                                let uids =
-                                    main_ks.filter_by_field_in(type_name, field, &target_values);
-                                let set: std::collections::HashSet<u64> =
-                                    uids.into_iter().collect();
-                                if let Some(current) = candidates {
-                                    candidates =
-                                        Some(current.intersection(&set).copied().collect());
-                                } else {
-                                    candidates = Some(set);
-                                }
-                                handled_by_pushdown = true;
-                            }
-                        }
-                    }
-                }
-
-                if handled_by_pushdown {
-                    continue;
-                }
-
-                let is_operator_map = map.keys().any(|k| {
-                    [
-                        "eq",
-                        "gt",
-                        "lt",
-                        "ge",
-                        "le",
-                        "contains",
-                        "between",
-                        "near",
-                        "within",
-                        "intersects",
-                        "in",
-                        "ne",
-                        "allofterms",
-                        "anyofterms",
-                        "alloftext",
-                        "anyoftext",
-                    ]
-                    .contains(&k.as_str())
-                });
-
-                if !is_operator_map {
-                    if let Some(meta) = type_meta {
-                        if let Some(target_type) = meta.relations.get(field) {
-                            if let Some(inverse) =
-                                meta.inverses.iter().find(|info| info.field == *field)
-                            {
-                                let nested_filter: std::collections::HashMap<String, Value> = map
-                                    .iter()
-                                    .map(|(k, v)| (k.to_string(), v.clone()))
-                                    .collect();
-                                let child_uniques = query_metadata
-                                    .get(target_type)
-                                    .map(|m| m.uniques.as_slice())
-                                    .unwrap_or(&[]);
-                                let child_uids = self.scan_nodes_internal(
-                                    target_type,
-                                    nested_filter,
-                                    std::collections::HashMap::new(),
-                                    None,
-                                    None,
-                                    None,
-                                    child_uniques,
-                                    None,
-                                    query_metadata,
-                                    None,
-                                );
-
-                                let mut field_uids = std::collections::HashSet::new();
-                                for child_uid in child_uids {
-                                    for parent_uid in
-                                        self.load_related_uids(child_uid, &inverse.inverse_field)
-                                    {
-                                        field_uids.insert(parent_uid);
-                                    }
-                                }
-
-                                if let Some(current) = candidates {
-                                    candidates = Some(
-                                        current
-                                            .into_iter()
-                                            .filter(|u| field_uids.contains(u))
-                                            .collect(),
-                                    );
-                                } else {
-                                    candidates = Some(field_uids);
-                                }
-                                continue;
-                            }
-                        }
-                    }
-                }
-                // Handle "allofterms"
-                if let Some(Value::String(terms_str)) = map.get("allofterms") {
-                    let terms = crate::engine::tokenizer::Tokenizer::tokenize(terms_str, "term");
-                    let mut field_uids = std::collections::HashSet::new();
-                    let mut first_term = true;
-
-                    for term in terms {
-                        let prefix = Codec::encode_term_index_prefix(field, &term);
-                        let (main_ks, _) = match self.storage.get_database(&self.db_name) {
-                            Some(d) => d,
-                            None => return Some(std::collections::HashSet::new()),
-                        };
-                        let iter = main_ks.prefix(&prefix);
-
-                        let mut term_uids = std::collections::HashSet::new();
-                        for (key, _val) in iter {
-                            if !key.starts_with(&prefix) {
-                                break;
-                            }
-                            if key.len() >= 8 {
-                                let uid = BigEndian::read_u64(&key[key.len() - 8..]);
-                                term_uids.insert(uid);
-                            }
-                        }
-
-                        if first_term {
-                            field_uids = term_uids;
-                            first_term = false;
-                        } else {
-                            field_uids.retain(|u| term_uids.contains(u));
-                        }
-                    }
-
-                    if let Some(current) = candidates {
-                        candidates = Some(
-                            current
-                                .into_iter()
-                                .filter(|u| field_uids.contains(u))
-                                .collect(),
-                        );
-                    } else {
-                        candidates = Some(field_uids);
-                    }
-                }
-
-                // Handle "anyofterms"
-                if let Some(Value::String(terms_str)) = map.get("anyofterms") {
-                    let terms = crate::engine::tokenizer::Tokenizer::tokenize(terms_str, "term");
-                    let mut field_uids = std::collections::HashSet::new();
-
-                    for term in terms {
-                        let prefix = Codec::encode_term_index_prefix(field, &term);
-                        let (main_ks, _) = match self.storage.get_database(&self.db_name) {
-                            Some(d) => d,
-                            None => return Some(std::collections::HashSet::new()),
-                        };
-                        let iter = main_ks.prefix(&prefix);
-
-                        for (key, _val) in iter {
-                            if !key.starts_with(&prefix) {
-                                break;
-                            }
-                            if key.len() >= 8 {
-                                let uid = BigEndian::read_u64(&key[key.len() - 8..]);
-                                field_uids.insert(uid);
-                            }
-                        }
-                    }
-                    if let Some(current) = candidates {
-                        candidates = Some(
-                            current
-                                .into_iter()
-                                .filter(|u| field_uids.contains(u))
-                                .collect(),
-                        );
-                    } else {
-                        candidates = Some(field_uids);
-                    }
-                }
-
-                if let Some(Value::String(terms_str)) = map.get("alloftext") {
-                    let terms =
-                        crate::engine::tokenizer::Tokenizer::tokenize(terms_str, "fulltext");
-                    let index_field = format!("{}.fulltext", field);
-                    let mut field_uids = std::collections::HashSet::new();
-                    let mut first_term = true;
-
-                    for term in terms {
-                        let prefix = Codec::encode_term_index_prefix(&index_field, &term);
-                        let (main_ks, _) = match self.storage.get_database(&self.db_name) {
-                            Some(d) => d,
-                            None => return Some(std::collections::HashSet::new()),
-                        };
-                        let iter = main_ks.prefix(&prefix);
-
-                        let mut term_uids = std::collections::HashSet::new();
-                        for (key, _val) in iter {
-                            if !key.starts_with(&prefix) {
-                                break;
-                            }
-                            if key.len() >= 8 {
-                                let uid = BigEndian::read_u64(&key[key.len() - 8..]);
-                                term_uids.insert(uid);
-                            }
-                        }
-
-                        if first_term {
-                            field_uids = term_uids;
-                            first_term = false;
-                        } else {
-                            field_uids.retain(|u| term_uids.contains(u));
-                        }
-                    }
-
-                    if let Some(current) = candidates {
-                        candidates = Some(
-                            current
-                                .into_iter()
-                                .filter(|u| field_uids.contains(u))
-                                .collect(),
-                        );
-                    } else {
-                        candidates = Some(field_uids);
-                    }
-                }
-
-                // Handle "anyoftext" (Stemmed)
-                if let Some(Value::String(terms_str)) = map.get("anyoftext") {
-                    let terms =
-                        crate::engine::tokenizer::Tokenizer::tokenize(terms_str, "fulltext");
-                    let index_field = format!("{}.fulltext", field);
-                    let mut field_uids = std::collections::HashSet::new();
-
-                    for term in terms {
-                        let prefix = Codec::encode_term_index_prefix(&index_field, &term);
-                        let (main_ks, _) = match self.storage.get_database(&self.db_name) {
-                            Some(d) => d,
-                            None => return Some(std::collections::HashSet::new()),
-                        };
-                        let iter = main_ks.prefix(&prefix);
-
-                        for (key, _val) in iter {
-                            if !key.starts_with(&prefix) {
-                                break;
-                            }
-                            if key.len() >= 8 {
-                                let uid = BigEndian::read_u64(&key[key.len() - 8..]);
-                                field_uids.insert(uid);
-                            }
-                        }
-                    }
-                    if let Some(current) = candidates {
-                        candidates = Some(
-                            current
-                                .into_iter()
-                                .filter(|u| field_uids.contains(u))
-                                .collect(),
-                        );
-                    } else {
-                        candidates = Some(field_uids);
-                    }
-                }
-            }
-        }
-        candidates
     }
 
     fn check_filter_recursive_cached(
@@ -3172,7 +2757,9 @@ impl SqliteResolver {
         Ok(uids)
     }
 
-    fn scan_nodes_internal(
+    /// Legacy read execution entry. Superseded by the planner pipeline from
+    /// Stage 2 onward; kept public for the Phase-1 parity bridge and tests.
+    pub fn scan_nodes_internal(
         &self,
         type_name: &str,
         filter: std::collections::HashMap<String, Value>,
@@ -3219,13 +2806,48 @@ impl SqliteResolver {
 
         let has_text_search = text_search.is_some();
         let candidate_start = std::time::Instant::now();
-        let candidate_set = if near_vector.is_none() && !has_text_search {
-            self.get_candidates(type_name, &filter, uniques, query_metadata)
+        let planner_plan = if near_vector.is_none() && !has_text_search {
+            Some(crate::query_planner::plan_candidates(
+                &self.db_name,
+                type_name,
+                &filter,
+                uniques,
+                query_metadata,
+            ))
         } else {
             None
         };
+        let candidate_set: Option<std::collections::HashSet<u64>> = match &planner_plan {
+            Some(plan) => {
+                let runtime = crate::query_planner::adapters::runtime_for(self, query_metadata);
+                plan.execute_uids(&runtime).map(std::collections::HashSet::from_iter)
+            }
+            None => None,
+        };
         let candidate_time = candidate_start.elapsed();
         let used_candidates = candidate_set.is_some();
+        metrics::histogram!("vardadb_planner_candidate_duration_seconds")
+            .record(candidate_time.as_secs_f64());
+        let access_shape: &str = match (&planner_plan, used_candidates) {
+            (Some(plan), true) => plan.source.kind(),
+            (Some(_), false) => "full_type_scan_streaming",
+            (None, _) if near_vector.is_some() && has_text_search => "hybrid_search",
+            (None, _) if near_vector.is_some() => "vector_search",
+            (None, _) => "text_bm25",
+        };
+        metrics::counter!("vardadb_planner_access_total", "shape" => access_shape.to_string())
+            .increment(1);
+        if crate::debug_logging() {
+            if let Some(plan) = &planner_plan {
+                eprintln!(
+                    "[PLANNER] candidate plan {}.{} shape={}:\n{}",
+                    self.db_name,
+                    type_name,
+                    access_shape,
+                    crate::query_planner::render_candidate_plan(plan)
+                );
+            }
+        }
 
         if near_vector.is_none() && !has_text_search && !sort.is_empty() {
             if let Some((field, direction)) = sort.iter().next() {
@@ -3246,6 +2868,8 @@ impl SqliteResolver {
                     candidate_set.as_ref(),
                     cache,
                 ) {
+                    metrics::counter!("vardadb_planner_access_total", "shape" => "ordered_index_scan".to_string())
+                        .increment(1);
                     return sorted_uids;
                 }
             }
@@ -3392,7 +3016,7 @@ impl SqliteResolver {
         let total = start.elapsed();
         if crate::debug_logging() && total.as_millis() > 10 {
             eprintln!(
-                "[RESOLVER] scan_nodes {}.{} filter={} sort={} first={:?} offset={:?} candidates={} candidate_ms={} result_count={} total_ms={} near_vector={} text_search={}",
+                "[RESOLVER] scan_nodes {}.{} filter={} sort={} first={:?} offset={:?} candidates={} candidate_ms={} result_count={} total_ms={} near_vector={} text_search={} shape={}",
                 self.db_name,
                 type_name,
                 !filter.is_empty(),
@@ -3405,6 +3029,7 @@ impl SqliteResolver {
                 total.as_millis(),
                 near_vector.is_some(),
                 has_text_search,
+                access_shape,
             );
         }
 
@@ -3453,12 +3078,35 @@ impl SqliteResolver {
 
         let has_text_search = text_search.is_some();
         let candidate_start = std::time::Instant::now();
-        let candidate_set = if near_vector.is_none() && !has_text_search {
-            self.get_candidates(type_name, &filter, uniques, query_metadata)
+        let planner_plan = if near_vector.is_none() && !has_text_search {
+            Some(crate::query_planner::plan_candidates(
+                &self.db_name,
+                type_name,
+                &filter,
+                uniques,
+                query_metadata,
+            ))
         } else {
             None
         };
+        let candidate_set: Option<std::collections::HashSet<u64>> = match &planner_plan {
+            Some(plan) => {
+                let runtime = crate::query_planner::adapters::runtime_for(self, query_metadata);
+                plan.execute_uids(&runtime).map(std::collections::HashSet::from_iter)
+            }
+            None => None,
+        };
         let candidate_time = candidate_start.elapsed();
+        metrics::histogram!("vardadb_planner_candidate_duration_seconds")
+            .record(candidate_time.as_secs_f64());
+        let access_shape: &str = match (&planner_plan, candidate_set.is_some()) {
+            (Some(plan), true) => plan.source.kind(),
+            (Some(_), false) => "full_type_scan_streaming",
+            (None, _) if has_text_search => "text_bm25",
+            (None, _) => "vector_search",
+        };
+        metrics::counter!("vardadb_planner_access_total", "shape" => access_shape.to_string())
+            .increment(1);
 
         if let Some(ref vec) = near_vector {
             let search_results =

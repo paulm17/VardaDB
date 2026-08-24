@@ -1167,6 +1167,29 @@ impl Schema {
                                         }
                                     }
 
+                                    // Stage 1.2 planner hook: lower this read into the logical IR
+                                    // before dispatching to the resolver. Execution still goes through
+                                    // the existing path; the IR feeds instrumentation now and the
+                                    // planner pipeline from Stage 2 onward.
+                                    {
+                                        let lowered = crate::query_planner::lower_root_query(
+                                            &t_name,
+                                            &filter_map,
+                                            &sort_map,
+                                            first,
+                                            after.clone(),
+                                            offset,
+                                        );
+                                        metrics::counter!("vardadb_planner_lowered_total").increment(1);
+                                        if crate::debug_logging() {
+                                            eprintln!(
+                                                "[PLANNER] lowered query{}:\n{}",
+                                                t_name,
+                                                crate::query_planner::render_logical_query(&lowered)
+                                            );
+                                        }
+                                    }
+
                                     let uids = match request_cache {
                                         Some(cache) => resolver.scan_nodes_with_cache(
                                             &t_name,
@@ -1249,6 +1272,20 @@ impl Schema {
                                     let mut filter_map = std::collections::HashMap::new();
                                     if let Ok(filter_arg) = ctx.args.try_get("filter") {
                                         filter_map = filter_arg.deserialize()?;
+                                    }
+
+                                    // Stage 1.2 planner hook: lower count reads into the IR too.
+                                    {
+                                        let lowered =
+                                            crate::query_planner::lower_count_query(&t_name, &filter_map);
+                                        metrics::counter!("vardadb_planner_lowered_total").increment(1);
+                                        if crate::debug_logging() {
+                                            eprintln!(
+                                                "[PLANNER] lowered count{}:\n{}",
+                                                t_name,
+                                                crate::query_planner::render_logical_query(&lowered)
+                                            );
+                                        }
                                     }
 
                                     let count = match request_cache {

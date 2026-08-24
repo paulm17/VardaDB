@@ -21,6 +21,7 @@ pub mod storage;
 pub mod sync;
 
 pub mod observability;
+pub mod query_planner;
 pub mod repl;
 
 pub struct DummyResolver;

@@ -1,14 +1,20 @@
 # Query Planner Migration Spec
 
+## Upstream Source Anchor
+
+- Upstream source: **SurrealDB `3.3.0-nightly`**, vendored in this repository at `surrealdb/`.
+- All upstream paths in this document are repo-root-relative and resolve into the core crate at `surrealdb/surrealdb/core/src/`.
+- This spec reflects that exact tree. If the vendored checkout is updated, re-verify file layout before executing further stages.
+
 ## Objective
 
-Move the AcmeDB streaming query planner and execution pipeline from `../acmedb` into VardaDB in stages, ending with a near-wholesale planner/runtime move by the final phase.
+Move the SurrealDB streaming query planner and execution pipeline from the vendored upstream checkout at `surrealdb/` into VardaDB in stages, ending with a near-wholesale planner/runtime move by the final phase.
 
 The migration intent is not a vague inspiration port. The final state is:
 
 - VardaDB no longer relies on the current resolver-centric ad hoc planning path for read queries.
 - VardaDB executes read queries through a planner-produced operator pipeline.
-- The planner architecture, operator pipeline, access-path analysis, expression evaluation, aggregation, recursion, explainability, and fallback strategy are all structurally derived from AcmeDB.
+- The planner architecture, operator pipeline, access-path analysis, expression evaluation, aggregation, recursion, explainability, and fallback strategy are all structurally derived from SurrealDB.
 - GraphQL remains the external API surface, but it becomes a frontend that lowers to the imported planner/runtime rather than directly calling `Resolver::scan_nodes()` and `Resolver::resolve_list()` for most query work.
 
 This document is written to maximize useful progress under limited remaining subscription allocation. Early stages deliver real wins. Later stages complete the wholesale move.
@@ -60,10 +66,10 @@ This migration is read-path first.
 
 - Reads: fully converge onto the imported planner/runtime by the end of Phase 3.
 - Writes: remain on the existing mutation/resolver path during all phases of this document unless a later follow-up spec chooses to unify them.
-- No attempt is made here to port AcmeDB DDL/DML execution semantics wholesale.
+- No attempt is made here to port SurrealDB DDL/DML execution semantics wholesale.
 - Replication/sync event emission, including Zenoh-facing mutation hooks, must remain on the existing write path and must not be broken by planner migration work.
 
-This is intentional. AcmeDB’s own planner still has partial fallback for non-read statement classes. VardaDB should not block planner adoption on write-path convergence.
+This is intentional. SurrealDB’s own planner still has partial fallback for non-read statement classes. VardaDB should not block planner adoption on write-path convergence.
 
 ### Replication Boundary
 
@@ -217,6 +223,7 @@ Implications for vector:
 - `NearVector` remains planner-visible
 - vector search must be represented as a first-class candidate source / scan operator
 - hybrid text+vector search should remain representable in the access-path layer
+- upstream prior art for pushing top-k into planning rather than post-filtering: `surrealdb/surrealdb/core/src/exec/topk_pushdown.rs`, the `knn_topk.rs` operator, and `physical_expr/function/index.rs` (KNN `IndexFunction`) — study these when wiring `vector_search` into access-path selection
 
 Implications for MLX:
 
@@ -373,7 +380,7 @@ pub enum FilterOp {
 
 `FieldPath` must be explicit because it is shared by filters, ordering, projections, expression evaluation, and adapter fetch APIs.
 
-Phase 1 and Phase 2 should keep it intentionally simple, while leaving room for richer AcmeDB-style idiom/path semantics later.
+Phase 1 and Phase 2 should keep it intentionally simple, while leaving room for richer SurrealDB-style idiom/path semantics later.
 
 ```rust
 pub struct FieldPath {
@@ -390,7 +397,7 @@ Phase 1-2 rule:
 
 - most GraphQL-originated paths will be simple `Field(String)` chains
 - `Index(usize)` only becomes relevant once richer expression and array-path support is imported
-- do not attempt to model the full AcmeDB idiom/part system in the initial IR
+- do not attempt to model the full SurrealDB idiom/part system in the initial IR
 
 ### Ordering And Aggregation IR
 
@@ -422,7 +429,7 @@ pub enum AggregateFunction {
 
 ### Expression IR
 
-Phase 1 and Phase 2 do not need full AcmeDB expression parity. They need a constrained expression IR that can grow toward AcmeDB’s model.
+Phase 1 and Phase 2 do not need full SurrealDB expression parity. They need a constrained expression IR that can grow toward SurrealDB’s model.
 
 ```rust
 pub enum LogicalExpr {
@@ -479,6 +486,12 @@ The lowering contract from `src/engine/schema.rs` into the logical IR is:
 - `first`, `after`, `offset` lower to `Pagination`.
 - `nearVector` lowers to a filter or dedicated candidate source depending on phase.
 - `count<Type>` lowers to a `LogicalQuery` with aggregate projection rather than a direct resolver call once Phase 3.2 lands.
+
+Upstream prior art worth studying during lowering work:
+
+- SurrealDB `3.3.0-nightly` now ships a native GraphQL implementation under `surrealdb/surrealdb/core/src/graphql/**` (`schema.rs`, `exec.rs`, `relations.rs`, `mutations.rs`, `subscriptions.rs`, and others) and a GQL dialect frontend under `surrealdb/surrealdb/core/src/gql/**` (`ast`, `lexer`, `parser`, `lower`, `token`).
+- Both frontends lower into the same planner/runtime this spec imports, so they are useful references for GraphQL-to-plan lowering patterns.
+- VardaDB keeps its own GraphQL frontend; these modules are prior art, not import targets.
 
 ### Nested Relation Lowering Rules
 
@@ -708,19 +721,19 @@ pub enum CandidateSource {
 }
 ```
 
-## AcmeDB Coupling Assessment
+## SurrealDB Coupling Assessment
 
-The mismatch with AcmeDB is deeper than just planner files.
+The mismatch with SurrealDB is deeper than just planner files.
 
 ### Confirmed Deep Coupling Areas
 
-AcmeDB planner/runtime is coupled to:
+SurrealDB planner/runtime is coupled to:
 
 - `crate::expr::*`
   - full logical language AST
   - statements, literals, filters, lookup parts, ordering, grouping, functions
 - `crate::val::*`
-  - AcmeDB `Value`
+  - SurrealDB `Value`
   - `RecordId`
   - arrays, objects, ranges, geometry, numbers, files, duration, datetime
 - `crate::ctx::*`
@@ -732,11 +745,11 @@ AcmeDB planner/runtime is coupled to:
 
 Relevant source subtrees outside `exec/**` that confirm this:
 
-- `../acmedb/acmedb/core/src/expr/**`
-- `../acmedb/acmedb/core/src/val/**`
-- `../acmedb/acmedb/core/src/ctx/**`
-- `../acmedb/acmedb/core/src/doc/**`
-- `../acmedb/acmedb/core/src/sql/**`
+- `surrealdb/surrealdb/core/src/expr/**`
+- `surrealdb/surrealdb/core/src/val/**`
+- `surrealdb/surrealdb/core/src/ctx/**`
+- `surrealdb/surrealdb/core/src/doc/**`
+- `surrealdb/surrealdb/core/src/sql/**`
 
 ### Practical Severity
 
@@ -744,8 +757,8 @@ Severity is high.
 
 - Phase 1 and early Phase 2 can isolate the mismatch with Varda-native IR and adapter traits.
 - Late Phase 2 and Phase 3 will require either:
-  - a substantial compatibility layer mapping Varda IR/value types into AcmeDB-shaped runtime types, or
-  - deliberate code surgery on imported AcmeDB modules to make them generic over Varda types
+  - a substantial compatibility layer mapping Varda IR/value types into SurrealDB-shaped runtime types, or
+  - deliberate code surgery on imported SurrealDB modules to make them generic over Varda types
 
 The migration therefore has two distinct kinds of work:
 
@@ -764,7 +777,7 @@ Specifically:
   - Varda IR remains authoritative
   - imported planner concepts are adapted into Varda types
 - Phase 3:
-  - where code movement is blocked by AcmeDB `Value` / `RecordId` assumptions, add narrow compatibility wrappers
+  - where code movement is blocked by SurrealDB `Value` / `RecordId` assumptions, add narrow compatibility wrappers
   - do not attempt to generify the entire imported planner runtime at once
 
 ## Benchmark And Regression Plan
@@ -912,11 +925,12 @@ This is the first quick win stage.
 - `src/observability/router.rs`
 - `src/engine/schema.rs`
 
-#### AcmeDB files to reference
+#### SurrealDB files to reference
 
-- `../acmedb/acmedb/core/src/exec/metrics.rs`
-- `../acmedb/acmedb/core/src/dbs/plan.rs`
-- `../acmedb/acmedb/core/src/exec/CLAUDE.md`
+- `surrealdb/surrealdb/core/src/exec/metrics.rs`
+- `surrealdb/surrealdb/core/src/dbs/statement_counters.rs`
+- `surrealdb/surrealdb/core/src/dbs/plan.rs`
+- `surrealdb/surrealdb/core/src/exec/CLAUDE.md`
 
 #### Acceptance criteria
 
@@ -944,7 +958,7 @@ This stage creates the permanent landing zone for the wholesale import.
   - pagination
   - projection
   - relation traversals
-- Add adapter traits for storage/catalog/index lookup so imported AcmeDB planner code does not talk directly to the current resolver.
+- Add adapter traits for storage/catalog/index lookup so imported SurrealDB planner code does not talk directly to the current resolver.
 
 #### VardaDB files to touch
 
@@ -968,16 +982,16 @@ This stage creates the permanent landing zone for the wholesale import.
 - `src/query_planner/explain.rs`
 - `tests/query_planner_smoke_test.rs`
 
-#### AcmeDB files to take structure from
+#### SurrealDB files to take structure from
 
-- `../acmedb/acmedb/core/src/exec/mod.rs`
-- `../acmedb/acmedb/core/src/exec/context.rs`
-- `../acmedb/acmedb/core/src/exec/planner.rs`
-- `../acmedb/acmedb/core/src/exec/access_mode.rs`
-- `../acmedb/acmedb/core/src/exec/cardinality.rs`
-- `../acmedb/acmedb/core/src/exec/ordering.rs`
-- `../acmedb/acmedb/core/src/exec/field_path.rs`
-- `../acmedb/acmedb/core/src/exec/expression_registry.rs`
+- `surrealdb/surrealdb/core/src/exec/mod.rs`
+- `surrealdb/surrealdb/core/src/exec/context.rs`
+- `surrealdb/surrealdb/core/src/exec/planner.rs`
+- `surrealdb/surrealdb/core/src/exec/access_mode.rs`
+- `surrealdb/surrealdb/core/src/exec/cardinality.rs`
+- `surrealdb/surrealdb/core/src/exec/ordering.rs`
+- `surrealdb/surrealdb/core/src/exec/field_path.rs`
+- `surrealdb/surrealdb/core/src/exec/expression_registry.rs`
 
 #### Acceptance criteria
 
@@ -998,6 +1012,7 @@ This is the second quick win stage.
   - ordered index scan selection
   - nested relation candidate expansion
 - Replace recursive ad hoc candidate planning with planner-produced candidate operators.
+- Where cheap, filter candidates before full row decode (see prior-art note below).
 
 #### VardaDB files to touch
 
@@ -1011,14 +1026,22 @@ This is the second quick win stage.
 - `src/query_planner/operators/mod.rs`
 - `tests/query_planner_candidate_test.rs`
 
-#### AcmeDB files to take code/logic from
+#### SurrealDB files to take code/logic from
 
-- `../acmedb/acmedb/core/src/exec/index.rs`
-- `../acmedb/acmedb/core/src/exec/index/access_path.rs`
-- `../acmedb/acmedb/core/src/exec/index/analysis.rs`
-- `../acmedb/acmedb/core/src/exec/planner/source.rs`
-- `../acmedb/acmedb/core/src/exec/planner/util.rs`
-- `../acmedb/acmedb/core/src/exec/ordering.rs`
+- `surrealdb/surrealdb/core/src/exec/index.rs`
+- `surrealdb/surrealdb/core/src/exec/index/access_path.rs`
+- `surrealdb/surrealdb/core/src/exec/index/analysis.rs`
+- `surrealdb/surrealdb/core/src/exec/planner/source.rs`
+- `surrealdb/surrealdb/core/src/exec/planner/util/` (`mod.rs`, `conditions.rs`, `fields.rs`, `literals.rs`, `optimization.rs`, `params.rs`)
+- `surrealdb/surrealdb/core/src/exec/ordering.rs`
+- `surrealdb/surrealdb/core/src/exec/pre_decode_filter/` (`mod.rs`, `compile.rs`, `streaming.rs`, `wire_cmp.rs`, `wire_literal.rs`)
+- `surrealdb/surrealdb/core/src/exec/topk_pushdown.rs`
+
+Prior-art note on pre-decode filtering:
+
+- Upstream `pre_decode_filter/` rejects rows directly from raw revision-encoded KV bytes before any full decode, for KV-table and record-id range scans. It compiles predicates into byte-level comparators (`wire_cmp`, `wire_literal`) and streams rows through them (`streaming.rs`).
+- The VardaDB analog is filtering SQLite rows on raw decoded column bytes / codec-encoded payloads before materializing a full `QueryRecord`. Even a partial port of this idea (reject on the first discriminating predicate) compounds with candidate planning and directly attacks the logged nested-filter cost.
+- Treat this as an optional Stage 1.3 quick win, not a blocker; the authoritative post-decode filter remains in the pipeline (Stage 2.1).
 
 #### Acceptance criteria
 
@@ -1044,8 +1067,13 @@ Replace VardaDB’s resolver-centric read path with an operator pipeline for nor
   - project
   - fetch
   - union where necessary
-- Introduce Varda batch/value stream execution, even if the first implementation is simplified.
-- Add sort elimination when ordered access paths already satisfy the requested ordering.
+- Introduce Varda batch/value stream execution, even if the first implementation is simplified:
+  - upstream contract: operators consume and produce `ValueBatch` (`Vec<Value>`) batches over a `ValueBatchStream`, driven by `ExecOperator::execute()` against an `ExecutionContext`
+  - control-flow signals (`return`/`break`/`continue`/errors) propagate through the operator tree as `FlowResult<T>` values, not panics or sentinels
+  - `CardinalityHint` (`AtMostOne` / `Bounded(n)` / `Unbounded`) is declared per operator and drives upstream buffering decisions in `buffer.rs`; adopt the same hint model so buffering behavior ports cleanly
+- Add sort elimination when ordered access paths already satisfy the requested ordering:
+  - upstream models this via `OutputOrdering` (`Unordered` | `Sorted`) declared on every operator; sorts are dropped when the input ordering already satisfies the requested keys
+  - mirror that in the Varda plan/operator types so ordered index scans selected in Stage 1.3 eliminate downstream in-memory sorts
 
 #### VardaDB files to touch
 
@@ -1066,28 +1094,29 @@ Replace VardaDB’s resolver-centric read path with an operator pipeline for nor
 - `src/bridge/sqlite_resolver.rs`
 - `tests/query_planner_pipeline_test.rs`
 
-#### AcmeDB files to take code/logic from
+#### SurrealDB files to take code/logic from
 
-- `../acmedb/acmedb/core/src/exec/operators/scan.rs`
-- `../acmedb/acmedb/core/src/exec/operators/scan/common.rs`
-- `../acmedb/acmedb/core/src/exec/operators/scan/pipeline.rs`
-- `../acmedb/acmedb/core/src/exec/operators/scan/table.rs`
-- `../acmedb/acmedb/core/src/exec/operators/scan/index.rs`
-- `../acmedb/acmedb/core/src/exec/operators/scan/index_count.rs`
-- `../acmedb/acmedb/core/src/exec/operators/scan/count.rs`
-- `../acmedb/acmedb/core/src/exec/operators/scan/fulltext.rs`
-- `../acmedb/acmedb/core/src/exec/operators/scan/knn.rs`
-- `../acmedb/acmedb/core/src/exec/operators/filter.rs`
-- `../acmedb/acmedb/core/src/exec/operators/sort.rs`
-- `../acmedb/acmedb/core/src/exec/operators/sort/common.rs`
-- `../acmedb/acmedb/core/src/exec/operators/sort/topk.rs`
-- `../acmedb/acmedb/core/src/exec/operators/limit.rs`
-- `../acmedb/acmedb/core/src/exec/operators/project.rs`
-- `../acmedb/acmedb/core/src/exec/operators/project_value.rs`
-- `../acmedb/acmedb/core/src/exec/operators/fetch.rs`
-- `../acmedb/acmedb/core/src/exec/operators/union.rs`
-- `../acmedb/acmedb/core/src/exec/buffer.rs`
-- `../acmedb/acmedb/core/src/exec/cardinality.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/scan.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/scan/common.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/scan/pipeline.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/scan/table.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/scan/index.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/scan/index_count.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/scan/count.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/scan/fulltext.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/scan/knn.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/filter.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/sort.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/sort/common.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/sort/topk.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/limit.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/project.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/project_value.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/fetch.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/union.rs`
+- `surrealdb/surrealdb/core/src/exec/buffer.rs`
+- `surrealdb/surrealdb/core/src/exec/cardinality.rs`
+- `surrealdb/surrealdb/core/src/exec/ordering.rs`
 
 #### Acceptance criteria
 
@@ -1114,17 +1143,27 @@ Replace VardaDB’s resolver-centric read path with an operator pipeline for nor
 - `src/query_planner/operators/relation.rs`
 - `tests/query_planner_relation_test.rs`
 
-#### AcmeDB files to take code/logic from
+#### SurrealDB files to take code/logic from
 
-- `../acmedb/acmedb/core/src/exec/planner/select.rs`
-- `../acmedb/acmedb/core/src/exec/planner/idiom.rs`
-- `../acmedb/acmedb/core/src/exec/parts/mod.rs`
-- `../acmedb/acmedb/core/src/exec/parts/field.rs`
-- `../acmedb/acmedb/core/src/exec/parts/lookup.rs`
-- `../acmedb/acmedb/core/src/exec/parts/filter.rs`
-- `../acmedb/acmedb/core/src/exec/operators/scan/reference.rs`
-- `../acmedb/acmedb/core/src/exec/operators/scan/resolved.rs`
-- `../acmedb/acmedb/core/src/exec/operators/scan/graph.rs`
+- `surrealdb/surrealdb/core/src/exec/planner/select/` (`mod.rs`, `pipeline.rs`, `projection.rs`)
+- `surrealdb/surrealdb/core/src/exec/planner/idiom.rs`
+- `surrealdb/surrealdb/core/src/exec/planner/cycle_guard.rs`
+- `surrealdb/surrealdb/core/src/exec/parts/mod.rs`
+- `surrealdb/surrealdb/core/src/exec/parts/field.rs`
+- `surrealdb/surrealdb/core/src/exec/parts/lookup.rs`
+- `surrealdb/surrealdb/core/src/exec/parts/filter.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/scan/reference.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/scan/resolved.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/scan/graph.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/scan/graph_keys.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/graph/` (`mod.rs`, `expand.rs`, `endpoint.rs`, `distinct_edges.rs`, `path_expand.rs`, `shortest_path_expand.rs`)
+- `surrealdb/surrealdb/core/src/exec/operators/join/hash_join.rs`
+
+Relation-planning notes:
+
+- upstream plans nested/graph reads through dedicated `graph/*` operators with edge dedup (`distinct_edges`) and cycle protection (`cycle_guard.rs`); mirror that structure when replacing recursive resolver re-entry
+- `join/hash_join.rs` is the upstream reference for materializing parent/child batches without per-row re-query; use it to attack the logged relation fanout cost
+- `row_scope.rs` shows how upstream scopes correlated (per-parent) execution state through the tree
 
 #### Acceptance criteria
 
@@ -1152,11 +1191,11 @@ Replace VardaDB’s resolver-centric read path with an operator pipeline for nor
 - `src/observability/ui.rs`
 - `tests/query_planner_explain_test.rs`
 
-#### AcmeDB files to take code/logic from
+#### SurrealDB files to take code/logic from
 
-- `../acmedb/acmedb/core/src/exec/operators/explain.rs`
-- `../acmedb/acmedb/core/src/exec/metrics.rs`
-- `../acmedb/acmedb/core/src/dbs/plan.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/explain.rs`
+- `surrealdb/surrealdb/core/src/exec/metrics.rs`
+- `surrealdb/surrealdb/core/src/dbs/plan.rs`
 
 #### Acceptance criteria
 
@@ -1180,6 +1219,7 @@ Complete the planner migration by importing the hard parts: expression evaluatio
   - scalar functions
   - subquery-backed expressions where needed
 - Introduce a Varda function registry or compatibility registry.
+- Port the upstream `ExpressionRegistry` dedup pattern from `exec/expression_registry.rs`: complex SELECT/ORDER BY expressions are interned once and evaluated through the registry rather than duplicated per operator site. This matters for sort elimination (Stage 2.1) and for keeping nested projections cheap.
 
 #### VardaDB files to touch
 
@@ -1198,24 +1238,27 @@ Complete the planner migration by importing the hard parts: expression evaluatio
 - `src/engine/tokenizer.rs`
 - `tests/query_planner_expression_test.rs`
 
-#### AcmeDB files to take code/logic from
+#### SurrealDB files to take code/logic from
 
-- `../acmedb/acmedb/core/src/exec/physical_expr/mod.rs`
-- `../acmedb/acmedb/core/src/exec/physical_expr/literal.rs`
-- `../acmedb/acmedb/core/src/exec/physical_expr/ops.rs`
-- `../acmedb/acmedb/core/src/exec/physical_expr/idiom.rs`
-- `../acmedb/acmedb/core/src/exec/physical_expr/function.rs`
-- `../acmedb/acmedb/core/src/exec/physical_expr/function/builtin.rs`
-- `../acmedb/acmedb/core/src/exec/physical_expr/function/index.rs`
-- `../acmedb/acmedb/core/src/exec/physical_expr/function/projection.rs`
-- `../acmedb/acmedb/core/src/exec/physical_expr/function/helpers.rs`
-- `../acmedb/acmedb/core/src/exec/physical_expr/subquery.rs`
-- `../acmedb/acmedb/core/src/exec/function/mod.rs`
-- `../acmedb/acmedb/core/src/exec/function/registry.rs`
-- `../acmedb/acmedb/core/src/exec/function/signature.rs`
-- `../acmedb/acmedb/core/src/exec/function/projection.rs`
-- `../acmedb/acmedb/core/src/exec/function/index.rs`
-- `../acmedb/acmedb/core/src/exec/function/aggregate.rs`
+- `surrealdb/surrealdb/core/src/exec/physical_expr/mod.rs`
+- `surrealdb/surrealdb/core/src/exec/physical_expr/literal.rs`
+- `surrealdb/surrealdb/core/src/exec/physical_expr/ops.rs`
+- `surrealdb/surrealdb/core/src/exec/physical_expr/idiom.rs`
+- `surrealdb/surrealdb/core/src/exec/physical_expr/function.rs`
+- `surrealdb/surrealdb/core/src/exec/physical_expr/function/builtin.rs`
+- `surrealdb/surrealdb/core/src/exec/physical_expr/function/index.rs`
+- `surrealdb/surrealdb/core/src/exec/physical_expr/function/projection.rs`
+- `surrealdb/surrealdb/core/src/exec/physical_expr/function/helpers.rs`
+- `surrealdb/surrealdb/core/src/exec/physical_expr/subquery.rs`
+- `surrealdb/surrealdb/core/src/exec/function/mod.rs`
+- `surrealdb/surrealdb/core/src/exec/function/registry.rs`
+- `surrealdb/surrealdb/core/src/exec/function/signature.rs`
+- `surrealdb/surrealdb/core/src/exec/function/projection.rs`
+- `surrealdb/surrealdb/core/src/exec/function/index.rs`
+- `surrealdb/surrealdb/core/src/exec/function/aggregate.rs`
+- `surrealdb/surrealdb/core/src/exec/function/method.rs`
+- `surrealdb/surrealdb/core/src/exec/function/macros.rs`
+- `surrealdb/surrealdb/core/src/exec/expression_registry.rs`
 
 #### Acceptance criteria
 
@@ -1242,19 +1285,19 @@ Complete the planner migration by importing the hard parts: expression evaluatio
 - `src/query_planner/function/builtin/aggregates.rs`
 - `tests/query_planner_aggregate_test.rs`
 
-#### AcmeDB files to take code/logic from
+#### SurrealDB files to take code/logic from
 
-- `../acmedb/acmedb/core/src/exec/planner/aggregate.rs`
-- `../acmedb/acmedb/core/src/exec/operators/aggregate.rs`
-- `../acmedb/acmedb/core/src/exec/function/aggregate.rs`
-- `../acmedb/acmedb/core/src/exec/function/builtin/aggregates.rs`
-- `../acmedb/acmedb/core/src/exec/function/builtin/aggregates/array.rs`
-- `../acmedb/acmedb/core/src/exec/function/builtin/aggregates/count.rs`
-- `../acmedb/acmedb/core/src/exec/function/builtin/aggregates/math.rs`
-- `../acmedb/acmedb/core/src/exec/function/builtin/aggregates/time.rs`
-- `../acmedb/acmedb/core/src/dbs/group.rs`
-- `../acmedb/acmedb/core/src/dbs/store.rs`
-- `../acmedb/acmedb/core/src/dbs/result.rs`
+- `surrealdb/surrealdb/core/src/exec/planner/aggregate.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/aggregate.rs`
+- `surrealdb/surrealdb/core/src/exec/function/aggregate.rs`
+- `surrealdb/surrealdb/core/src/exec/function/builtin/aggregates.rs`
+- `surrealdb/surrealdb/core/src/exec/function/builtin/aggregates/array.rs`
+- `surrealdb/surrealdb/core/src/exec/function/builtin/aggregates/count.rs`
+- `surrealdb/surrealdb/core/src/exec/function/builtin/aggregates/math.rs`
+- `surrealdb/surrealdb/core/src/exec/function/builtin/aggregates/time.rs`
+- `surrealdb/surrealdb/core/src/dbs/group.rs`
+- `surrealdb/surrealdb/core/src/dbs/store.rs`
+- `surrealdb/surrealdb/core/src/dbs/result.rs`
 
 #### Acceptance criteria
 
@@ -1281,16 +1324,16 @@ Complete the planner migration by importing the hard parts: expression evaluatio
 - `src/bridge/sqlite_resolver.rs`
 - `tests/query_planner_recursion_test.rs`
 
-#### AcmeDB files to take code/logic from
+#### SurrealDB files to take code/logic from
 
-- `../acmedb/acmedb/core/src/exec/operators/recursion.rs`
-- `../acmedb/acmedb/core/src/exec/operators/recursion/common.rs`
-- `../acmedb/acmedb/core/src/exec/operators/recursion/collect.rs`
-- `../acmedb/acmedb/core/src/exec/operators/recursion/default.rs`
-- `../acmedb/acmedb/core/src/exec/operators/recursion/path.rs`
-- `../acmedb/acmedb/core/src/exec/operators/recursion/repeat.rs`
-- `../acmedb/acmedb/core/src/exec/operators/recursion/shortest.rs`
-- `../acmedb/acmedb/core/src/exec/operators/scan/graph.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/recursion.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/recursion/common.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/recursion/collect.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/recursion/default.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/recursion/path.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/recursion/repeat.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/recursion/shortest.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/scan/graph.rs`
 
 #### Acceptance criteria
 
@@ -1300,8 +1343,10 @@ Complete the planner migration by importing the hard parts: expression evaluatio
 
 #### Deliverables
 
-- Import the plan-or-compute pattern for compatibility.
-- Add Varda control-flow capable operators where required.
+- Import the plan-or-compute pattern for compatibility:
+  - upstream bridge: `plan_or_compute.rs` routes unsupported/unimplemented cases (`PlannerUnsupported` / `PlannerUnimplemented`) into legacy `Expr::compute()`; no operator may call `compute()` directly except through this bridge
+- Add Varda control-flow capable operators where required:
+  - upstream propagates `return`/`break`/`continue`/errors through the operator tree as `FlowResult<T>` values (see Stage 2.1); port that signal model rather than layering exceptions or sentinel rows
 - Support staged fallback while parity is being finalized.
 
 #### VardaDB files to touch
@@ -1316,16 +1361,16 @@ Complete the planner migration by importing the hard parts: expression evaluatio
 - `src/query_planner/operators/let_plan.rs`
 - `tests/query_planner_fallback_test.rs`
 
-#### AcmeDB files to take code/logic from
+#### SurrealDB files to take code/logic from
 
-- `../acmedb/acmedb/core/src/exec/plan_or_compute.rs`
-- `../acmedb/acmedb/core/src/exec/operators/expr.rs`
-- `../acmedb/acmedb/core/src/exec/operators/compute.rs`
-- `../acmedb/acmedb/core/src/exec/operators/foreach.rs`
-- `../acmedb/acmedb/core/src/exec/operators/ifelse.rs`
-- `../acmedb/acmedb/core/src/exec/operators/sequence.rs`
-- `../acmedb/acmedb/core/src/exec/operators/return.rs`
-- `../acmedb/acmedb/core/src/exec/operators/let_plan.rs`
+- `surrealdb/surrealdb/core/src/exec/plan_or_compute.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/expr.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/compute.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/foreach.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/ifelse.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/sequence.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/return.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/let_plan.rs`
 
 #### Acceptance criteria
 
@@ -1351,10 +1396,10 @@ Complete the planner migration by importing the hard parts: expression evaluatio
 - `tests/query_parity_test.rs`
 - `tests/query_planner_end_to_end_test.rs`
 
-#### AcmeDB files to finalize parity against
+#### SurrealDB files to finalize parity against
 
-- Entire `../acmedb/acmedb/core/src/exec/**`
-- Supporting `../acmedb/acmedb/core/src/dbs/**` files listed in this spec
+- Entire `surrealdb/surrealdb/core/src/exec/**`
+- Supporting `surrealdb/surrealdb/core/src/dbs/**` files listed in this spec
 
 #### Acceptance criteria
 
@@ -1362,137 +1407,183 @@ Complete the planner migration by importing the hard parts: expression evaluatio
 - Old resolver planning code is no longer the main implementation path.
 - VardaDB behavior is validated against its existing GraphQL contract.
 
-## AcmeDB Source Inventory
+## SurrealDB Source Inventory
 
 ### Primary source subtree to import from
 
-These are the main AcmeDB sources for the wholesale planner move:
+These are the main SurrealDB sources for the wholesale planner move:
 
-- `../acmedb/acmedb/core/src/exec/CLAUDE.md`
-- `../acmedb/acmedb/core/src/exec/access_mode.rs`
-- `../acmedb/acmedb/core/src/exec/buffer.rs`
-- `../acmedb/acmedb/core/src/exec/cardinality.rs`
-- `../acmedb/acmedb/core/src/exec/context.rs`
-- `../acmedb/acmedb/core/src/exec/expression_registry.rs`
-- `../acmedb/acmedb/core/src/exec/field_path.rs`
-- `../acmedb/acmedb/core/src/exec/index.rs`
-- `../acmedb/acmedb/core/src/exec/index/access_path.rs`
-- `../acmedb/acmedb/core/src/exec/index/analysis.rs`
-- `../acmedb/acmedb/core/src/exec/index/iterator/btree.rs`
-- `../acmedb/acmedb/core/src/exec/index/iterator/mod.rs`
-- `../acmedb/acmedb/core/src/exec/metrics.rs`
-- `../acmedb/acmedb/core/src/exec/mod.rs`
-- `../acmedb/acmedb/core/src/exec/operators.rs`
-- `../acmedb/acmedb/core/src/exec/operators/aggregate.rs`
-- `../acmedb/acmedb/core/src/exec/operators/compute.rs`
-- `../acmedb/acmedb/core/src/exec/operators/current_value_source.rs`
-- `../acmedb/acmedb/core/src/exec/operators/explain.rs`
-- `../acmedb/acmedb/core/src/exec/operators/expr.rs`
-- `../acmedb/acmedb/core/src/exec/operators/fetch.rs`
-- `../acmedb/acmedb/core/src/exec/operators/filter.rs`
-- `../acmedb/acmedb/core/src/exec/operators/foreach.rs`
-- `../acmedb/acmedb/core/src/exec/operators/ifelse.rs`
-- `../acmedb/acmedb/core/src/exec/operators/knn_topk.rs`
-- `../acmedb/acmedb/core/src/exec/operators/let_plan.rs`
-- `../acmedb/acmedb/core/src/exec/operators/limit.rs`
-- `../acmedb/acmedb/core/src/exec/operators/project.rs`
-- `../acmedb/acmedb/core/src/exec/operators/project_value.rs`
-- `../acmedb/acmedb/core/src/exec/operators/recursion.rs`
-- `../acmedb/acmedb/core/src/exec/operators/recursion/collect.rs`
-- `../acmedb/acmedb/core/src/exec/operators/recursion/common.rs`
-- `../acmedb/acmedb/core/src/exec/operators/recursion/default.rs`
-- `../acmedb/acmedb/core/src/exec/operators/recursion/path.rs`
-- `../acmedb/acmedb/core/src/exec/operators/recursion/repeat.rs`
-- `../acmedb/acmedb/core/src/exec/operators/recursion/shortest.rs`
-- `../acmedb/acmedb/core/src/exec/operators/return.rs`
-- `../acmedb/acmedb/core/src/exec/operators/scan.rs`
-- `../acmedb/acmedb/core/src/exec/operators/scan/common.rs`
-- `../acmedb/acmedb/core/src/exec/operators/scan/count.rs`
-- `../acmedb/acmedb/core/src/exec/operators/scan/dynamic.rs`
-- `../acmedb/acmedb/core/src/exec/operators/scan/fulltext.rs`
-- `../acmedb/acmedb/core/src/exec/operators/scan/graph.rs`
-- `../acmedb/acmedb/core/src/exec/operators/scan/index.rs`
-- `../acmedb/acmedb/core/src/exec/operators/scan/index_count.rs`
-- `../acmedb/acmedb/core/src/exec/operators/scan/knn.rs`
-- `../acmedb/acmedb/core/src/exec/operators/scan/pipeline.rs`
-- `../acmedb/acmedb/core/src/exec/operators/scan/record_id.rs`
-- `../acmedb/acmedb/core/src/exec/operators/scan/reference.rs`
-- `../acmedb/acmedb/core/src/exec/operators/scan/resolved.rs`
-- `../acmedb/acmedb/core/src/exec/operators/scan/table.rs`
-- `../acmedb/acmedb/core/src/exec/operators/scan/union_index.rs`
-- `../acmedb/acmedb/core/src/exec/operators/sequence.rs`
-- `../acmedb/acmedb/core/src/exec/operators/sleep.rs`
-- `../acmedb/acmedb/core/src/exec/operators/sort.rs`
-- `../acmedb/acmedb/core/src/exec/operators/sort/common.rs`
-- `../acmedb/acmedb/core/src/exec/operators/sort/external.rs`
-- `../acmedb/acmedb/core/src/exec/operators/sort/full_sort.rs`
-- `../acmedb/acmedb/core/src/exec/operators/sort/shuffle.rs`
-- `../acmedb/acmedb/core/src/exec/operators/sort/topk.rs`
-- `../acmedb/acmedb/core/src/exec/operators/source_expr.rs`
-- `../acmedb/acmedb/core/src/exec/operators/split.rs`
-- `../acmedb/acmedb/core/src/exec/operators/timeout.rs`
-- `../acmedb/acmedb/core/src/exec/operators/union.rs`
-- `../acmedb/acmedb/core/src/exec/operators/unwrap_exactly_one.rs`
-- `../acmedb/acmedb/core/src/exec/ordering.rs`
-- `../acmedb/acmedb/core/src/exec/parts/array_ops.rs`
-- `../acmedb/acmedb/core/src/exec/parts/destructure.rs`
-- `../acmedb/acmedb/core/src/exec/parts/field.rs`
-- `../acmedb/acmedb/core/src/exec/parts/filter.rs`
-- `../acmedb/acmedb/core/src/exec/parts/index.rs`
-- `../acmedb/acmedb/core/src/exec/parts/lookup.rs`
-- `../acmedb/acmedb/core/src/exec/parts/method.rs`
-- `../acmedb/acmedb/core/src/exec/parts/mod.rs`
-- `../acmedb/acmedb/core/src/exec/parts/optional.rs`
-- `../acmedb/acmedb/core/src/exec/parts/recurse.rs`
-- `../acmedb/acmedb/core/src/exec/permission.rs`
-- `../acmedb/acmedb/core/src/exec/physical_expr/block.rs`
-- `../acmedb/acmedb/core/src/exec/physical_expr/collections.rs`
-- `../acmedb/acmedb/core/src/exec/physical_expr/conditional.rs`
-- `../acmedb/acmedb/core/src/exec/physical_expr/control_flow.rs`
-- `../acmedb/acmedb/core/src/exec/physical_expr/function.rs`
-- `../acmedb/acmedb/core/src/exec/physical_expr/function/builtin.rs`
-- `../acmedb/acmedb/core/src/exec/physical_expr/function/closure.rs`
-- `../acmedb/acmedb/core/src/exec/physical_expr/function/helpers.rs`
-- `../acmedb/acmedb/core/src/exec/physical_expr/function/index.rs`
-- `../acmedb/acmedb/core/src/exec/physical_expr/function/model.rs`
-- `../acmedb/acmedb/core/src/exec/physical_expr/function/module.rs`
-- `../acmedb/acmedb/core/src/exec/physical_expr/function/projection.rs`
-- `../acmedb/acmedb/core/src/exec/physical_expr/function/script.rs`
-- `../acmedb/acmedb/core/src/exec/physical_expr/function/user_defined.rs`
-- `../acmedb/acmedb/core/src/exec/physical_expr/idiom.rs`
-- `../acmedb/acmedb/core/src/exec/physical_expr/literal.rs`
-- `../acmedb/acmedb/core/src/exec/physical_expr/matches.rs`
-- `../acmedb/acmedb/core/src/exec/physical_expr/mod.rs`
-- `../acmedb/acmedb/core/src/exec/physical_expr/ops.rs`
-- `../acmedb/acmedb/core/src/exec/physical_expr/record_id.rs`
-- `../acmedb/acmedb/core/src/exec/physical_expr/subquery.rs`
-- `../acmedb/acmedb/core/src/exec/plan_or_compute.rs`
-- `../acmedb/acmedb/core/src/exec/planner.rs`
-- `../acmedb/acmedb/core/src/exec/planner/aggregate.rs`
-- `../acmedb/acmedb/core/src/exec/planner/idiom.rs`
-- `../acmedb/acmedb/core/src/exec/planner/select.rs`
-- `../acmedb/acmedb/core/src/exec/planner/source.rs`
-- `../acmedb/acmedb/core/src/exec/planner/util.rs`
+- `surrealdb/surrealdb/core/src/exec/CLAUDE.md`
+- `surrealdb/surrealdb/core/src/exec/access_mode.rs`
+- `surrealdb/surrealdb/core/src/exec/buffer.rs`
+- `surrealdb/surrealdb/core/src/exec/cardinality.rs`
+- `surrealdb/surrealdb/core/src/exec/context.rs`
+- `surrealdb/surrealdb/core/src/exec/expression_registry.rs`
+- `surrealdb/surrealdb/core/src/exec/field_path.rs`
+- `surrealdb/surrealdb/core/src/exec/index.rs`
+- `surrealdb/surrealdb/core/src/exec/index/access_path.rs`
+- `surrealdb/surrealdb/core/src/exec/index/analysis.rs`
+- `surrealdb/surrealdb/core/src/exec/index/iterator/btree.rs`
+- `surrealdb/surrealdb/core/src/exec/index/iterator/mod.rs`
+- `surrealdb/surrealdb/core/src/exec/metrics.rs`
+- `surrealdb/surrealdb/core/src/exec/mod.rs`
+- `surrealdb/surrealdb/core/src/exec/operators.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/aggregate.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/compute.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/current_value_source.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/explain.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/expr.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/fetch.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/filter.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/foreach.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/ifelse.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/knn_topk.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/let_plan.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/limit.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/project.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/project_value.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/recursion.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/recursion/collect.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/recursion/common.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/recursion/default.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/recursion/path.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/recursion/repeat.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/recursion/shortest.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/return.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/scan.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/scan/common.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/scan/count.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/scan/dynamic.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/scan/fulltext.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/scan/graph.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/scan/index.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/scan/index_count.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/scan/knn.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/scan/pipeline.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/scan/record_id.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/scan/reference.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/scan/resolved.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/scan/table.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/scan/union_index.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/sequence.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/sleep.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/sort.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/sort/common.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/sort/external.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/sort/full_sort.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/sort/shuffle.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/sort/topk.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/source_expr.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/split.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/timeout.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/union.rs`
+- `surrealdb/surrealdb/core/src/exec/operators/unwrap_exactly_one.rs`
+- `surrealdb/surrealdb/core/src/exec/ordering.rs`
+- `surrealdb/surrealdb/core/src/exec/parts/array_ops.rs`
+- `surrealdb/surrealdb/core/src/exec/parts/destructure.rs`
+- `surrealdb/surrealdb/core/src/exec/parts/field.rs`
+- `surrealdb/surrealdb/core/src/exec/parts/filter.rs`
+- `surrealdb/surrealdb/core/src/exec/parts/index.rs`
+- `surrealdb/surrealdb/core/src/exec/parts/lookup.rs`
+- `surrealdb/surrealdb/core/src/exec/parts/method.rs`
+- `surrealdb/surrealdb/core/src/exec/parts/mod.rs`
+- `surrealdb/surrealdb/core/src/exec/parts/optional.rs`
+- `surrealdb/surrealdb/core/src/exec/parts/recurse.rs`
+- `surrealdb/surrealdb/core/src/exec/permission.rs`
+- `surrealdb/surrealdb/core/src/exec/physical_expr/block.rs`
+- `surrealdb/surrealdb/core/src/exec/physical_expr/collections.rs`
+- `surrealdb/surrealdb/core/src/exec/physical_expr/conditional.rs`
+- `surrealdb/surrealdb/core/src/exec/physical_expr/control_flow.rs`
+- `surrealdb/surrealdb/core/src/exec/physical_expr/function.rs`
+- `surrealdb/surrealdb/core/src/exec/physical_expr/function/builtin.rs`
+- `surrealdb/surrealdb/core/src/exec/physical_expr/function/closure.rs`
+- `surrealdb/surrealdb/core/src/exec/physical_expr/function/helpers.rs`
+- `surrealdb/surrealdb/core/src/exec/physical_expr/function/index.rs`
+- `surrealdb/surrealdb/core/src/exec/physical_expr/function/model.rs`
+- `surrealdb/surrealdb/core/src/exec/physical_expr/function/module.rs`
+- `surrealdb/surrealdb/core/src/exec/physical_expr/function/projection.rs`
+- `surrealdb/surrealdb/core/src/exec/physical_expr/function/script.rs`
+- `surrealdb/surrealdb/core/src/exec/physical_expr/function/user_defined.rs`
+- `surrealdb/surrealdb/core/src/exec/physical_expr/idiom.rs`
+- `surrealdb/surrealdb/core/src/exec/physical_expr/literal.rs`
+- `surrealdb/surrealdb/core/src/exec/physical_expr/matches.rs`
+- `surrealdb/surrealdb/core/src/exec/physical_expr/mod.rs`
+- `surrealdb/surrealdb/core/src/exec/physical_expr/ops.rs`
+- `surrealdb/surrealdb/core/src/exec/physical_expr/record_id.rs`
+- `surrealdb/surrealdb/core/src/exec/physical_expr/subquery.rs`
+- `surrealdb/surrealdb/core/src/exec/plan_or_compute.rs`
+- `surrealdb/surrealdb/core/src/exec/planner.rs`
+- `surrealdb/surrealdb/core/src/exec/planner/aggregate.rs`
+- `surrealdb/surrealdb/core/src/exec/planner/idiom.rs`
+- `surrealdb/surrealdb/core/src/exec/planner/select/` (`mod.rs`, `pipeline.rs`, `projection.rs`)
+- `surrealdb/surrealdb/core/src/exec/planner/source.rs`
+- `surrealdb/surrealdb/core/src/exec/planner/util/` (`mod.rs`, `conditions.rs`, `fields.rs`, `literals.rs`, `optimization.rs`, `params.rs`)
 
-### Supporting AcmeDB runtime files required for parity
+### Additions Present In surrealdb 3.3.0-nightly Not In The Original Plan
 
-- `../acmedb/acmedb/core/src/dbs/capabilities.rs`
-- `../acmedb/acmedb/core/src/dbs/distinct.rs`
-- `../acmedb/acmedb/core/src/dbs/executor.rs`
-- `../acmedb/acmedb/core/src/dbs/file.rs`
-- `../acmedb/acmedb/core/src/dbs/group.rs`
-- `../acmedb/acmedb/core/src/dbs/iterator.rs`
-- `../acmedb/acmedb/core/src/dbs/mod.rs`
-- `../acmedb/acmedb/core/src/dbs/node.rs`
-- `../acmedb/acmedb/core/src/dbs/options.rs`
-- `../acmedb/acmedb/core/src/dbs/plan.rs`
-- `../acmedb/acmedb/core/src/dbs/processor.rs`
-- `../acmedb/acmedb/core/src/dbs/response.rs`
-- `../acmedb/acmedb/core/src/dbs/result.rs`
-- `../acmedb/acmedb/core/src/dbs/session.rs`
-- `../acmedb/acmedb/core/src/dbs/statement.rs`
-- `../acmedb/acmedb/core/src/dbs/store.rs`
-- `../acmedb/acmedb/core/src/dbs/variables.rs`
+These files exist upstream in addition to the list above. Entries marked *(read-path)* are legitimate import/reference targets for this spec; entries marked *(write-path)* are observed but explicitly out of scope per the read-path-first decision.
+
+Root `exec/` additions:
+
+- *(read-path)* `surrealdb/surrealdb/core/src/exec/pre_decode_filter/` (`mod.rs`, `compile.rs`, `streaming.rs`, `wire_cmp.rs`, `wire_literal.rs`) — byte-level predicate filtering before row decode; see Stage 1.3 prior-art note
+- *(read-path)* `surrealdb/surrealdb/core/src/exec/topk_pushdown.rs` — pushes top-k selection into access paths; see vector boundary notes
+
+`exec/planner/` additions:
+
+- *(read-path)* `cycle_guard.rs` — cycle protection for nested/graph planning; relevant to Stage 2.2 and 3.3
+- *(read-path)* `match_plan.rs` — MATCHES full-text plan construction
+- *(read-path)* `row_scope.rs` — correlated per-parent execution scoping; relevant to Stage 2.2 relation subplans
+
+`exec/operators/` additions:
+
+- *(read-path)* `distinct.rs` — dedup operator
+- *(write-path)* `mutate.rs` — mutation operator family; out of scope
+- *(read-path)* `bind.rs`, `version_scope.rs` — parameter binding and version-scoped evaluation plumbing
+- *(read-path)* `graph/` (`mod.rs`, `expand.rs`, `endpoint.rs`, `distinct_edges.rs`, `path_expand.rs`, `shortest_path_expand.rs`) — graph traversal operators; reference for Stage 2.2/3.3
+- *(read-path)* `join/hash_join.rs` (+ `join/mod.rs`) — batched parent/child join; reference for Stage 2.2
+- *(reference only)* `info/` (`root.rs`, `namespace.rs`, `database.rs`, `table.rs`, `index.rs`, `user.rs`, `mod.rs`) — introspection operators, not read-query planning
+
+`exec/operators/scan/` additions:
+
+- *(read-path)* `empty.rs` — empty-result scan source
+- *(read-path)* `fetch.rs` — fetch-stage scan integration
+- *(read-path)* `graph_keys.rs` — graph edge key scans
+
+`exec/operators/sort/` additions:
+
+- *(read-path)* `external_by_key.rs`, `external_common.rs` — external (spill-based) sort variants; only relevant if Varda sorts exceed memory budgets
+
+`exec/function/` additions:
+
+- *(read-path)* `method.rs` — method-style function dispatch (idiom methods)
+- *(read-path)* `macros.rs` — registry boilerplate macros
+
+`dbs/` additions:
+
+- *(read-path)* `statement_counters.rs` — per-statement instrumentation counters; see Stage 1.1
+- *(write-path)* `broker.rs` — mutation event brokering; out of scope, must not be imported or broken
+
+### Supporting SurrealDB runtime files required for parity
+
+- `surrealdb/surrealdb/core/src/dbs/broker.rs`
+- `surrealdb/surrealdb/core/src/dbs/capabilities.rs`
+- `surrealdb/surrealdb/core/src/dbs/distinct.rs`
+- `surrealdb/surrealdb/core/src/dbs/executor.rs`
+- `surrealdb/surrealdb/core/src/dbs/file.rs`
+- `surrealdb/surrealdb/core/src/dbs/group.rs`
+- `surrealdb/surrealdb/core/src/dbs/iterator.rs`
+- `surrealdb/surrealdb/core/src/dbs/mod.rs`
+- `surrealdb/surrealdb/core/src/dbs/node.rs`
+- `surrealdb/surrealdb/core/src/dbs/options.rs`
+- `surrealdb/surrealdb/core/src/dbs/plan.rs`
+- `surrealdb/surrealdb/core/src/dbs/processor.rs`
+- `surrealdb/surrealdb/core/src/dbs/response.rs`
+- `surrealdb/surrealdb/core/src/dbs/result.rs`
+- `surrealdb/surrealdb/core/src/dbs/session.rs`
+- `surrealdb/surrealdb/core/src/dbs/statement.rs`
+- `surrealdb/surrealdb/core/src/dbs/statement_counters.rs`
+- `surrealdb/surrealdb/core/src/dbs/store.rs`
+- `surrealdb/surrealdb/core/src/dbs/variables.rs`
 
 ## VardaDB Touch Inventory
 
@@ -1576,11 +1667,12 @@ These are the main AcmeDB sources for the wholesale planner move:
 
 ## Risk Areas
 
-- AcmeDB’s planner assumes its own AST and value model. Varda lowering must isolate that mismatch.
+- SurrealDB’s planner assumes its own AST and value model. Varda lowering must isolate that mismatch.
 - `sqlite_resolver.rs` currently owns too much logic. Untangling it will be invasive.
 - Relation semantics in GraphQL must map cleanly to imported recursion and fetch operators.
 - Function parity can expand scope quickly if imported too early.
 - A partial port without explainability will be hard to debug.
+- Upstream drift risk: this spec is anchored to surrealdb `3.3.0-nightly` (see Upstream Source Anchor). The original plan referenced an older tree where `planner/select.rs` and `planner/util.rs` were single files and `pre_decode_filter/`, `topk_pushdown.rs`, the graph/join operators, and the native GraphQL module did not exist; re-audit layout if the vendored checkout changes.
 
 ## Recommendation On Execution Order
 
@@ -1605,4 +1697,4 @@ This migration is done only when:
 - aggregation and recursion are implemented in the new planner stack
 - explain output exists for planner-produced queries
 - the old resolver-centric planning logic has been removed or reduced to compatibility shims
-- the implementation is demonstrably derived from `../acmedb/acmedb/core/src/exec/**` and the supporting `dbs/**` modules listed above
+- the implementation is demonstrably derived from `surrealdb/surrealdb/core/src/exec/**` and the supporting `dbs/**` modules listed above
