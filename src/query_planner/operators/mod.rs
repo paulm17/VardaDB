@@ -27,6 +27,12 @@
 use crate::query_planner::ir::{EntityId, OrderKey, SortDirection};
 use crate::query_planner::traits::PlannerRuntime;
 
+pub mod source;
+pub use source::{
+    build_source_tree, FullTypeScan, HybridSearchScan, IntersectionSources, OrderedIndexScan,
+    PredicatePushdownSource, TextBM25Scan, UniqueLookupSource, UnionSources, VectorKNNScan,
+};
+
 /// A batch of rows flowing between operators.
 ///
 /// Phase 2 rows are entity IDs; materialization stays in the resolver layer

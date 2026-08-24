@@ -81,6 +81,34 @@ pub trait PlannerIndexAccess {
         vector: &[f64],
         limit: Option<usize>,
     ) -> anyhow::Result<Vec<(EntityId, f64)>>;
+
+    /// Combined text+vector search (BM25 ranking re-scored by cosine distance).
+    /// Results are relevance/distance-ordered, best first.
+    fn hybrid_search(
+        &self,
+        type_name: &str,
+        field: &str,
+        text_query: &str,
+        require_all: bool,
+        vector: &[f64],
+        limit: Option<usize>,
+    ) -> anyhow::Result<Vec<(EntityId, f64)>>;
+
+    /// Ordered index scan with legacy fallback semantics: `Ok(None)` means the
+    /// order index is absent even after a rebuild attempt, so callers must fall
+    /// back to an unordered scan plus explicit sort. The default delegates to
+    /// [`PlannerIndexAccess::ordered_scan`] and never falls back.
+    fn ordered_scan_with_fallback(
+        &self,
+        type_name: &str,
+        field: &str,
+        direction: SortDirection,
+        cursor: Option<&CursorValue>,
+        limit: Option<usize>,
+    ) -> anyhow::Result<Option<Vec<EntityId>>> {
+        self.ordered_scan(type_name, field, direction, cursor, limit)
+            .map(Some)
+    }
 }
 
 pub trait PlannerStorage {

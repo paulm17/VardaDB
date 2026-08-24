@@ -409,7 +409,7 @@ impl SqliteResolver {
         Some(matched)
     }
 
-    fn rebuild_order_index_for_field(&self, type_name: &str, field: &str) -> Result<(), String> {
+    pub(crate) fn rebuild_order_index_for_field(&self, type_name: &str, field: &str) -> Result<(), String> {
         let (main_ks, _) = self
             .storage
             .get_database(&self.db_name)

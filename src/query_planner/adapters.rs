@@ -69,6 +69,38 @@ impl<'a> SqliteRuntime<'a> {
         }
         out
     }
+
+    fn ordered_scan_inner(
+        &self,
+        prefix: &[u8],
+        cursor: Option<&CursorValue>,
+        limit: Option<usize>,
+    ) -> anyhow::Result<Vec<EntityId>> {
+        let mut out = Vec::new();
+        let Some(ks) = self.main() else {
+            return Ok(out);
+        };
+        for (key, _val) in ks.prefix(prefix) {
+            if !key.starts_with(prefix) {
+                break;
+            }
+            let Some(uid) = Codec::decode_order_index_uid(&key) else {
+                continue;
+            };
+            if let Some(CursorValue::Entity(e)) = cursor {
+                if uid <= e.uid && out.is_empty() {
+                    continue;
+                }
+            }
+            out.push(EntityId::new(uid));
+            if let Some(l) = limit {
+                if out.len() >= l {
+                    break;
+                }
+            }
+        }
+        Ok(out)
+    }
 }
 
 impl<'a> PlannerCatalog for SqliteRuntime<'a> {
@@ -143,30 +175,34 @@ impl<'a> PlannerIndexAccess for SqliteRuntime<'a> {
     ) -> anyhow::Result<Vec<EntityId>> {
         let prefix =
             Codec::encode_order_index_prefix(type_name, field, direction == SortDirection::Desc);
-        let mut out = Vec::new();
+        self.ordered_scan_inner(&prefix, cursor, limit)
+    }
+
+    fn ordered_scan_with_fallback(
+        &self,
+        type_name: &str,
+        field: &str,
+        direction: SortDirection,
+        cursor: Option<&CursorValue>,
+        limit: Option<usize>,
+    ) -> anyhow::Result<Option<Vec<EntityId>>> {
+        let descending = direction == SortDirection::Desc;
+        let prefix = Codec::encode_order_index_prefix(type_name, field, descending);
         let Some(ks) = self.main() else {
-            return Ok(out);
+            return Ok(None);
         };
-        for (key, _val) in ks.prefix(&prefix) {
-            if !key.starts_with(&prefix) {
-                break;
-            }
-            let Some(uid) = Codec::decode_order_index_uid(&key) else {
-                continue;
-            };
-            if let Some(CursorValue::Entity(e)) = cursor {
-                if uid <= e.uid && out.is_empty() {
-                    continue;
-                }
-            }
-            out.push(EntityId::new(uid));
-            if let Some(l) = limit {
-                if out.len() >= l {
-                    break;
-                }
+        // Legacy parity (sorted_index_scan): a missing/empty order index gets
+        // one rebuild attempt; still empty means "no usable index" and the
+        // caller must fall back to an unordered scan plus explicit sort.
+        if ks.count_prefix(&prefix).unwrap_or(0) == 0 {
+            self.resolver
+                .rebuild_order_index_for_field(type_name, field)
+                .map_err(|e| anyhow::anyhow!(e))?;
+            if ks.count_prefix(&prefix).unwrap_or(0) == 0 {
+                return Ok(None);
             }
         }
-        Ok(out)
+        self.ordered_scan_inner(&prefix, cursor, limit).map(Some)
     }
 
     fn text_search(
@@ -209,6 +245,25 @@ impl<'a> PlannerIndexAccess for SqliteRuntime<'a> {
             .filter(|(uid, _)| {
                 self.resolver.get_node_type(*uid).as_deref() == Some(type_name)
             })
+            .map(|(uid, dist)| (EntityId::typed(type_name, uid), dist))
+            .collect())
+    }
+
+    fn hybrid_search(
+        &self,
+        type_name: &str,
+        field: &str,
+        text_query: &str,
+        require_all: bool,
+        vector: &[f64],
+        limit: Option<usize>,
+    ) -> anyhow::Result<Vec<(EntityId, f64)>> {
+        let k = limit.unwrap_or(10_000);
+        Ok(self
+            .resolver
+            .search_hybrid(text_query, field, vector, k, require_all)
+            .into_iter()
+            .filter(|(uid, _)| self.resolver.get_node_type(*uid).as_deref() == Some(type_name))
             .map(|(uid, dist)| (EntityId::typed(type_name, uid), dist))
             .collect())
     }
@@ -462,6 +517,17 @@ pub mod test_stub {
             &self,
             _type_name: &str,
             _field: &str,
+            _vector: &[f64],
+            _limit: Option<usize>,
+        ) -> anyhow::Result<Vec<(EntityId, f64)>> {
+            Ok(vec![])
+        }
+        fn hybrid_search(
+            &self,
+            _type_name: &str,
+            _field: &str,
+            _text_query: &str,
+            _require_all: bool,
             _vector: &[f64],
             _limit: Option<usize>,
         ) -> anyhow::Result<Vec<(EntityId, f64)>> {
