@@ -148,25 +148,6 @@ impl SqliteResolver {
         uids
     }
 
-    fn related_uids_cached(
-        &self,
-        parent_uid: u64,
-        field_name: &str,
-        cache: Option<&RequestCache>,
-    ) -> Vec<u64> {
-        if let Some(cache) = cache {
-            if let Some(uids) = cache.get_related_uids(parent_uid, field_name) {
-                return uids;
-            }
-        }
-
-        let uids = self.load_related_uids(parent_uid, field_name);
-        if let Some(cache) = cache {
-            cache.insert_related_uids(parent_uid, field_name, uids.clone());
-        }
-        uids
-    }
-
     pub(crate) fn load_resolved_value(&self, uid: u64, field_name: &str) -> Option<Value> {
         if field_name == "id" {
             return Some(Value::String(uid.to_string()));
@@ -219,44 +200,7 @@ impl SqliteResolver {
         value
     }
 
-    fn compare_optional_values(a: &Option<Value>, b: &Option<Value>) -> std::cmp::Ordering {
-        match (a, b) {
-            (Some(Value::Number(na)), Some(Value::Number(nb))) => na
-                .as_f64()
-                .partial_cmp(&nb.as_f64())
-                .unwrap_or(std::cmp::Ordering::Equal),
-            (Some(Value::String(sa)), Some(Value::String(sb))) => sa.cmp(sb),
-            (None, Some(_)) => std::cmp::Ordering::Less,
-            (Some(_), None) => std::cmp::Ordering::Greater,
-            _ => std::cmp::Ordering::Equal,
-        }
-    }
 
-    fn sort_uids_by_field(
-        &self,
-        uids: &mut [u64],
-        field_name: &str,
-        asc: bool,
-        cache: Option<&RequestCache>,
-    ) {
-        let sort_values: std::collections::HashMap<u64, Option<Value>> = uids
-            .iter()
-            .copied()
-            .map(|uid| (uid, self.resolve_cached(uid, field_name, cache)))
-            .collect();
-
-        uids.sort_by(|a, b| {
-            let cmp = Self::compare_optional_values(
-                sort_values.get(a).unwrap_or(&None),
-                sort_values.get(b).unwrap_or(&None),
-            );
-            if asc {
-                cmp
-            } else {
-                cmp.reverse()
-            }
-        });
-    }
 
     fn encode_sortable_f64(value: f64) -> [u8; 8] {
         let bits = value.to_bits();
@@ -2594,76 +2538,39 @@ impl SqliteResolver {
         cache: Option<&RequestCache>,
     ) -> Result<Vec<u64>, String> {
         let start = std::time::Instant::now();
-        let mut uids = self.related_uids_cached(parent_uid, field_name, cache);
-        let load_time = start.elapsed();
+        // The relation pipeline never consults type metadata (edge scan +
+        // cosine re-rank + generic operators only), so an empty catalog is
+        // sufficient here.
+        let metadata = std::collections::HashMap::new();
+        let runtime = crate::query_planner::adapters::runtime_for(self, &metadata);
+        let mut ctx =
+            crate::query_planner::operators::ExecContext::new(&runtime, &self.db_name);
+        let built = crate::query_planner::operators::build_relation_pipeline(
+            parent_uid,
+            field_name,
+            &filter,
+            &sort,
+            first,
+            after.as_deref(),
+            offset,
+            near_vector.clone(),
+        );
+        metrics::histogram!("vardadb_planner_candidate_duration_seconds")
+            .record(start.elapsed().as_secs_f64());
+        metrics::counter!(
+            "vardadb_planner_access_total",
+            "shape" => built.shape.clone()
+        )
+        .increment(1);
 
-        if let Some(ref vec) = near_vector {
-            let mut uid_dists = Vec::new();
-            for uid in &uids {
-                if let Some(Value::List(floats)) = self.resolve_cached(*uid, "embedding", cache) {
-                    let embed: Vec<f64> = floats
-                        .iter()
-                        .filter_map(|v| match v {
-                            Value::Number(n) => n.as_f64(),
-                            _ => None,
-                        })
-                        .collect();
-
-                    if embed.len() == vec.len() {
-                        let dot: f64 = embed.iter().zip(vec.iter()).map(|(a, b)| a * b).sum();
-                        let norm_a: f64 = embed.iter().map(|a| a * a).sum::<f64>().sqrt();
-                        let norm_b: f64 = vec.iter().map(|b| b * b).sum::<f64>().sqrt();
-
-                        if norm_a > 0.0 && norm_b > 0.0 {
-                            let sim = dot / (norm_a * norm_b);
-                            uid_dists.push((*uid, 1.0 - sim));
-                        } else {
-                            uid_dists.push((*uid, f64::MAX));
-                        }
-                    }
-                }
-            }
-
-            uid_dists.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-            uids = uid_dists.into_iter().map(|(u, _)| u).collect();
-        }
-
-        if !filter.is_empty() {
-            let mut filter_im = indexmap::IndexMap::new();
-            for (k, v) in &filter {
-                filter_im.insert(async_graphql::Name::new(k), v.clone());
-            }
-            uids.retain(|uid| self.check_filter_recursive_cached(*uid, &filter_im, cache));
-        }
-
-        if !sort.is_empty() {
-            if let Some((field, direction)) = sort.iter().next() {
-                let asc = match direction {
-                    Value::String(s) => s == "ASC",
-                    Value::Enum(n) => n.as_str() == "ASC",
-                    _ => true,
-                };
-                self.sort_uids_by_field(&mut uids, field, asc, cache);
-            }
-        }
-
-        if let Some(cursor_uid_str) = after {
-            if let Ok(cursor_uid) = cursor_uid_str.parse::<u64>() {
-                if let Some(pos) = uids.iter().position(|u| *u == cursor_uid) {
-                    uids = uids.into_iter().skip(pos + 1).collect();
-                }
-            }
-        }
-
-        if let Some(skip_count) = offset {
-            if skip_count > 0 {
-                uids = uids.into_iter().skip(skip_count).collect();
-            }
-        }
-
-        if let Some(limit) = first {
-            uids.truncate(limit);
-        }
+        let batches = match built.root.execute(&mut ctx) {
+            crate::query_planner::operators::FlowResult::Rows(batches) => batches,
+            _ => Vec::new(),
+        };
+        let uids: Vec<u64> = batches
+            .into_iter()
+            .flat_map(|b| b.0.into_iter().map(|e| e.uid))
+            .collect();
 
         if let Some(cache) = cache {
             self.preload_objects_for_uids(&uids, cache);
@@ -2672,7 +2579,7 @@ impl SqliteResolver {
         let total = start.elapsed();
         if crate::debug_logging() && total.as_millis() > 10 {
             eprintln!(
-                "[RESOLVER] resolve_list {}.{} parent={} base={} filter={} sort={} total={}ms load={}ms near_vector={}",
+                "[RESOLVER] resolve_list {}.{} parent={} base={} filter={} sort={} total={}ms shape={}",
                 self.db_name,
                 field_name,
                 parent_uid,
@@ -2680,13 +2587,13 @@ impl SqliteResolver {
                 !filter.is_empty(),
                 !sort.is_empty(),
                 total.as_millis(),
-                load_time.as_millis(),
-                near_vector.is_some(),
+                built.shape,
             );
         }
 
         Ok(uids)
     }
+
 
     /// Shared legacy text-predicate detection over the raw GraphQL filter map.
     /// Returns `(field, strategy, query, require_all)`.

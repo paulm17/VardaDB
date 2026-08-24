@@ -279,6 +279,37 @@ fn finish_chain(
     node
 }
 
+/// Relation list pipelines (Stage 2.2a): edge scan -> optional cosine re-rank
+/// -> residual filter -> sort -> cursor -> offset -> limit. Mirrors legacy
+/// `resolve_list_internal` exactly; its cursor is positional keep-all-if-absent.
+#[allow(clippy::too_many_arguments)]
+pub fn build_relation_pipeline(
+    parent_uid: u64,
+    field_name: &str,
+    filter: &RawFilterMap,
+    sort: &HashMap<String, Value>,
+    first: Option<usize>,
+    after: Option<&str>,
+    offset: Option<usize>,
+    near_vector: Option<Vec<f64>>,
+) -> BuiltPipeline {
+    use crate::query_planner::operators::relation::{CosineRerankOperator, RelatedIdsSource};
+
+    let mut shape = "related_ids".to_string();
+    let mut source: Box<dyn ExecOperator> = Box::new(RelatedIdsSource::new(parent_uid, field_name));
+    if let Some(vec) = near_vector {
+        source = CosineRerankOperator::boxed(source, vec);
+        shape = "relation_cosine_rerank".to_string();
+    }
+    let keys = lower_sort_map(sort);
+    BuiltPipeline {
+        root: finish_chain(source, filter, &keys, after, offset, first, false),
+        shape,
+        used_candidates: false,
+        plan: None,
+    }
+}
+
 /// Count pipelines carry no pagination and never take the ordered fast path.
 /// Shape tags mirror legacy `count_nodes_internal`: hybrid counts under
 /// `vector_search`, text-only under `text_bm25`.
