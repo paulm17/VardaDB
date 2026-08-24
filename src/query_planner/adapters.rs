@@ -391,3 +391,155 @@ fn _assert_send_sync<T: Send + Sync>() {}
 fn _runtime_is_send_sync(x: Arc<SqliteRuntime<'static>>) -> Arc<SqliteRuntime<'static>> {
     x
 }
+
+/// Minimal no-op runtime for inline operator unit tests.
+#[cfg(test)]
+pub mod test_stub {
+    use crate::query_planner::ir::{
+        CursorValue, EntityId, FieldPath, FilterOp, FilterPredicate, LogicalFilter, QueryRecord,
+        QueryValue, SortDirection,
+    };
+    use crate::query_planner::traits::{
+        FieldMeta, NestedCandidateRequest, PlannerCatalog, PlannerIndexAccess,
+        PlannerNestedCandidates, PlannerPredicatePushdown, PlannerRelations, PlannerStorage,
+        RelationMeta, SearchFieldMeta, TypeMeta, VectorFieldMeta,
+    };
+
+    #[derive(Default)]
+    pub struct TestRuntime;
+
+    impl PlannerCatalog for TestRuntime {
+        fn type_meta(&self, _type_name: &str) -> Option<TypeMeta> {
+            None
+        }
+        fn field_meta(&self, _type_name: &str, _field_name: &str) -> Option<FieldMeta> {
+            None
+        }
+        fn relation_meta(&self, _type_name: &str, _field_name: &str) -> Option<RelationMeta> {
+            None
+        }
+        fn unique_fields(&self, _type_name: &str) -> Vec<String> {
+            vec![]
+        }
+        fn search_fields(&self, _type_name: &str) -> Vec<SearchFieldMeta> {
+            vec![]
+        }
+        fn vector_field(&self, _type_name: &str) -> Option<VectorFieldMeta> {
+            None
+        }
+    }
+
+    impl PlannerIndexAccess for TestRuntime {
+        fn lookup_unique(
+            &self,
+            _type_name: &str,
+            _field: &str,
+            _value: &QueryValue,
+        ) -> anyhow::Result<Option<EntityId>> {
+            Ok(None)
+        }
+        fn ordered_scan(
+            &self,
+            _type_name: &str,
+            _field: &str,
+            _direction: SortDirection,
+            _cursor: Option<&CursorValue>,
+            _limit: Option<usize>,
+        ) -> anyhow::Result<Vec<EntityId>> {
+            Ok(vec![])
+        }
+        fn text_search(
+            &self,
+            _type_name: &str,
+            _field: &str,
+            _op: FilterOp,
+            _query: &str,
+            _limit: Option<usize>,
+        ) -> anyhow::Result<Vec<EntityId>> {
+            Ok(vec![])
+        }
+        fn vector_search(
+            &self,
+            _type_name: &str,
+            _field: &str,
+            _vector: &[f64],
+            _limit: Option<usize>,
+        ) -> anyhow::Result<Vec<(EntityId, f64)>> {
+            Ok(vec![])
+        }
+    }
+
+    impl PlannerStorage for TestRuntime {
+        fn scan_type(
+            &self,
+            _type_name: &str,
+            _cursor: Option<&CursorValue>,
+            _limit: Option<usize>,
+        ) -> anyhow::Result<Vec<EntityId>> {
+            Ok(vec![])
+        }
+        fn fetch_entity(&self, id: &EntityId, _fields: &[FieldPath]) -> anyhow::Result<QueryRecord> {
+            Ok(QueryRecord {
+                id: id.clone(),
+                fields: Default::default(),
+            })
+        }
+        fn fetch_entities(
+            &self,
+            ids: &[EntityId],
+            fields: &[FieldPath],
+        ) -> anyhow::Result<Vec<QueryRecord>> {
+            Ok(ids.iter().map(|id| self.fetch_entity(id, fields)).collect::<anyhow::Result<Vec<_>>>()?)
+        }
+        fn count_type(
+            &self,
+            _type_name: &str,
+            _filter: Option<&LogicalFilter>,
+        ) -> anyhow::Result<usize> {
+            Ok(0)
+        }
+    }
+
+    impl PlannerRelations for TestRuntime {
+        fn related_ids(
+            &self,
+            _parent: &EntityId,
+            _field: &str,
+            _cursor: Option<&CursorValue>,
+            _limit: Option<usize>,
+        ) -> anyhow::Result<Vec<EntityId>> {
+            Ok(vec![])
+        }
+        fn reverse_related_ids(
+            &self,
+            _child_type: &str,
+            _inverse_field: &str,
+            _child_ids: &[EntityId],
+        ) -> anyhow::Result<Vec<EntityId>> {
+            Ok(vec![])
+        }
+    }
+
+    impl PlannerPredicatePushdown for TestRuntime {
+        fn candidate_ids(
+            &self,
+            _type_name: &str,
+            _predicate: &FilterPredicate,
+        ) -> anyhow::Result<Option<Vec<EntityId>>> {
+            Ok(None)
+        }
+    }
+
+    impl PlannerNestedCandidates for TestRuntime {
+        fn nested_candidates(&self, _req: &NestedCandidateRequest) -> Option<Vec<u64>> {
+            None
+        }
+    }
+
+    pub fn runtime_for_test_stub() -> TestRuntime {
+        TestRuntime
+    }
+}
+
+#[cfg(test)]
+pub use test_stub::runtime_for_test_stub;
