@@ -34,7 +34,7 @@ pub mod pagination;
 pub mod sort;
 pub mod source;
 pub use builder::{build_count_pipeline, build_relation_pipeline, build_scan_pipeline, BuiltPipeline};
-pub use filter::{count_conditions, FilterOperator};
+pub use filter::{compile_filter, count_conditions, CompiledFilter, FilterOperator};
 pub use pagination::{CursorSkipOperator, LimitOperator, OffsetOperator};
 pub use relation::{CosineRerankOperator, RelatedIdsSource};
 pub use sort::{compare_stored, SortOperator};

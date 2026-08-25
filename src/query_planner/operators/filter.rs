@@ -6,29 +6,85 @@
 //! directly to the legacy `SqliteResolver::check_condition` semantics so the
 //! two paths can never drift apart.
 
+use std::sync::Arc;
+
 use super::{
     ExecContext, ExecOperator, FlowResult, OperatorKind, OperatorStat, OutputOrdering, RowBatch,
 };
-use crate::query_planner::ir::{EntityId, FilterOp, LogicalFilter};
+use crate::query_planner::ir::{EntityId, FilterOp, FilterPredicate, LogicalFilter};
+use crate::query_planner::physical_expr::{
+    EvalContext, ExprError, PhysicalExpr, StoredSource,
+};
+
+/// Precompiled filter tree: [`LogicalFilter::Expr`] nodes hold their compiled
+/// physical expression; every other node mirrors the logical shape 1:1.
+pub enum CompiledFilter {
+    And(Vec<CompiledFilter>),
+    Or(Vec<CompiledFilter>),
+    Not(Box<CompiledFilter>),
+    Predicate(FilterPredicate),
+    /// Rows pass when the expression evaluates to `Bool(true)`; any other
+    /// value or an evaluation error drops the row (strict-typing runtime).
+    Expr(Arc<dyn PhysicalExpr>),
+    Relation {
+        field: String,
+        target_type: String,
+        filter: Box<CompiledFilter>,
+    },
+}
+
+/// Compile a logical filter tree, resolving every computed-expression node
+/// through `physical_expr::compile`.
+pub fn compile_filter(filter: &LogicalFilter) -> Result<CompiledFilter, ExprError> {
+    Ok(match filter {
+        LogicalFilter::And(parts) => CompiledFilter::And(
+            parts.iter().map(compile_filter).collect::<Result<_, _>>()?,
+        ),
+        LogicalFilter::Or(parts) => CompiledFilter::Or(
+            parts.iter().map(compile_filter).collect::<Result<_, _>>()?,
+        ),
+        LogicalFilter::Not(inner) => CompiledFilter::Not(Box::new(compile_filter(inner)?)),
+        LogicalFilter::Predicate(pred) => CompiledFilter::Predicate(pred.clone()),
+        LogicalFilter::Expr(expr) => {
+            CompiledFilter::Expr(crate::query_planner::physical_expr::compile_arc(expr)?)
+        }
+        LogicalFilter::Relation {
+            field,
+            target_type,
+            filter,
+        } => CompiledFilter::Relation {
+            field: field.clone(),
+            target_type: target_type.clone(),
+            filter: Box::new(compile_filter(filter)?),
+        },
+    })
+}
 
 /// Filters incoming batches down to rows whose entity satisfies the predicate
 /// tree. Filtering preserves input order and can only shrink cardinality, so
 /// both metadata declarations inherit from the input operator.
 pub struct FilterOperator {
     input: Box<dyn ExecOperator>,
-    filter: LogicalFilter,
+    filter: CompiledFilter,
 }
 
 impl FilterOperator {
+    /// Panics only if a computed-expression node fails to compile. Today's
+    /// lowering never emits `Expr` nodes, so this is unreachable in practice;
+    /// fallible construction goes through [`compile_filter`] directly.
     pub fn new(input: Box<dyn ExecOperator>, filter: LogicalFilter) -> Self {
-        FilterOperator { input, filter }
+        let compiled = compile_filter(&filter).expect("residual filter compiles");
+        FilterOperator {
+            input,
+            filter: compiled,
+        }
     }
 
     pub fn boxed(
         input: Box<dyn ExecOperator>,
         filter: LogicalFilter,
     ) -> Box<dyn ExecOperator> {
-        Box::new(FilterOperator { input, filter })
+        Box::new(FilterOperator::new(input, filter))
     }
 
     fn execute_inner(&self, ctx: &mut ExecContext) -> FlowResult<Vec<RowBatch>> {
@@ -47,7 +103,7 @@ impl FilterOperator {
             let remaining: Vec<EntityId> = batch
                 .0
                 .into_iter()
-                .filter(|id| eval(ctx, id.uid, &self.filter))
+                .filter(|id| eval_compiled(ctx, id.uid, &self.filter))
                 .collect();
             rows_out += remaining.len();
             if !remaining.is_empty() {
@@ -63,7 +119,7 @@ impl FilterOperator {
             elapsed_us: start.elapsed().as_micros() as u64,
             notes: vec![format!(
                 "residual conditions: {}",
-                count_conditions(&self.filter)
+                count_compiled(&self.filter)
             )],
         });
 
@@ -77,7 +133,7 @@ impl ExecOperator for FilterOperator {
     }
 
     fn detail(&self) -> String {
-        format!("residual({} conditions)", count_conditions(&self.filter))
+        format!("residual({} conditions)", count_compiled(&self.filter))
     }
 
     fn cardinality(&self) -> super::CardinalityHint {
@@ -97,14 +153,22 @@ impl ExecOperator for FilterOperator {
     }
 }
 
-/// Structural evaluation of one row against the filter tree.
-fn eval(ctx: &ExecContext, uid: u64, filter: &LogicalFilter) -> bool {
+/// Structural evaluation of one row against the compiled filter tree.
+fn eval_compiled(ctx: &ExecContext, uid: u64, filter: &CompiledFilter) -> bool {
     match filter {
-        LogicalFilter::And(parts) => parts.iter().all(|f| eval(ctx, uid, f)),
-        LogicalFilter::Or(parts) => parts.iter().any(|f| eval(ctx, uid, f)),
-        LogicalFilter::Not(inner) => !eval(ctx, uid, inner),
-        LogicalFilter::Predicate(pred) => eval_predicate(ctx, uid, pred.op, &pred.value, pred.path.single()),
-        LogicalFilter::Relation { field, filter, .. } => {
+        CompiledFilter::And(parts) => parts.iter().all(|f| eval_compiled(ctx, uid, f)),
+        CompiledFilter::Or(parts) => parts.iter().any(|f| eval_compiled(ctx, uid, f)),
+        CompiledFilter::Not(inner) => !eval_compiled(ctx, uid, inner),
+        CompiledFilter::Predicate(pred) => {
+            eval_predicate(ctx, uid, pred.op, &pred.value, pred.path.single())
+        }
+        CompiledFilter::Expr(expr) => expr
+            .evaluate(&EvalContext::new(&StoredSource::new(
+                ctx.runtime,
+                EntityId::from(uid),
+            )))
+            .is_ok_and(|v| matches!(v, crate::query_planner::ir::QueryValue::Bool(true))),
+        CompiledFilter::Relation { field, filter, .. } => {
             eval_relation(ctx, uid, field, filter)
         }
     }
@@ -166,23 +230,23 @@ fn eval_relation(
     ctx: &ExecContext,
     uid: u64,
     field: &str,
-    sub: &LogicalFilter,
+    sub: &CompiledFilter,
 ) -> bool {
     let stored = ctx.runtime.stored_field(&EntityId::from(uid), field);
     match stored {
         Some(async_graphql::Value::String(s)) => match s.parse::<u64>() {
-            Ok(child_uid) => eval(ctx, child_uid, sub),
+            Ok(child_uid) => eval_compiled(ctx, child_uid, sub),
             Err(_) => false,
         },
         Some(async_graphql::Value::Number(n)) => match n.as_u64() {
-            Some(child_uid) => eval(ctx, child_uid, sub),
+            Some(child_uid) => eval_compiled(ctx, child_uid, sub),
             None => false,
         },
         Some(async_graphql::Value::List(list)) => {
             let mut matched = false;
             for item in &list {
                 if let Some(child_uid) = local_value_to_uid(item) {
-                    if eval(ctx, child_uid, sub) {
+                    if eval_compiled(ctx, child_uid, sub) {
                         matched = true;
                         break;
                     }
@@ -214,7 +278,19 @@ pub fn count_conditions(filter: &LogicalFilter) -> usize {
         }
         LogicalFilter::Not(inner) => count_conditions(inner),
         LogicalFilter::Predicate(_) => 1,
+        LogicalFilter::Expr(_) => 1,
         LogicalFilter::Relation { filter, .. } => 1 + count_conditions(filter),
+    }
+}
+
+fn count_compiled(filter: &CompiledFilter) -> usize {
+    match filter {
+        CompiledFilter::And(parts) | CompiledFilter::Or(parts) => {
+            parts.iter().map(count_compiled).sum::<usize>()
+        }
+        CompiledFilter::Not(inner) => count_compiled(inner),
+        CompiledFilter::Predicate(_) | CompiledFilter::Expr(_) => 1,
+        CompiledFilter::Relation { filter, .. } => 1 + count_compiled(filter),
     }
 }
 
@@ -240,13 +316,17 @@ mod tests {
         // Stub runtime passes every leaf condition, so And/Or/Not structure
         // drives outcomes.
         let f_and = LogicalFilter::And(vec![eq_pred("a", 1)]);
-        assert!(eval(&ctx, 1, &f_and));
+        assert!(eval_compiled(&ctx, 1, &compile_filter(&f_and).unwrap()));
 
         let f_or_empty = LogicalFilter::Or(vec![]);
-        assert!(!eval(&ctx, 1, &f_or_empty));
+        assert!(!eval_compiled(
+            &ctx,
+            1,
+            &compile_filter(&f_or_empty).unwrap()
+        ));
 
         let f_not = LogicalFilter::Not(Box::new(eq_pred("a", 1)));
-        assert!(!eval(&ctx, 1, &f_not));
+        assert!(!eval_compiled(&ctx, 1, &compile_filter(&f_not).unwrap()));
     }
 
     #[test]
@@ -258,7 +338,7 @@ mod tests {
             op: FilterOp::AllOfTerms,
             value: QueryValue::String("ignored here".into()),
         });
-        assert!(eval(&ctx, 5, &f));
+        assert!(eval_compiled(&ctx, 5, &compile_filter(&f).unwrap()));
     }
 
     #[test]
@@ -272,7 +352,7 @@ mod tests {
         let runtime = runtime_for_test_stub();
         let ctx = ExecContext::new(&runtime, "db");
         // Stub returns None stored + true eval_condition: still passes.
-        assert!(eval(&ctx, 9, &f));
+        assert!(eval_compiled(&ctx, 9, &compile_filter(&f).unwrap()));
 
         // Multi-segment paths have no legacy equivalent; they fail closed.
         let nested = LogicalFilter::Predicate(FilterPredicate {
@@ -285,6 +365,6 @@ mod tests {
             op: FilterOp::Eq,
             value: QueryValue::Int(1),
         });
-        assert!(!eval(&ctx, 9, &nested));
+        assert!(!eval_compiled(&ctx, 9, &compile_filter(&nested).unwrap()));
     }
 }

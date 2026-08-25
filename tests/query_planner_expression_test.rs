@@ -280,6 +280,8 @@ struct Fixture {
     resolver: SqliteResolver,
     metadata: HashMap<String, QueryTypeMetadata>,
     paul: u64,
+    ada: u64,
+    bob: u64,
 }
 
 fn build_fixture() -> Fixture {
@@ -287,7 +289,7 @@ fn build_fixture() -> Fixture {
     let storage = std::sync::Arc::new(Storage::new(dir.path(), None).unwrap());
     let resolver = SqliteResolver::new(storage.clone(), "default");
 
-    for (uid, name, age) in [(101u64, "Paul", 40i64), (102, "Ada", 36)] {
+    for (uid, name, age) in [(101u64, "Paul", 40i64), (102, "Ada", 36), (103, "Bob", 25)] {
         resolver
             .create_node_internal(
                 "Author",
@@ -355,6 +357,8 @@ fn build_fixture() -> Fixture {
         resolver,
         metadata,
         paul: 101,
+        ada: 102,
+        bob: 103,
     }
 }
 
@@ -643,3 +647,213 @@ fn default_registry_shape() {
     assert!(!registry.is_empty());
     assert!(registry.get("ceil").is_some());
 }
+
+// -- 3.1c expression registry + operator wiring ---------------------------------
+
+use std::sync::Arc;
+
+use vardadb::query_planner::expression_registry::{resolve_order_by_alias, ComputeSite, ExpressionRegistry};
+use vardadb::query_planner::ir::{
+    FieldSegment, FilterOp, FilterPredicate, LogicalFilter, OrderKey, Projection, ProjectField,
+    SortDirection,
+};
+use vardadb::query_planner::operators::{
+    count_conditions, ExecContext, ExecOperator, FilterOperator, FlowResult, FullTypeScan,
+    SortOperator,
+};
+
+fn pred(path: &str, op: FilterOp, value: QueryValue) -> LogicalFilter {
+    LogicalFilter::Predicate(FilterPredicate {
+        path: FieldPath::field(path),
+        op,
+        value,
+    })
+}
+
+fn expr_filter(expr: LogicalExpr) -> LogicalFilter {
+    LogicalFilter::Expr(expr)
+}
+
+#[test]
+fn registry_interns_identical_trees_once() {
+    let registry = ExpressionRegistry::new();
+    let tree = bin(lit(i(1)), BinaryOp::Add, lit(i(2)));
+
+    let first = registry
+        .intern(ComputeSite::Sort, "k", &tree)
+        .unwrap();
+    let second = registry
+        .intern(ComputeSite::Sort, "k", &tree)
+        .unwrap();
+    assert!(Arc::ptr_eq(&first, &second), "identical trees share one compile");
+
+    // Different name => separate entry even for an identical tree.
+    let _other = registry.intern(ComputeSite::Sort, "other", &tree).unwrap();
+    assert_eq!(registry.len(), 2);
+    assert!(registry.contains_name("k"));
+    assert!(registry.get(ComputeSite::Sort, "k").is_some());
+    assert!(registry.get(ComputeSite::Filter, "k").is_none());
+}
+
+#[test]
+fn resolve_order_by_alias_maps_computed_keys() {
+    let mut projection = Projection::default();
+    projection.fields.push(ProjectField::Scalar {
+        name: "name".to_string(),
+    });
+    projection.fields.push(ProjectField::Computed {
+        alias: "shout".to_string(),
+        expr: func("upper", vec![fld("name")]),
+    });
+
+    let hit = OrderKey {
+        path: FieldPath::field("shout"),
+        direction: SortDirection::Asc,
+    };
+    let (alias, _compiled) = resolve_order_by_alias(&hit, &projection).expect("alias resolves");
+    assert_eq!(alias, "shout");
+
+    let plain = OrderKey {
+        path: FieldPath::field("name"),
+        direction: SortDirection::Asc,
+    };
+    assert!(resolve_order_by_alias(&plain, &projection).is_none());
+
+    // Multi-segment paths never match aliases.
+    let deep = OrderKey {
+        path: FieldPath {
+            segments: vec![
+                FieldSegment::Field("a".to_string()),
+                FieldSegment::Field("b".to_string()),
+            ],
+        },
+        direction: SortDirection::Asc,
+    };
+    assert!(resolve_order_by_alias(&deep, &projection).is_none());
+}
+
+fn exec_uids(op: Box<dyn ExecOperator>, fx: &Fixture) -> Vec<u64> {
+    let rt = runtime_for(&fx.resolver, &fx.metadata);
+    let mut ctx = ExecContext::new(&rt, "default");
+    match op.execute(&mut ctx) {
+        FlowResult::Rows(batches) => batches
+            .into_iter()
+            .flat_map(|b| b.0.into_iter().map(|e| e.uid))
+            .collect(),
+        other => panic!("expected rows, got error={}", other.is_error()),
+    }
+}
+
+#[test]
+fn sort_operator_orders_by_computed_expression() {
+    let fx = build_fixture();
+    let shout = ExpressionRegistry::new()
+        .intern(
+            ComputeSite::Sort,
+            "shout",
+            &func("upper", vec![fld("name")]),
+        )
+        .unwrap();
+    let keys = vec![OrderKey {
+        path: FieldPath::field("shout"),
+        direction: SortDirection::Asc,
+    }];
+    let op = SortOperator::with_computed(
+        Box::new(FullTypeScan::new("Author")),
+        keys,
+        vec![Some(shout)],
+    );
+    // upper(name): ADA < BOB < PAUL.
+    assert_eq!(
+        exec_uids(Box::new(op), &fx),
+        vec![fx.ada, fx.bob, fx.paul]
+    );
+}
+
+#[test]
+fn sort_operator_mixed_computed_and_stored_keys() {
+    let fx = build_fixture();
+    let reg = ExpressionRegistry::new();
+    let name_len = reg
+        .intern(ComputeSite::Sort, "name_len", &func("len", vec![fld("name")]))
+        .unwrap();
+    let keys = vec![
+        OrderKey {
+            path: FieldPath::field("name_len"),
+            direction: SortDirection::Asc,
+        },
+        OrderKey {
+            path: FieldPath::field("age"),
+            direction: SortDirection::Asc,
+        },
+    ];
+    let op = SortOperator::with_computed(
+        Box::new(FullTypeScan::new("Author")),
+        keys,
+        vec![Some(name_len), None],
+    );
+    // Ascending len groups Ada/Bob (3) before Paul (4); their tie breaks on
+    // stored age asc (Bob 25 < Ada 36).
+    assert_eq!(
+        exec_uids(Box::new(op), &fx),
+        vec![fx.bob, fx.ada, fx.paul]
+    );
+}
+
+#[test]
+fn filter_operator_evaluates_computed_expr_nodes() {
+    let fx = build_fixture();
+    // age >= 20 AND (age * 2 > 72) => only Paul (80 > 72; Ada's 72 fails).
+    let filter = LogicalFilter::And(vec![
+        pred("age", FilterOp::Ge, i(20)),
+        expr_filter(bin(
+            bin(fld("age"), BinaryOp::Mul, lit(i(2))),
+            BinaryOp::Gt,
+            lit(i(72)),
+        )),
+    ]);
+    let op = FilterOperator::boxed(Box::new(FullTypeScan::new("Author")), filter);
+    assert_eq!(exec_uids(op, &fx), vec![fx.paul]);
+}
+
+#[test]
+fn filter_expr_non_bool_and_error_rows_drop() {
+    let fx = build_fixture();
+
+    // Non-Bool result never passes.
+    let truthy_number = FilterOperator::boxed(
+        Box::new(FullTypeScan::new("Author")),
+        expr_filter(fld("age")),
+    );
+    assert!(exec_uids(truthy_number, &fx).is_empty());
+
+    // Evaluation error (Int + String mismatch) drops the row silently.
+    let mismatch = FilterOperator::boxed(
+        Box::new(FullTypeScan::new("Author")),
+        expr_filter(bin(fld("age"), BinaryOp::Add, lit(s("x")))),
+    );
+    assert!(exec_uids(mismatch, &fx).is_empty());
+
+    // Bool(true) passes everything below it.
+    let pass = FilterOperator::boxed(
+        Box::new(FullTypeScan::new("Author")),
+        expr_filter(bin(fld("age"), BinaryOp::Gt, lit(i(0)))),
+    );
+    let mut uids = exec_uids(pass, &fx);
+    uids.sort_unstable();
+    assert_eq!(uids, vec![fx.paul, fx.ada, fx.bob]);
+}
+
+#[test]
+fn compile_filter_rejects_unknown_functions_and_counts_expr_nodes() {
+    let bad = expr_filter(func("nosuchfun", vec![]));
+    assert!(matches!(
+        vardadb::query_planner::operators::compile_filter(&bad),
+        Err(ExprError::UnknownFunction(_))
+    ));
+    assert_eq!(count_conditions(&bad), 1);
+    let nested = LogicalFilter::And(vec![pred("age", FilterOp::Ge, i(1)), bad]);
+    assert_eq!(count_conditions(&nested), 2);
+}
+
+

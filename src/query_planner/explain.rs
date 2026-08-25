@@ -114,6 +114,9 @@ fn render_filter(filter: &LogicalFilter) -> String {
         LogicalFilter::Predicate(p) => {
             format!("{} {} {:?}", p.path, p.op.as_str(), p.value)
         }
+        LogicalFilter::Expr(expr) => {
+            format!("EXPR({:?})", expr)
+        }
         LogicalFilter::Relation {
             field,
             target_type,

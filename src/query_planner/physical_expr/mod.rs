@@ -253,3 +253,31 @@ pub fn eval_record(expr: &dyn PhysicalExpr, record: &QueryRecord) -> Result<Quer
     let src = RecordSource::new(record);
     expr.evaluate(&EvalContext::new(&src))
 }
+
+/// Compile into an `Arc` for shared ownership (expression registry, computed
+/// sort keys, cached plan fragments).
+pub fn compile_arc(expr: &LogicalExpr) -> Result<std::sync::Arc<dyn PhysicalExpr>, ExprError> {
+    Ok(std::sync::Arc::from(compile(expr)?))
+}
+
+/// Convert an evaluated [`QueryValue`] back to the GraphQL value space used
+/// by the legacy comparison/sort helpers (`compare_stored`).
+pub fn to_graphql_value(v: &QueryValue) -> async_graphql::Value {
+    match v {
+        QueryValue::Null => async_graphql::Value::Null,
+        QueryValue::Bool(b) => (*b).into(),
+        QueryValue::Int(i) => (*i).into(),
+        QueryValue::Float(f) => (*f).into(),
+        QueryValue::String(s) | QueryValue::Enum(s) => s.clone().into(),
+        QueryValue::List(items) => {
+            async_graphql::Value::List(items.iter().map(to_graphql_value).collect())
+        }
+        QueryValue::Object(fields) => async_graphql::Value::Object(
+            fields
+                .iter()
+                .map(|(k, v)| (async_graphql::Name::new(k), to_graphql_value(v)))
+                .collect(),
+        ),
+        QueryValue::EntityId(e) => async_graphql::Value::String(e.uid.to_string()),
+    }
+}

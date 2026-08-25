@@ -203,12 +203,16 @@ pub struct FilterPredicate {
     pub value: QueryValue,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum LogicalFilter {
     And(Vec<LogicalFilter>),
     Or(Vec<LogicalFilter>),
     Not(Box<LogicalFilter>),
     Predicate(FilterPredicate),
+    /// Boolean computed expression (Stage 3.1): rows pass when the compiled
+    /// expression evaluates to `Bool(true)`. Any other value or an evaluation
+    /// error drops the row.
+    Expr(crate::query_planner::ir::LogicalExpr),
     Relation {
         field: String,
         target_type: String,

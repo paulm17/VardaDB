@@ -8,26 +8,55 @@
 //! f64, strings lexicographically, missing values first in ascending order,
 //! stable ties).
 
+use std::sync::Arc;
+
 use super::{
     CardinalityHint, ExecContext, ExecOperator, FlowResult, OperatorKind, OperatorStat,
     OutputOrdering, RowBatch,
 };
 use crate::query_planner::ir::{EntityId, OrderKey};
+use crate::query_planner::physical_expr::{
+    to_graphql_value, EvalContext, PhysicalExpr, StoredSource,
+};
 
 /// Sorts incoming rows by the requested keys unless the input operator already
 /// guarantees that ordering (elimination).
+///
+/// Stage 3.1c: keys may be computed expressions (ORDER BY a `Computed`
+/// projection alias). A key with `Some(expr)` evaluates the expression against
+/// the row via [`StoredSource`]; such keys disable elimination because no
+/// input ordering can cover them yet.
 pub struct SortOperator {
     input: Box<dyn ExecOperator>,
     keys: Vec<OrderKey>,
+    computed: Vec<Option<Arc<dyn PhysicalExpr>>>,
 }
 
 impl SortOperator {
     pub fn new(input: Box<dyn ExecOperator>, keys: Vec<OrderKey>) -> Self {
-        SortOperator { input, keys }
+        SortOperator {
+            input,
+            computed: vec![None; keys.len()],
+            keys,
+        }
     }
 
     pub fn boxed(input: Box<dyn ExecOperator>, keys: Vec<OrderKey>) -> Box<dyn ExecOperator> {
-        Box::new(SortOperator { input, keys })
+        Box::new(SortOperator::new(input, keys))
+    }
+
+    /// Sort with per-key computed expressions (`None` = stored-field key).
+    pub fn with_computed(
+        input: Box<dyn ExecOperator>,
+        keys: Vec<OrderKey>,
+        computed: Vec<Option<Arc<dyn PhysicalExpr>>>,
+    ) -> Self {
+        debug_assert_eq!(keys.len(), computed.len(), "key/computed arity mismatch");
+        SortOperator {
+            input,
+            keys,
+            computed,
+        }
     }
 
     fn execute_inner(&self, ctx: &mut ExecContext) -> FlowResult<Vec<RowBatch>> {
@@ -74,12 +103,20 @@ impl SortOperator {
         let mut sort_values: std::collections::HashMap<u64, Vec<Option<async_graphql::Value>>> =
             std::collections::HashMap::with_capacity(rows.len());
         for id in &rows {
-            let vals = self
+            let uid_value = id.uid;
+            let vals: Vec<Option<async_graphql::Value>> = self
                 .keys
                 .iter()
-                .map(|k| {
-                    key_field(k)
-                        .and_then(|f| ctx.runtime.stored_field(id, &f))
+                .zip(&self.computed)
+                .map(|(k, computed)| match computed {
+                    Some(expr) => expr
+                        .evaluate(&EvalContext::new(&StoredSource::new(
+                            ctx.runtime,
+                            EntityId::new(uid_value),
+                        )))
+                        .map(|v| to_graphql_value(&v))
+                        .ok(),
+                    None => key_field(k).and_then(|f| ctx.runtime.stored_field(id, &f)),
                 })
                 .collect();
             sort_values.insert(id.uid, vals);
@@ -103,7 +140,9 @@ impl SortOperator {
     }
 
     fn eliminated(&self) -> bool {
-        !self.keys.is_empty() && self.input.output_ordering().satisfies_all(&self.keys)
+        !self.keys.is_empty()
+            && self.computed.iter().all(|c| c.is_none())
+            && self.input.output_ordering().satisfies_all(&self.keys)
     }
 }
 
@@ -274,10 +313,10 @@ mod tests {
                 direction: SortDirection::Asc,
             },
         };
-        let op = SortOperator {
-            input: Box::new(source),
-            keys: vec![key("age", SortDirection::Asc)],
-        };
+        let op = SortOperator::new(
+            Box::new(source),
+            vec![key("age", SortDirection::Asc)],
+        );
         assert!(op.eliminated());
         assert!(op.output_ordering().satisfies(&key("age", SortDirection::Asc)));
 
@@ -287,12 +326,12 @@ mod tests {
             .satisfies(&key("age", SortDirection::Desc)));
 
         // Unordered input never eliminates.
-        let unordered = SortOperator {
-            input: Box::new(DeclaringSource {
+        let unordered = SortOperator::new(
+            Box::new(DeclaringSource {
                 ordering: OutputOrdering::Unordered,
             }),
-            keys: vec![key("age", SortDirection::Asc)],
-        };
+            vec![key("age", SortDirection::Asc)],
+        );
         assert!(!unordered.eliminated());
     }
 
@@ -302,15 +341,15 @@ mod tests {
         let mut ctx = ExecContext::new(&runtime, "db");
         // Explain capture defaults to debug_logging(); force it on for asserts.
         ctx.explain = crate::query_planner::operators::ExplainCapture::new(true);
-        let op = SortOperator {
-            input: Box::new(DeclaringSource {
+        let op = SortOperator::new(
+            Box::new(DeclaringSource {
                 ordering: OutputOrdering::Unordered,
             }),
-            keys: vec![
+            vec![
                 key("age", SortDirection::Desc),
                 key("name", SortDirection::Asc),
             ],
-        };
+        );
         assert_eq!(op.detail(), "sort(age desc, name asc)");
         match op.execute(&mut ctx) {
             FlowResult::Rows(_) => {}
