@@ -113,3 +113,105 @@ async fn test_query_parity() {
     // "Apple" > "B"? No.
     assert_eq!(products_s.len(), 3);
 }
+
+// Stage 3.5 post-cutover parity: relation traversal, sorting and pagination
+// through the default read path (planner pipelines) on a fresh schema.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_query_parity_after_cutover() {
+    let schema = vardadb::engine::schema::Schema::load_from_sdl(
+        "
+        type Author {
+            name: String
+            age: Int
+            books: [Book]
+        }
+        type Book {
+            title: String
+        }
+        ",
+    )
+    .unwrap();
+
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let storage = Arc::new(Storage::new(tmp_dir.path(), None).unwrap());
+    let resolver = SqliteResolver::new(storage.clone(), "default");
+
+    // Books first; authors link them through the `books` edge.
+    let res_books = schema
+        .execute_with_resolver(
+            r#"mutation {
+                b1: createBook(input: { title: "Intro to Rust" }) { uid }
+                b2: createBook(input: { title: "Advanced Go" }) { uid }
+            }"#,
+            Box::new(resolver.clone()),
+        )
+        .await;
+    let books: Value = serde_json::from_str(&res_books).unwrap();
+    let rust_uid = books["data"]["b1"]["uid"].as_str().unwrap();
+    let go_uid = books["data"]["b2"]["uid"].as_str().unwrap();
+
+    let res_authors = schema
+        .execute_with_resolver(
+            &format!(
+                r#"mutation {{
+                    a1: createAuthor(input: {{ name: "Alice", age: 38, books: [{{ uid: "{}" }}] }}) {{ uid }}
+                    a2: createAuthor(input: {{ name: "Bob", age: 25, books: [{{ uid: "{}" }}] }}) {{ uid }}
+                }}"#,
+                rust_uid, go_uid
+            ),
+            Box::new(resolver.clone()),
+        )
+        .await;
+    assert!(!res_authors.contains("errors"), "{res_authors}");
+
+    // Nested relation filter through the planner pipeline.
+    let nested = r#"
+        query {
+            queryAuthor(filter: { books: { title: { contains: "Rust" } } }) {
+                name
+            }
+        }
+    "#;
+    let res_nested = schema
+        .execute_with_resolver(nested, Box::new(resolver.clone()))
+        .await;
+    let val: Value = serde_json::from_str(&res_nested).unwrap();
+    let authors = val["data"]["queryAuthor"].as_array().unwrap();
+    assert_eq!(authors.len(), 1);
+    assert_eq!(authors[0]["name"].as_str().unwrap(), "Alice");
+
+    // Scalar filter + sort + pagination in one shape.
+    let sorted = r#"
+        query {
+            queryAuthor(filter: { age: { ge: 20 } }, sort: { age: DESC }, first: 1) {
+                name
+            }
+        }
+    "#;
+    let res_sorted = schema
+        .execute_with_resolver(sorted, Box::new(resolver.clone()))
+        .await;
+    let val: Value = serde_json::from_str(&res_sorted).unwrap();
+    let authors = val["data"]["queryAuthor"].as_array().unwrap();
+    assert_eq!(authors.len(), 1);
+    assert_eq!(authors[0]["name"].as_str().unwrap(), "Alice");
+
+    // Ascending sort without filters covers both authors in age order.
+    let asc = r#"
+        query {
+            queryAuthor(sort: { age: ASC }) {
+                name
+            }
+        }
+    "#;
+    let res_asc = schema
+        .execute_with_resolver(asc, Box::new(resolver.clone()))
+        .await;
+    let val: Value = serde_json::from_str(&res_asc).unwrap();
+    let authors = val["data"]["queryAuthor"].as_array().unwrap();
+    let names: Vec<&str> = authors
+        .iter()
+        .map(|a| a["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, vec!["Bob", "Alice"]);
+}
