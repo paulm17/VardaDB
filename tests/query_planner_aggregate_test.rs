@@ -6,13 +6,14 @@ use std::sync::Arc;
 
 use tempfile::tempdir;
 use vardadb::bridge::sqlite_resolver::SqliteResolver;
-use vardadb::engine::resolver::QueryTypeMetadata;
+use vardadb::engine::resolver::{InverseInfo, QueryTypeMetadata};
 use vardadb::query_planner::function::default_aggregate_registry;
 use vardadb::query_planner::ir::{
     BinaryOp, EntityId, FieldPath, LogicalExpr, QueryValue,
 };
 use vardadb::query_planner::operators::{
-    AggregateSpec, ExecContext, ExecOperator, FlowResult, FullTypeScan, HashAggregateOperator,
+    AggregateSpec, ExecContext, ExecOperator, FilterOperator, FlowResult, FullTypeScan,
+    HashAggregateOperator,
 };
 use vardadb::query_planner::physical_expr::compile;
 use vardadb::query_planner::runtime_for;
@@ -76,14 +77,71 @@ fn build_fixture() -> Fixture {
             .unwrap();
     }
 
-    let metadata = [(
-        "Author".to_string(),
-        QueryTypeMetadata {
-            uniques: vec!["name".to_string()],
-            inverses: vec![],
-            relations: std::collections::HashMap::new(),
-        },
-    )]
+    // Books owned by authors through the inverse edge field `author`.
+    let book_inverses = [InverseInfo {
+        field: "author".to_string(),
+        inverse_type: "Author".to_string(),
+        inverse_field: "books".to_string(),
+        inverse_is_list: true,
+    }];
+    let mut search_fields = std::collections::HashMap::new();
+    search_fields.insert(
+        "title".to_string(),
+        vec!["term".to_string(), "fulltext".to_string()],
+    );
+    for (uid, title, author) in [
+        (201u64, "Planner Internals", 101u64),
+        (202, "Query Engines", 101),
+        (203, "Cooking Basics", 102),
+    ] {
+        resolver
+            .create_node_internal(
+                "Book",
+                uid,
+                [
+                    ("title".to_string(), serde_json::json!(title)),
+                    ("author".to_string(), serde_json::json!(author.to_string())),
+                ]
+                .into_iter()
+                .collect(),
+                &[],
+                &book_inverses,
+                &search_fields,
+                MutationSource::Local,
+                Some(ts(uid as u16)),
+            )
+            .unwrap();
+    }
+
+    let metadata = [
+        (
+            "Author".to_string(),
+            QueryTypeMetadata {
+                uniques: vec!["name".to_string()],
+                inverses: vec![InverseInfo {
+                    field: "books".to_string(),
+                    inverse_type: "Book".to_string(),
+                    inverse_field: "author".to_string(),
+                    inverse_is_list: true,
+                }],
+                relations: std::collections::HashMap::from([(
+                    "books".to_string(),
+                    "Book".to_string(),
+                )]),
+            },
+        ),
+        (
+            "Book".to_string(),
+            QueryTypeMetadata {
+                uniques: vec![],
+                inverses: vec![],
+                relations: std::collections::HashMap::from([(
+                    "author".to_string(),
+                    "Author".to_string(),
+                )]),
+            },
+        ),
+    ]
     .into_iter()
     .collect();
 
@@ -448,4 +506,173 @@ fn entity_ids_flow_through_batch_consumption() {
         other => panic!("expected rows, got error={}", other.is_error()),
     }
     assert_eq!(EntityId::new(1).uid, 1);
+}
+
+// -- 3.2b planner glue / count cutover ------------------------------------------
+
+fn gql_s(v: &str) -> async_graphql::Value {
+    async_graphql::Value::String(v.to_string())
+}
+
+fn op_obj(op: &str, v: async_graphql::Value) -> async_graphql::Value {
+    let mut map = async_graphql::indexmap::IndexMap::new();
+    map.insert(async_graphql::Name::new(op), v);
+    async_graphql::Value::Object(map)
+}
+
+fn gql_map(
+    pairs: &[(&str, async_graphql::Value)],
+) -> std::collections::HashMap<String, async_graphql::Value> {
+    pairs
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.clone()))
+        .collect()
+}
+
+fn count_via_pipeline(
+    fx: &Fixture,
+    filter: &std::collections::HashMap<String, async_graphql::Value>,
+) -> usize {
+    let scan = Box::new(FullTypeScan::new("Author")) as Box<dyn ExecOperator>;
+    let pipeline: Box<dyn ExecOperator> = if filter.is_empty() {
+        scan
+    } else {
+        FilterOperator::boxed(scan, vardadb::query_planner::lower_filter_map(filter))
+    };
+    let aggregate =
+        HashAggregateOperator::new(pipeline, vec![spec("count", Some(lit(i(1))), "rows")], vec![]);
+    let rt = runtime_for(&fx.resolver, &fx.metadata);
+    let mut ctx = ExecContext::new(&rt, "default");
+    match aggregate.execute(&mut ctx) {
+        FlowResult::Rows(_) => aggregate.first_count().unwrap_or(0) as usize,
+        other => panic!("expected rows, got error={}", other.is_error()),
+    }
+}
+
+#[test]
+fn count_nodes_parity_across_filter_shapes() {
+    let fx = build_fixture();
+
+    // Unfiltered counts take the O(prefix) fast path.
+    assert_eq!(
+        fx.resolver
+            .count_nodes_internal("Author", gql_map(&[]), &[], None, &fx.metadata, None),
+        3
+    );
+    // Scalar residual filter.
+    assert_eq!(
+        fx.resolver.count_nodes_internal(
+            "Author",
+            gql_map(&[("age", op_obj("ge", async_graphql::Value::Number(30.into())))]),
+            &[],
+            None,
+            &fx.metadata,
+            None
+        ),
+        2,
+        "Paul and Ada are 30+"
+    );
+    // Text-narrowed nested relation (child text search feeds the expansion).
+    assert_eq!(
+        fx.resolver.count_nodes_internal(
+            "Author",
+            gql_map(&[(
+                "books",
+                op_obj("title", op_obj("allofterms", gql_s("planner")))
+            )]),
+            &[],
+            None,
+            &fx.metadata,
+            None
+        ),
+        1,
+        "only Paul owns a book matching allofterms(planner)"
+    );
+    // Nested residual condition (contains is not index-backed).
+    assert_eq!(
+        fx.resolver.count_nodes_internal(
+            "Author",
+            gql_map(&[(
+                "books",
+                op_obj("title", op_obj("contains", gql_s("Cooking")))
+            )]),
+            &[],
+            None,
+            &fx.metadata,
+            None
+        ),
+        1,
+        "only Ada owns the Cooking book"
+    );
+}
+
+#[test]
+fn zero_match_count_yields_default_row_with_zero() {
+    let fx = build_fixture();
+    // End-to-end empty-group semantics: SELECT count(*) WHERE false == 0.
+    assert_eq!(
+        fx.resolver.count_nodes_internal(
+            "Author",
+            gql_map(&[("age", op_obj("gt", async_graphql::Value::Number(99.into())))]),
+            &[],
+            None,
+            &fx.metadata,
+            None
+        ),
+        0
+    );
+
+    // Operator level: one default group whose count is Int(0).
+    let scan = Box::new(FullTypeScan::new("Author")) as Box<dyn ExecOperator>;
+    let mut nobody = std::collections::HashMap::new();
+    nobody.insert(
+        "age".to_string(),
+        op_obj("gt", async_graphql::Value::Number(99.into())),
+    );
+    let filtered = FilterOperator::boxed(scan, vardadb::query_planner::lower_filter_map(&nobody));
+    let aggregate = HashAggregateOperator::new(
+        filtered,
+        vec![spec("count", Some(lit(i(1))), "rows")],
+        vec![],
+    );
+    let rt = runtime_for(&fx.resolver, &fx.metadata);
+    let mut ctx = ExecContext::new(&rt, "default");
+    match aggregate.execute(&mut ctx) {
+        FlowResult::Rows(batches) => {
+            assert!(batches.is_empty(), "aggregation emits no row batches");
+            let groups = aggregate.groups();
+            assert_eq!(groups.len(), 1, "exactly one default group");
+            assert_eq!(output(&groups[0].outputs, "rows"), &i(0));
+        }
+        other => panic!("expected rows, got error={}", other.is_error()),
+    }
+}
+
+#[test]
+fn manual_count_pipeline_matches_count_nodes_internal() {
+    let fx = build_fixture();
+    let mut over_25 = std::collections::HashMap::new();
+    over_25.insert(
+        "age".to_string(),
+        op_obj("ge", async_graphql::Value::Number(25.into())),
+    );
+    assert_eq!(count_via_pipeline(&fx, &over_25), 3);
+    assert_eq!(
+        fx.resolver
+            .count_nodes_internal("Author", over_25.clone(), &[], None, &fx.metadata, None),
+        3
+    );
+
+    let mut over_36 = std::collections::HashMap::new();
+    over_36.insert(
+        "age".to_string(),
+        op_obj("gt", async_graphql::Value::Number(36.into())),
+    );
+    assert_eq!(count_via_pipeline(&fx, &over_36), 1);
+    assert_eq!(
+        fx.resolver
+            .count_nodes_internal("Author", over_36, &[], None, &fx.metadata, None),
+        1,
+        "only Paul (40) is above 36"
+    );
 }

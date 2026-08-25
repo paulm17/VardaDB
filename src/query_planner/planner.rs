@@ -273,3 +273,61 @@ pub fn plan_candidates<'a>(
     };
     build_candidate_plan(&ctx, filter)
 }
+
+// ---------------------------------------------------------------------------
+// Stage 3.2: aggregate compilation
+// ---------------------------------------------------------------------------
+
+/// Compile logical aggregate specifications into executable operator specs.
+///
+/// Maps the IR enum onto registry names (`Count`->`count`, `Sum`->
+/// `math::sum`, `Mean`->`math::mean`, `Min`/`Max`->`math::min`/`math::max`).
+/// A `Count` without an argument compiles to the constant `Int(1)` so the
+/// accumulator counts rows rather than values.
+pub fn compile_aggregates(
+    specs: &[crate::query_planner::ir::AggregateSpec],
+) -> Result<Vec<crate::query_planner::operators::aggregate::AggregateSpec>, crate::query_planner::operators::PlannerError> {
+    use crate::query_planner::function::default_aggregate_registry;
+    use crate::query_planner::ir::AggregateFunction;
+    use crate::query_planner::operators::PlannerError;
+    use crate::query_planner::physical_expr::compile_arc;
+
+    let registry = default_aggregate_registry();
+    let mut compiled = Vec::with_capacity(specs.len());
+    for spec in specs {
+        let name = match spec.function {
+            AggregateFunction::Count => "count",
+            AggregateFunction::Sum => "math::sum",
+            AggregateFunction::Mean => "math::mean",
+            AggregateFunction::Min => "math::min",
+            AggregateFunction::Max => "math::max",
+        };
+        let Some(func) = registry.get(name) else {
+            return Err(PlannerError::Unsupported(format!(
+                "aggregate function {name:?} is not registered"
+            )));
+        };
+        let arg = match &spec.expr {
+            Some(expr) => Some(
+                compile_arc(expr)
+                    .map_err(|e| PlannerError::Unsupported(e.to_string()))?,
+            ),
+            None => {
+                if matches!(spec.function, AggregateFunction::Count) {
+                    Some(compile_arc(&crate::query_planner::ir::LogicalExpr::Value(
+                        QueryValue::Int(1),
+                    ))
+                    .map_err(|e| PlannerError::Unsupported(e.to_string()))?)
+                } else {
+                    None
+                }
+            }
+        };
+        compiled.push(crate::query_planner::operators::aggregate::AggregateSpec {
+            func,
+            arg,
+            alias: spec.alias.clone(),
+        });
+    }
+    Ok(compiled)
+}

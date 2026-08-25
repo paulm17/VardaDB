@@ -2816,9 +2816,34 @@ impl SqliteResolver {
         metrics::counter!("vardadb_planner_access_total", "shape" => built.shape.clone())
             .increment(1);
 
-        let count = match built.root.execute(&mut ctx) {
-            crate::query_planner::operators::FlowResult::Rows(batches) => {
-                batches.into_iter().map(|b| b.len()).sum()
+        // Stage 3.2: counting flows through the hash-aggregate operator
+        // (`count(Int(1))`, no grouping) over the same source pipeline, so
+        // counts and scans share one execution model. Aggregating a constant
+        // cannot fail; any upstream pipeline error keeps the legacy `0`.
+        let aggregate = {
+            use crate::query_planner::function::default_aggregate_registry;
+            use crate::query_planner::ir::{LogicalExpr, QueryValue};
+            use crate::query_planner::physical_expr::compile_arc;
+            let spec = crate::query_planner::operators::aggregate::AggregateSpec {
+                func: default_aggregate_registry()
+                    .get("count")
+                    .expect("count builtin registered"),
+                arg: Some(
+                    compile_arc(&LogicalExpr::Value(QueryValue::Int(1)))
+                        .expect("literal compiles"),
+                ),
+                alias: "count".to_string(),
+            };
+            crate::query_planner::operators::aggregate::HashAggregateOperator::new(
+                built.root,
+                vec![spec],
+                Vec::new(),
+            )
+        };
+        use crate::query_planner::operators::ExecOperator;
+        let count = match aggregate.execute(&mut ctx) {
+            crate::query_planner::operators::FlowResult::Rows(_) => {
+                aggregate.first_count().unwrap_or(0) as usize
             }
             _ => 0,
         };

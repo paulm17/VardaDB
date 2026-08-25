@@ -221,6 +221,21 @@ impl ExecOperator for HashAggregateOperator {
             }
         }
 
+        // Global aggregation over zero rows still yields one group (the
+        // all-defaults row: count=0, sum/min/max=Null), matching SQL
+        // `SELECT count(*) FROM t WHERE false` semantics.
+        if self.group_by.is_empty() && map.is_empty() {
+            let accs = self
+                .specs
+                .iter()
+                .map(|s| s.func.create_accumulator())
+                .collect();
+            map.insert(String::new(), GroupState {
+                key: Vec::new(),
+                accs,
+            });
+        }
+
         // Deterministic finalize order: sort by the canonical key tuple.
         let mut rows: Vec<(Vec<QueryValue>, Vec<(String, QueryValue)>)> =
             Vec::with_capacity(map.len());
