@@ -1,7 +1,7 @@
 use crate::storage::backend::Storage;
 use axum::{
     extract::{Query, State},
-    response::Html,
+    response::{Html, IntoResponse, Response},
     routing::get,
     Json, Router,
 };
@@ -24,6 +24,55 @@ where
         .route("/metrics", get(list_metrics))
         .route("/traces", get(list_traces))
         .route("/dashboard", get(dashboard_html))
+        .route("/debug/query-plans", get(list_query_plans))
+}
+
+#[derive(Deserialize)]
+struct QueryPlansParams {
+    limit: Option<usize>,
+    /// `text` renders the human-readable plans; default is JSON.
+    format: Option<String>,
+}
+
+/// Stage 2.3 planner debugging endpoint: recent pipeline captures (plan text,
+/// machine-readable plan tree, per-operator rows in/out) recorded by the
+/// query planner while serving normal traffic.
+async fn list_query_plans(Query(params): Query<QueryPlansParams>) -> Response {
+    use crate::query_planner::debug_capture;
+    let limit = params.limit.unwrap_or(20);
+    let captures = debug_capture::recent(limit);
+
+    if params.format.as_deref() == Some("text") {
+        let mut body = String::new();
+        for c in captures {
+            body.push_str(&format!(
+                "=== [{}] {} {} {} shape={} elapsed={}us\n{}\n",
+                c.captured_at_ms, c.db, c.kind, c.type_name, c.shape, c.elapsed_us, c.text
+            ));
+            for s in &c.operator_stats {
+                body.push_str(&format!(
+                    "  op {} {} rows_in={} rows_out={} us={}\n",
+                    s.kind, s.detail, s.rows_in, s.rows_out, s.elapsed_us
+                ));
+            }
+            body.push('\n');
+        }
+        return (
+            [(axum::http::header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            body,
+        )
+            .into_response();
+    }
+
+    Json(serde_json::json!({
+        "enabled": debug_capture::enabled(),
+        "count": captures.len(),
+        "plans": captures
+            .iter()
+            .map(crate::query_planner::debug_capture::CapturedPlan::to_json)
+            .collect::<Vec<_>>(),
+    }))
+    .into_response()
 }
 
 #[derive(Deserialize)]

@@ -59,6 +59,11 @@ pub const HTML: &str = r#"
          </table>
     </div>
 
+    <div class="card" style="margin-top: 20px;">
+        <h2>Query Plans</h2>
+        <div class="stat-label">Recent planner pipelines (Stage 2.3): <a href="/debug/query-plans" style="color:#4db8ff">JSON</a> &middot; <a href="/debug/query-plans?format=text&limit=50" style="color:#4db8ff">text</a></div>
+    </div>
+
     <script>
         // --- Minimal Chart Lib ---
         function drawChart(containerId, data, color) {

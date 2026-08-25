@@ -2543,8 +2543,11 @@ impl SqliteResolver {
         // sufficient here.
         let metadata = std::collections::HashMap::new();
         let runtime = crate::query_planner::adapters::runtime_for(self, &metadata);
-        let mut ctx =
-            crate::query_planner::operators::ExecContext::new(&runtime, &self.db_name);
+        let mut ctx = crate::query_planner::operators::ExecContext::new_with_explain(
+            &runtime,
+            &self.db_name,
+            crate::query_planner::debug_capture::enabled(),
+        );
         let built = crate::query_planner::operators::build_relation_pipeline(
             parent_uid,
             field_name,
@@ -2572,6 +2575,29 @@ impl SqliteResolver {
             .flat_map(|b| b.0.into_iter().map(|e| e.uid))
             .collect();
 
+        crate::query_planner::debug_capture::record(
+            crate::query_planner::debug_capture::CapturedPlan {
+                captured_at_ms: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or_default(),
+                db: self.db_name.clone(),
+                kind: "relation".to_string(),
+                type_name: format!("[parent:{}] {}", parent_uid, field_name),
+                shape: built.shape.clone(),
+                text: built
+                    .plan
+                    .as_ref()
+                    .map(crate::query_planner::render_candidate_plan)
+                    .unwrap_or_else(|| format!("relation pipeline shape={}", built.shape)),
+                plan_json: built
+                    .plan
+                    .as_ref()
+                    .map(crate::query_planner::explain::candidate_plan_json),
+                operator_stats: ctx.explain.take_stats(),
+                elapsed_us: start.elapsed().as_micros() as u64,
+            },
+        );
         if let Some(cache) = cache {
             self.preload_objects_for_uids(&uids, cache);
         }
@@ -2642,8 +2668,11 @@ impl SqliteResolver {
 
         let candidate_start = std::time::Instant::now();
         let runtime = crate::query_planner::adapters::runtime_for(self, query_metadata);
-        let mut ctx =
-            crate::query_planner::operators::ExecContext::new(&runtime, &self.db_name);
+        let mut ctx = crate::query_planner::operators::ExecContext::new_with_explain(
+            &runtime,
+            &self.db_name,
+            crate::query_planner::debug_capture::enabled(),
+        );
         let built = crate::query_planner::operators::build_scan_pipeline(
             &self.db_name,
             type_name,
@@ -2684,6 +2713,30 @@ impl SqliteResolver {
             .into_iter()
             .flat_map(|b| b.0.into_iter().map(|e| e.uid))
             .collect();
+
+        crate::query_planner::debug_capture::record(
+            crate::query_planner::debug_capture::CapturedPlan {
+                captured_at_ms: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or_default(),
+                db: self.db_name.clone(),
+                kind: "scan".to_string(),
+                type_name: type_name.to_string(),
+                shape: built.shape.clone(),
+                text: built
+                    .plan
+                    .as_ref()
+                    .map(crate::query_planner::render_candidate_plan)
+                    .unwrap_or_else(|| format!("search pipeline shape={}", built.shape)),
+                plan_json: built
+                    .plan
+                    .as_ref()
+                    .map(crate::query_planner::explain::candidate_plan_json),
+                operator_stats: ctx.explain.take_stats(),
+                elapsed_us: start.elapsed().as_micros() as u64,
+            },
+        );
 
         if let Some(cache) = cache {
             self.preload_objects_for_uids(&uids, cache);
@@ -2742,8 +2795,11 @@ impl SqliteResolver {
 
         let candidate_start = std::time::Instant::now();
         let runtime = crate::query_planner::adapters::runtime_for(self, query_metadata);
-        let mut ctx =
-            crate::query_planner::operators::ExecContext::new(&runtime, &self.db_name);
+        let mut ctx = crate::query_planner::operators::ExecContext::new_with_explain(
+            &runtime,
+            &self.db_name,
+            crate::query_planner::debug_capture::enabled(),
+        );
         let built = crate::query_planner::operators::build_count_pipeline(
             &self.db_name,
             type_name,
@@ -2766,6 +2822,30 @@ impl SqliteResolver {
             }
             _ => 0,
         };
+
+        crate::query_planner::debug_capture::record(
+            crate::query_planner::debug_capture::CapturedPlan {
+                captured_at_ms: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or_default(),
+                db: self.db_name.clone(),
+                kind: "count".to_string(),
+                type_name: type_name.to_string(),
+                shape: built.shape.clone(),
+                text: built
+                    .plan
+                    .as_ref()
+                    .map(crate::query_planner::render_candidate_plan)
+                    .unwrap_or_else(|| format!("count pipeline shape={}", built.shape)),
+                plan_json: built
+                    .plan
+                    .as_ref()
+                    .map(crate::query_planner::explain::candidate_plan_json),
+                operator_stats: ctx.explain.take_stats(),
+                elapsed_us: start.elapsed().as_micros() as u64,
+            },
+        );
 
         if crate::debug_logging() && start.elapsed().as_millis() > 10 {
             eprintln!(

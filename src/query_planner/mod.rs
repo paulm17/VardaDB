@@ -1,5 +1,6 @@
 pub mod adapters;
 pub mod context;
+pub mod debug_capture;
 pub mod explain;
 pub mod index;
 pub mod ir;

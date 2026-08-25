@@ -1,5 +1,5 @@
 use crate::query_planner::ir::{ExplainMode, LogicalFilter, LogicalQuery, QueryRoot};
-use crate::query_planner::plan::CandidatePlan;
+use crate::query_planner::plan::{CandidatePlan, CandidateSource};
 
 pub fn render_candidate_plan(plan: &CandidatePlan) -> String {
     let mut out = String::new();
@@ -131,6 +131,45 @@ fn render_filter(filter: &LogicalFilter) -> String {
 
 pub fn wants_explain(mode: ExplainMode) -> bool {
     matches!(mode, ExplainMode::Text | ExplainMode::Json)
+}
+
+/// Machine-readable candidate plan for `/debug/query-plans` (Stage 2.3).
+/// Mirrors [`render_candidate_plan`] structure: notes, source tree with
+/// nested subplans, and the residual filter.
+pub fn candidate_plan_json(plan: &CandidatePlan) -> serde_json::Value {
+    serde_json::json!({
+        "type": plan.type_name,
+        "notes": plan.notes.iter().map(|n| serde_json::json!({
+            "kind": n.kind,
+            "detail": n.detail,
+        })).collect::<Vec<_>>(),
+        "source": source_json(&plan.source),
+        "residual": plan.residual.as_ref().map(render_filter),
+    })
+}
+
+fn source_json(source: &CandidateSource) -> serde_json::Value {
+    let mut node = serde_json::json!({
+        "kind": source.kind(),
+        "detail": source.describe(),
+    });
+    let children: Vec<serde_json::Value> = match source {
+        CandidateSource::Intersection(children) | CandidateSource::Union(children) => children
+            .iter()
+            .map(|c| {
+                serde_json::json!({ "type": c.type_name, "source": source_json(&c.source) })
+            })
+            .collect(),
+        CandidateSource::RelationExpansion { child_plan, .. } => vec![serde_json::json!({
+            "type": child_plan.type_name,
+            "source": source_json(&child_plan.source),
+        })],
+        _ => Vec::new(),
+    };
+    if !children.is_empty() {
+        node["children"] = serde_json::Value::Array(children);
+    }
+    node
 }
 
 /// Maps a GraphQL-level `explain: Boolean` flag to the IR explain mode.

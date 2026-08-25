@@ -284,6 +284,22 @@ impl<'a> ExecContext<'a> {
         }
     }
 
+    /// Like [`ExecContext::new`], but with an explicit explain switch so the
+    /// `/debug/query-plans` recorder can force stat capture without enabling
+    /// global debug logging.
+    pub fn new_with_explain(
+        runtime: &'a dyn PlannerRuntime,
+        db_name: &'a str,
+        explain: bool,
+    ) -> Self {
+        ExecContext {
+            runtime,
+            db_name,
+            explain: ExplainCapture::new(explain),
+            depth: 0,
+        }
+    }
+
     pub fn depth(&self) -> usize {
         self.depth
     }
