@@ -18,10 +18,14 @@ use std::sync::OnceLock;
 use crate::query_planner::ir::QueryValue;
 use crate::query_planner::physical_expr::ExprError;
 
+pub mod aggregate;
 pub mod builtins;
 pub mod registry;
 pub mod signature;
 
+pub use aggregate::{
+    default_aggregate_registry, Accumulator, AggregateFunction, AggregateRegistry,
+};
 pub use registry::FunctionRegistry;
 pub use signature::{Param, Signature};
 
