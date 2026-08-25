@@ -210,7 +210,7 @@ impl<'a> PlannerIndexAccess for SqliteRuntime<'a> {
         op: FilterOp,
         query: &str,
         limit: Option<usize>,
-    ) -> anyhow::Result<Vec<EntityId>> {
+    ) -> anyhow::Result<Vec<(EntityId, f64)>> {
         let (strategy, require_all) = match op {
             FilterOp::AllOfTerms => ("term", true),
             FilterOp::AnyOfTerms => ("term", false),
@@ -224,7 +224,7 @@ impl<'a> PlannerIndexAccess for SqliteRuntime<'a> {
             .search_text_bm25(query, field, strategy, k, require_all)
             .into_iter()
             .filter(|(uid, _)| self.resolver.get_node_type(*uid).as_deref() == Some(type_name))
-            .map(|(uid, _score)| EntityId::typed(type_name, uid))
+            .map(|(uid, score)| (EntityId::typed(type_name, uid), score))
             .collect())
     }
 
@@ -234,8 +234,7 @@ impl<'a> PlannerIndexAccess for SqliteRuntime<'a> {
         _field: &str,
         vector: &[f64],
         limit: Option<usize>,
-    ) -> anyhow::Result<Vec<(EntityId, f64)>> {
-        let k = limit.unwrap_or(50);
+    ) -> anyhow::Result<Vec<(EntityId, f64)>> {        let k = limit.unwrap_or(50);
         Ok(self
             .resolver
             .search_vectors(vector, k)
@@ -503,7 +502,7 @@ pub mod test_stub {
             _op: FilterOp,
             _query: &str,
             _limit: Option<usize>,
-        ) -> anyhow::Result<Vec<EntityId>> {
+        ) -> anyhow::Result<Vec<(EntityId, f64)>> {
             Ok(vec![])
         }
         fn vector_search(

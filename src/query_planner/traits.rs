@@ -2,6 +2,7 @@ use crate::query_planner::ir::{
     CursorValue, EntityId, FieldPath, FilterOp, FilterPredicate, LogicalFilter, QueryRecord,
     QueryValue, SortDirection,
 };
+use std::collections::hash_map::{Entry, HashMap};
 
 pub trait PlannerCatalog {
     fn type_meta(&self, type_name: &str) -> Option<TypeMeta>;
@@ -37,6 +38,35 @@ pub struct SearchFieldMeta {
     pub strategy: SearchStrategy,
 }
 
+/// One text-search predicate extracted from a filter.
+///
+/// A filter may carry several of these (e.g. `title.allofterms` plus
+/// `body.alloftext`); they are collected deterministically (sorted by field,
+/// then strategy) and fused by [`PlannerIndexAccess::text_search_weighted`].
+/// `boost` weights a predicate's contribution to the fused ranking
+/// (`bm25`-independent, default 1.0).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TextQuerySpec {
+    pub field: String,
+    /// `"term"` (unstemmed) or `"fulltext"` (porter-stemmed).
+    pub strategy: String,
+    pub query: String,
+    pub require_all: bool,
+    pub boost: f64,
+}
+
+impl Default for TextQuerySpec {
+    fn default() -> Self {
+        TextQuerySpec {
+            field: String::new(),
+            strategy: "fulltext".to_string(),
+            query: String::new(),
+            require_all: false,
+            boost: 1.0,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SearchStrategy {
     Term,
@@ -65,6 +95,10 @@ pub trait PlannerIndexAccess {
         limit: Option<usize>,
     ) -> anyhow::Result<Vec<EntityId>>;
 
+    /// BM25 keyword search returning `(entity, score)` pairs in relevance
+    /// order (best first). Scores are raw FTS5 `bm25()` values negated to
+    /// positive, so higher is better; they are advisory ranking signals and
+    /// are not comparable across different fields or indexes.
     fn text_search(
         &self,
         type_name: &str,
@@ -72,7 +106,52 @@ pub trait PlannerIndexAccess {
         op: FilterOp,
         query: &str,
         limit: Option<usize>,
-    ) -> anyhow::Result<Vec<EntityId>>;
+    ) -> anyhow::Result<Vec<(EntityId, f64)>>;
+
+    /// Weighted multi-predicate text search: runs each spec through
+    /// [`PlannerIndexAccess::text_search`] and fuses the per-field rankings
+    /// with weighted Reciprocal Rank Fusion
+    /// (`score(uid) = Σ boost_i / (60 + rank_i)`), higher-better, ties broken
+    /// by ascending uid. The default implementation requires no runtime
+    /// support beyond [`PlannerIndexAccess::text_search`].
+    fn text_search_weighted(
+        &self,
+        type_name: &str,
+        specs: &[TextQuerySpec],
+        limit: Option<usize>,
+    ) -> anyhow::Result<Vec<(EntityId, f64)>> {
+        const RRF_K: f64 = 60.0;
+        let k = limit.unwrap_or(10_000);
+        let mut acc: HashMap<u64, (f64, EntityId)> = HashMap::new();
+        for spec in specs {
+            let op = match (spec.strategy.as_str(), spec.require_all) {
+                ("term", true) => FilterOp::AllOfTerms,
+                ("term", false) => FilterOp::AnyOfTerms,
+                ("fulltext", true) => FilterOp::AllOfText,
+                _ => FilterOp::AnyOfText,
+            };
+            let rows = self.text_search(type_name, &spec.field, op, &spec.query, Some(k))?;
+            for (idx, (id, _score)) in rows.into_iter().enumerate() {
+                let contribution = spec.boost / (RRF_K + idx as f64 + 1.0);
+                match acc.entry(id.uid) {
+                    Entry::Occupied(mut e) => e.get_mut().0 += contribution,
+                    Entry::Vacant(e) => {
+                        e.insert((contribution, id));
+                    }
+                }
+            }
+        }
+        let mut out: Vec<(EntityId, f64)> = acc
+            .into_values()
+            .map(|(score, id)| (id, score))
+            .collect();
+        out.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.uid.cmp(&b.0.uid))
+        });
+        Ok(out)
+    }
 
     fn vector_search(
         &self,

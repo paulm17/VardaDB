@@ -31,9 +31,50 @@ pub struct RequestCache {
     resolved_fields: Mutex<HashMap<(u64, String), Option<Value>>>,
     related_uids: Mutex<HashMap<(u64, String), Vec<u64>>>,
     loaded_objects: Mutex<HashMap<u64, HashMap<String, Value>>>,
+    search_scores: Mutex<HashMap<u64, f64>>,
+    snippet_context: Mutex<Option<SnippetContext>>,
+}
+
+/// FTS query context captured by keyword/hybrid scans so the virtual
+/// `_snippet` field can lazily render FTS5 `snippet()` excerpts per row
+/// without paying snippet cost on rows that never request it.
+#[derive(Debug, Clone)]
+pub struct SnippetContext {
+    /// `"fts_data"` or `"fts_term_data"`.
+    pub table: &'static str,
+    /// Composite index field (`"name"` for term, `"text.fulltext"` style).
+    pub index_field: String,
+    /// Prebuilt FTS5 MATCH expression for the user query.
+    pub match_expr: String,
 }
 
 impl RequestCache {
+    /// Merge relevance scores captured by a search pipeline into the
+    /// per-request registry backing the virtual `_score` field.
+    pub fn insert_search_scores(&self, scores: HashMap<u64, f64>) {
+        if scores.is_empty() {
+            return;
+        }
+        self.search_scores.lock().unwrap().extend(scores);
+    }
+
+    pub fn get_search_score(&self, uid: u64) -> Option<f64> {
+        self.search_scores.lock().unwrap().get(&uid).copied()
+    }
+
+    /// Record the latest keyword-search context (first writer wins so a
+    /// subsequent non-text pipeline cannot erase it mid-request).
+    pub fn set_snippet_context(&self, sctx: SnippetContext) {
+        let mut guard = self.snippet_context.lock().unwrap();
+        if guard.is_none() {
+            *guard = Some(sctx);
+        }
+    }
+
+    pub fn get_snippet_context(&self) -> Option<SnippetContext> {
+        self.snippet_context.lock().unwrap().clone()
+    }
+
     pub fn get_resolved(&self, uid: u64, field_name: &str) -> Option<Option<Value>> {
         self.resolved_fields
             .lock()
@@ -82,6 +123,23 @@ impl RequestCache {
 pub trait Resolver {
     // Resolve a specific field for an entity (UID)
     fn resolve(&self, uid: u64, field_name: &str) -> Option<Value>;
+
+    /// Lazily render an FTS5 `snippet()` excerpt for one row against the
+    /// keyword-search context captured during the scan. Default: unsupported.
+    #[allow(clippy::too_many_arguments)]
+    fn snippet_for_uid(
+        &self,
+        _uid: u64,
+        _table: &str,
+        _index_field: &str,
+        _match_expr: &str,
+        _before: &str,
+        _after: &str,
+        _ellipsis: &str,
+        _tokens: usize,
+    ) -> Option<String> {
+        None
+    }
 
     fn resolve_with_cache(
         &self,
@@ -154,6 +212,20 @@ pub trait Resolver {
         _cache: &RequestCache,
     ) -> usize {
         self.count_nodes(type_name, filter, uniques, near_vector, query_metadata)
+    }
+
+    /// Facet aggregation: counts per distinct stored value of `group_field`
+    /// over the filtered candidate set. Returns `(value, count)` pairs sorted
+    /// by count descending then value ascending.
+    fn facet_nodes(
+        &self,
+        _type_name: &str,
+        _filter: std::collections::HashMap<String, Value>,
+        _group_field: &str,
+        _limit: Option<usize>,
+        _query_metadata: &HashMap<String, QueryTypeMetadata>,
+    ) -> Vec<(String, i64)> {
+        Vec::new()
     }
 
     // Resolve a list of related nodes (1:M) with filter/sort/pagination

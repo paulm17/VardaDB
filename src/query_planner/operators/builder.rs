@@ -29,12 +29,13 @@ use crate::query_planner::operators::pagination::{
 };
 use crate::query_planner::operators::sort::SortOperator;
 use crate::query_planner::operators::source::{
-    build_source_tree, HybridSearchScan, OrderedIndexScan, TextBM25Scan, VecSource, VectorKNNScan,
+    build_source_tree, HybridSearchScan, MultiTextScan, OrderedIndexScan, TextBM25Scan, VecSource,
+    VectorKNNScan,
 };
 use crate::query_planner::operators::{ExecContext, ExecOperator, FlowResult};
 use crate::query_planner::plan::{CandidatePlan, RawFilterMap};
 use crate::query_planner::planner::plan_candidates;
-use crate::query_planner::traits::PlannerRuntime;
+use crate::query_planner::traits::{PlannerRuntime, TextQuerySpec};
 use crate::query_planner::{lower_filter_map, lower_sort_map};
 
 /// A fully assembled pipeline plus the metadata the dispatcher needs for
@@ -73,6 +74,20 @@ enum BaseSource {
     Planned(CandidatePlan),
 }
 
+/// Highest-boost spec wins; input order (deterministic field/strategy sort)
+/// breaks ties.
+fn primary_spec(specs: &[TextQuerySpec]) -> &TextQuerySpec {
+    specs
+        .iter()
+        .fold(specs.first().expect("non-empty specs"), |best, s| {
+            if s.boost > best.boost {
+                s
+            } else {
+                best
+            }
+        })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_base_source(
     db_name: &str,
@@ -81,23 +96,29 @@ fn build_base_source(
     uniques: &[String],
     metadata: &HashMap<String, QueryTypeMetadata>,
     near_vector: Option<&Vec<f64>>,
-    text_search: Option<&(String, String, String, bool)>,
+    text_specs: &[TextQuerySpec],
     k: usize,
     hybrid_shape: &'static str,
 ) -> BaseSource {
-    match (near_vector, text_search) {
-        (Some(vec), Some((field, _, query, require_all))) => BaseSource::Search(
-            Box::new(HybridSearchScan {
-                type_name: type_name.to_string(),
-                field: field.clone(),
-                text_query: query.clone(),
-                require_all: *require_all,
-                vector: vec.clone(),
-                limit: Some(k),
-            }),
-            hybrid_shape,
-        ),
-        (Some(vec), None) => BaseSource::Search(
+    match (near_vector, text_specs.is_empty()) {
+        // Hybrid fusion needs one text query; with multiple predicates the
+        // highest-boosted one rides the hybrid path and the rest apply as
+        // residual filters downstream.
+        (Some(vec), false) => {
+            let spec = primary_spec(text_specs);
+            BaseSource::Search(
+                Box::new(HybridSearchScan {
+                    type_name: type_name.to_string(),
+                    field: spec.field.clone(),
+                    text_query: spec.query.clone(),
+                    require_all: spec.require_all,
+                    vector: vec.clone(),
+                    limit: Some(k),
+                }),
+                hybrid_shape,
+            )
+        }
+        (Some(vec), true) => BaseSource::Search(
             Box::new(VectorKNNScan {
                 type_name: type_name.to_string(),
                 field: String::new(),
@@ -106,18 +127,31 @@ fn build_base_source(
             }),
             "vector_search",
         ),
-        (None, Some((field, strategy, query, require_all))) => BaseSource::Search(
-            Box::new(text_search_op(
-                type_name,
-                field,
-                strategy,
-                query,
-                *require_all,
-                k,
-            )),
-            "text_bm25",
+        (None, false) if text_specs.len() == 1 => {
+            let spec = &text_specs[0];
+            BaseSource::Search(
+                Box::new(text_search_op(
+                    type_name,
+                    &spec.field,
+                    &spec.strategy,
+                    &spec.query,
+                    spec.require_all,
+                    k,
+                )),
+                "text_bm25",
+            )
+        }
+        (None, false) => BaseSource::Search(
+            Box::new(MultiTextScan {
+                type_name: type_name.to_string(),
+                specs: text_specs.to_vec(),
+                limit: Some(k),
+            }),
+            "multi_text_bm25",
         ),
-        (None, None) => BaseSource::Planned(plan_candidates(db_name, type_name, filter, uniques, metadata)),
+        (None, true) => {
+            BaseSource::Planned(plan_candidates(db_name, type_name, filter, uniques, metadata))
+        }
     }
 }
 
@@ -131,7 +165,7 @@ pub fn build_scan_pipeline(
     after: Option<&str>,
     offset: Option<usize>,
     near_vector: Option<&Vec<f64>>,
-    text_search: Option<&(String, String, String, bool)>,
+    text_specs: &[TextQuerySpec],
     uniques: &[String],
     metadata: &HashMap<String, QueryTypeMetadata>,
     runtime: &dyn PlannerRuntime,
@@ -145,7 +179,7 @@ pub fn build_scan_pipeline(
         uniques,
         metadata,
         near_vector,
-        text_search,
+        text_specs,
         first.unwrap_or(50) * 4,
         "hybrid_search",
     );
@@ -346,7 +380,7 @@ pub fn build_count_pipeline(
     type_name: &str,
     filter: &RawFilterMap,
     near_vector: Option<&Vec<f64>>,
-    text_search: Option<&(String, String, String, bool)>,
+    text_specs: &[TextQuerySpec],
     uniques: &[String],
     metadata: &HashMap<String, QueryTypeMetadata>,
     runtime: &dyn PlannerRuntime,
@@ -358,7 +392,7 @@ pub fn build_count_pipeline(
         uniques,
         metadata,
         near_vector,
-        text_search,
+        text_specs,
         10_000,
         "vector_search",
     );

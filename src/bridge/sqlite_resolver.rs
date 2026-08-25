@@ -735,6 +735,18 @@ impl SqliteResolver {
         Ok(())
     }
 
+    /// FTS routing for a search strategy: returns `(table, plain_field_name)`.
+    /// `term` and `trigram` live in dedicated tables under the plain field
+    /// name; every other strategy indexes into the stemmed fulltext table
+    /// under the composite `{field}.{strategy}` label.
+    fn fts_route(strategy: &str) -> (&'static str, bool) {
+        match strategy {
+            "term" => ("fts_term_data", true),
+            "trigram" => ("fts_trigram_data", true),
+            _ => ("fts_data", false),
+        }
+    }
+
     fn write_term_index(
         &self,
         uid: u64,
@@ -742,17 +754,13 @@ impl SqliteResolver {
         text: &str,
         strategy: &str,
     ) -> Result<(), String> {
-        let index_field = if strategy == "term" {
+        let (table, plain) = Self::fts_route(strategy);
+        let index_field = if plain {
             field.to_string()
         } else {
             format!("{}.{}", field, strategy)
         };
         let uid_i64 = uid as i64;
-        let table = if strategy == "term" {
-            "fts_term_data"
-        } else {
-            "fts_data"
-        };
         let sql_del = format!("DELETE FROM {} WHERE uid = ?1 AND field = ?2", table);
         let sql_ins = format!(
             "INSERT INTO {}(uid, field, text_content) VALUES (?1, ?2, ?3)",
@@ -777,17 +785,13 @@ impl SqliteResolver {
         _text: &str,
         strategy: &str,
     ) -> Result<(), String> {
-        let index_field = if strategy == "term" {
+        let (table, plain) = Self::fts_route(strategy);
+        let index_field = if plain {
             field.to_string()
         } else {
             format!("{}.{}", field, strategy)
         };
         let uid_i64 = uid as i64;
-        let table = if strategy == "term" {
-            "fts_term_data"
-        } else {
-            "fts_data"
-        };
         let sql_del = format!("DELETE FROM {} WHERE uid = ?1 AND field = ?2", table);
         let backend = self.storage.backends.get(&self.db_name).unwrap().clone();
         backend
@@ -808,24 +812,15 @@ impl SqliteResolver {
         k: usize,
         require_all: bool,
     ) -> Vec<(u64, f64)> {
-        let index_field = if strategy == "term" {
+        let (table, plain) = Self::fts_route(strategy);
+        let index_field = if plain {
             field.to_string()
         } else {
             format!("{}.{}", field, strategy)
         };
-        let safe_query: String = query
-            .chars()
-            .filter(|c| c.is_alphanumeric() || c.is_whitespace())
-            .collect();
-        let terms: Vec<&str> = safe_query.split_whitespace().collect();
-        if terms.is_empty() {
-            return vec![];
-        }
-
-        let fts_query = if require_all {
-            terms.join(" AND ")
-        } else {
-            terms.join(" OR ")
+        let fts_query = match crate::bridge::fts_query::build_fts_match_query(query, require_all) {
+            Some(q) => q,
+            None => return vec![],
         };
 
         let backend = self.storage.backends.get(&self.db_name).unwrap().clone();
@@ -834,11 +829,6 @@ impl SqliteResolver {
             Err(_) => return vec![],
         };
 
-        let table = if strategy == "term" {
-            "fts_term_data"
-        } else {
-            "fts_data"
-        };
         let sql = format!("SELECT uid, bm25({}) FROM {} WHERE text_content MATCH ?1 AND field = ?2 ORDER BY rank LIMIT ?3", table, table);
         let out = (|| -> Result<Vec<(u64, f64)>, rusqlite::Error> {
             // Note: ranking in sqlite FTS is negative (most negative is best). So we negate it to positive.
@@ -865,6 +855,50 @@ impl SqliteResolver {
         out
     }
 
+    /// Lazily render an FTS5 `snippet()` excerpt for one row against the
+    /// keyword-search context captured during the scan (`_snippet` virtual
+    /// field). Re-runs the stored MATCH restricted to this uid; `None` when
+    /// the row no longer matches. Column 2 is text_content (uid=0, field=1
+    /// are UNINDEXED).
+    pub fn snippet_for_uid(
+        &self,
+        uid: u64,
+        table: &str,
+        index_field: &str,
+        match_expr: &str,
+        before: &str,
+        after: &str,
+        ellipsis: &str,
+        tokens: usize,
+    ) -> Option<String> {
+        let sql = format!(
+            "SELECT snippet({t}, 2, '{b}', '{a}', '{e}', {n}) FROM {t} \
+             WHERE uid = ?1 AND text_content MATCH ?2 AND field = ?3",
+            t = table,
+            b = before.replace('\'', "''"),
+            a = after.replace('\'', "''"),
+            e = ellipsis.replace('\'', "''"),
+            n = tokens
+        );
+        let backend = self.storage.backends.get(&self.db_name)?.clone();
+        let conn = backend.get_reader().ok()?;
+        let out = (|| -> Result<Option<String>, rusqlite::Error> {
+            let mut stmt = conn.prepare(&sql)?;
+            let mut rows =
+                stmt.query_map(rusqlite::params![uid as i64, match_expr, index_field], |row| {
+                    row.get::<_, Option<String>>(0)
+                })?;
+            match rows.next() {
+                Some(Ok(v)) => Ok(v),
+                _ => Ok(None),
+            }
+        })()
+        .ok()
+        .flatten();
+        backend.return_reader(conn);
+        out
+    }
+
     // Hybrid Search (RRF)
     pub fn search_hybrid(
         &self,
@@ -875,20 +909,11 @@ impl SqliteResolver {
         require_all: bool,
     ) -> Vec<(u64, f64)> {
         let index_field = format!("{}.fulltext", field); // strategy is assumed 'fulltext'
-        let safe_query: String = text_query
-            .chars()
-            .filter(|c| c.is_alphanumeric() || c.is_whitespace())
-            .collect();
-        let terms: Vec<&str> = safe_query.split_whitespace().collect();
-        if terms.is_empty() {
-            return vec![];
-        }
-
-        let fts_query = if require_all {
-            terms.join(" AND ")
-        } else {
-            terms.join(" OR ")
-        };
+        let fts_query =
+            match crate::bridge::fts_query::build_fts_match_query(text_query, require_all) {
+                Some(q) => q,
+                None => return vec![],
+            };
 
         let vec_f32: Vec<f32> = vector.iter().map(|v| *v as f32).collect();
         let vec_bytes =
@@ -2489,28 +2514,70 @@ impl SqliteResolver {
     }
 
 
-    /// Shared legacy text-predicate detection over the raw GraphQL filter map.
-    /// Returns `(field, strategy, query, require_all)`.
-    fn detect_text_search(
-        filter: &std::collections::HashMap<String, Value>,
-    ) -> Option<(String, String, String, bool)> {
-        for (field, val) in filter {
-            if let Value::Object(obj) = val {
-                if let Some(Value::String(s)) = obj.get("allofterms") {
-                    return Some((field.clone(), "term".to_string(), s.clone(), true));
-                }
-                if let Some(Value::String(s)) = obj.get("anyofterms") {
-                    return Some((field.clone(), "term".to_string(), s.clone(), false));
-                }
-                if let Some(Value::String(s)) = obj.get("alloftext") {
-                    return Some((field.clone(), "fulltext".to_string(), s.clone(), true));
-                }
-                if let Some(Value::String(s)) = obj.get("anyoftext") {
-                    return Some((field.clone(), "fulltext".to_string(), s.clone(), false));
+    /// Collect every text-search predicate from a GraphQL filter map.
+    ///
+    /// Replaces the legacy first-match `detect_text_search`, whose HashMap
+    /// iteration order made multi-predicate filters nondeterministic. Specs
+    /// are sorted by `(field, strategy)` so pipeline construction is stable.
+    /// An optional numeric `boost` key inside a field's condition object
+    /// weights that predicate's fusion contribution, and an optional string
+    /// `strategy` key (`term` | `fulltext` | `trigram`) overrides the
+    /// op-derived index strategy; both keys are stripped from the condition
+    /// object so residual filter evaluation never sees them.
+    fn collect_text_specs(
+        filter: &mut std::collections::HashMap<String, Value>,
+    ) -> Vec<crate::query_planner::traits::TextQuerySpec> {
+        const TEXT_OPS: [(&str, &str, bool); 4] = [
+            ("allofterms", "term", true),
+            ("anyofterms", "term", false),
+            ("alloftext", "fulltext", true),
+            ("anyoftext", "fulltext", false),
+        ];
+        const VALID_STRATEGIES: [&str; 3] = ["term", "fulltext", "trigram"];
+        let mut specs = Vec::new();
+        for (field, val) in filter.iter_mut() {
+            let Value::Object(obj) = val else {
+                continue;
+            };
+            let mut boost = 1.0f64;
+            if let Some(Value::Number(n)) = obj.get("boost") {
+                if let Some(b) = n.as_f64() {
+                    boost = b;
                 }
             }
+            let strategy_override: Option<String> = match obj.get("strategy") {
+                Some(Value::String(s)) if VALID_STRATEGIES.contains(&s.as_str()) => {
+                    Some(s.clone())
+                }
+                _ => None,
+            };
+            for (op_key, strategy, require_all) in TEXT_OPS {
+                if let Some(Value::String(s)) = obj.get(op_key) {
+                    specs.push(crate::query_planner::traits::TextQuerySpec {
+                        field: field.clone(),
+                        strategy: strategy_override
+                            .clone()
+                            .unwrap_or_else(|| strategy.to_string()),
+                        query: s.clone(),
+                        require_all,
+                        boost,
+                    });
+                }
+            }
+            // Strip planner-only keys before residual evaluation.
+            if obj.contains_key("boost") {
+                obj.shift_remove("boost");
+            }
+            if obj.contains_key("strategy") {
+                obj.shift_remove("strategy");
+            }
         }
-        None
+        specs.sort_by(|a, b| {
+            a.field
+                .cmp(&b.field)
+                .then_with(|| a.strategy.cmp(&b.strategy))
+        });
+        specs
     }
 
     /// Thin dispatcher over the planner operator pipeline (Stage 2.1 cutover).
@@ -2531,8 +2598,9 @@ impl SqliteResolver {
         cache: Option<&RequestCache>,
     ) -> Vec<u64> {
         let start = std::time::Instant::now();
-        let text_search = Self::detect_text_search(&filter);
-        let has_text_search = text_search.is_some();
+        let mut filter = filter;
+        let text_specs = Self::collect_text_specs(&mut filter);
+        let has_text_search = !text_specs.is_empty();
 
         let candidate_start = std::time::Instant::now();
         let runtime = crate::query_planner::adapters::runtime_for(self, query_metadata);
@@ -2550,7 +2618,7 @@ impl SqliteResolver {
             after.as_deref(),
             offset,
             near_vector.as_ref(),
-            text_search.as_ref(),
+            &text_specs,
             uniques,
             query_metadata,
             &runtime,
@@ -2577,6 +2645,18 @@ impl SqliteResolver {
             crate::query_planner::operators::FlowResult::Rows(batches) => batches,
             _ => Vec::new(),
         };
+        // Search scans record relevance scores in the exec context; hand them
+        // to the request cache so the virtual `_score` field can resolve them.
+        if !ctx.scores.is_empty() {
+            if let Some(cache) = cache {
+                cache.insert_search_scores(std::mem::take(&mut ctx.scores));
+            }
+        }
+        if let Some(sctx) = ctx.snippet_ctx.take() {
+            if let Some(cache) = cache {
+                cache.set_snippet_context(sctx);
+            }
+        }
         let uids: Vec<u64> = batches
             .into_iter()
             .flat_map(|b| b.0.into_iter().map(|e| e.uid))
@@ -2647,8 +2727,9 @@ impl SqliteResolver {
         _cache: Option<&RequestCache>,
     ) -> usize {
         let start = std::time::Instant::now();
-        let text_search = Self::detect_text_search(&filter);
-        let has_text_search = text_search.is_some();
+        let mut filter = filter;
+        let text_specs = Self::collect_text_specs(&mut filter);
+        let has_text_search = !text_specs.is_empty();
 
         // Fast path preserved from legacy: an unfiltered plain count uses the
         // O(prefix) SQL counter without assembling a pipeline.
@@ -2673,7 +2754,7 @@ impl SqliteResolver {
             type_name,
             &filter,
             near_vector.as_ref(),
-            text_search.as_ref(),
+            &text_specs,
             uniques,
             query_metadata,
             &runtime,
@@ -2755,6 +2836,120 @@ impl SqliteResolver {
         }
 
         count
+    }
+
+    fn query_value_facet_label(v: &crate::query_planner::QueryValue) -> String {
+        use crate::query_planner::QueryValue;
+        match v {
+            QueryValue::Null => String::new(),
+            QueryValue::Bool(b) => b.to_string(),
+            QueryValue::Int(n) => n.to_string(),
+            QueryValue::Float(f) => f.to_string(),
+            QueryValue::String(s) => s.clone(),
+            other => format!("{:?}", other),
+        }
+    }
+
+    /// Facet aggregation over the same scan-pipeline model as counts:
+    /// candidate selection runs through [`build_scan_pipeline`], then a
+    /// hash-aggregate groups rows by the stored value of `group_field` and
+    /// counts them. Output is `(value, count)` sorted count-desc, value-asc,
+    /// truncated to `limit`.
+    pub fn facet_nodes_internal(
+        &self,
+        type_name: &str,
+        filter: std::collections::HashMap<String, Value>,
+        group_field: &str,
+        limit: Option<usize>,
+        uniques: &[String],
+        query_metadata: &std::collections::HashMap<
+            String,
+            crate::engine::resolver::QueryTypeMetadata,
+        >,
+    ) -> Vec<(String, i64)> {
+        let start = std::time::Instant::now();
+        let mut filter = filter;
+        let text_specs = Self::collect_text_specs(&mut filter);
+
+        let runtime = crate::query_planner::adapters::runtime_for(self, query_metadata);
+        let mut ctx = crate::query_planner::operators::ExecContext::new_with_explain(
+            &runtime,
+            &self.db_name,
+            crate::query_planner::debug_capture::enabled(),
+        );
+        let empty_sort: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
+        let built = crate::query_planner::operators::build_scan_pipeline(
+            &self.db_name,
+            type_name,
+            &filter,
+            &empty_sort,
+            None,
+            None,
+            None,
+            None,
+            &text_specs,
+            uniques,
+            query_metadata,
+            &runtime,
+            &mut ctx,
+        );
+
+        use crate::query_planner::function::default_aggregate_registry;
+        use crate::query_planner::ir::{FieldPath, LogicalExpr, QueryValue};
+        use crate::query_planner::operators::aggregate::{AggregateSpec, HashAggregateOperator};
+        use crate::query_planner::physical_expr::compile_arc;
+        let spec = AggregateSpec {
+            func: default_aggregate_registry()
+                .get("count")
+                .expect("count builtin registered"),
+            arg: Some(
+                compile_arc(&LogicalExpr::Value(QueryValue::Int(1)))
+                    .expect("literal compiles"),
+            ),
+            alias: "count".to_string(),
+        };
+        let group_expr = compile_arc(&LogicalExpr::Field(FieldPath::field(group_field)))
+            .expect("field group key compiles");
+        let aggregate =
+            HashAggregateOperator::new(built.root, vec![spec], vec![group_expr]);
+        use crate::query_planner::operators::ExecOperator;
+        let mut facets: Vec<(String, i64)> = match aggregate.execute(&mut ctx) {
+            crate::query_planner::operators::FlowResult::Rows(_) => aggregate
+                .take_groups()
+                .into_iter()
+                .map(|group| {
+                    let value = group
+                        .key
+                        .first()
+                        .map(Self::query_value_facet_label)
+                        .unwrap_or_default();
+                    let count = match group.outputs.first() {
+                        Some((_, QueryValue::Int(n))) => *n,
+                        _ => 0,
+                    };
+                    (value, count)
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+
+        metrics::counter!("vardadb_planner_access_total", "shape" => format!("facet_{}", built.shape))
+            .increment(1);
+        facets.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        if let Some(l) = limit {
+            facets.truncate(l);
+        }
+        if crate::debug_logging() && start.elapsed().as_millis() > 10 {
+            eprintln!(
+                "[RESOLVER] facet_nodes {}.{} group_by={} groups={} total_ms={}",
+                self.db_name,
+                type_name,
+                group_field,
+                facets.len(),
+                start.elapsed().as_millis(),
+            );
+        }
+        facets
     }
 }
 
@@ -2876,6 +3071,23 @@ impl Resolver for SqliteResolver {
 
     fn resolve(&self, uid: u64, field_name: &str) -> Option<Value> {
         self.resolve_cached(uid, field_name, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn snippet_for_uid(
+        &self,
+        uid: u64,
+        table: &str,
+        index_field: &str,
+        match_expr: &str,
+        before: &str,
+        after: &str,
+        ellipsis: &str,
+        tokens: usize,
+    ) -> Option<String> {
+        SqliteResolver::snippet_for_uid(
+            self, uid, table, index_field, match_expr, before, after, ellipsis, tokens,
+        )
     }
 
     fn resolve_with_cache(
@@ -3055,6 +3267,20 @@ impl Resolver for SqliteResolver {
             query_metadata,
             Some(cache),
         )
+    }
+
+    fn facet_nodes(
+        &self,
+        type_name: &str,
+        filter: std::collections::HashMap<String, Value>,
+        group_field: &str,
+        limit: Option<usize>,
+        query_metadata: &std::collections::HashMap<
+            String,
+            crate::engine::resolver::QueryTypeMetadata,
+        >,
+    ) -> Vec<(String, i64)> {
+        self.facet_nodes_internal(type_name, filter, group_field, limit, &[], query_metadata)
     }
 
     fn update_node(

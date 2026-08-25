@@ -142,6 +142,16 @@ impl Storage {
         std::thread::spawn(move || {
             dbg_println!("Storage: Vector Background Worker Started");
             while let Ok((uid, vec)) = rx.recv() {
+                let expected = worker_backend.vector_dims();
+                if vec.len() != expected {
+                    error!(
+                        uid = uid,
+                        got = vec.len(),
+                        expected = expected,
+                        "Storage: dropping vector with mismatched dimensionality"
+                    );
+                    continue;
+                }
                 let vec_f32: Vec<f32> = vec.iter().map(|v| *v as f32).collect();
                 let vec_bytes = unsafe {
                     std::slice::from_raw_parts(vec_f32.as_ptr() as *const u8, vec_f32.len() * 4)
@@ -758,6 +768,18 @@ impl Storage {
     // --- Vector Operations ---
 
     pub fn put_vector(&self, uid: u64, vector: Vec<f64>) -> anyhow::Result<()> {
+        let expected = self
+            .backends
+            .get("default")
+            .map(|b| b.vector_dims())
+            .unwrap_or_else(crate::storage::sqlite_backend::effective_vector_dims);
+        if vector.len() != expected {
+            return Err(anyhow::anyhow!(
+                "Vector dimension mismatch: got {}, vec_data expects {}",
+                vector.len(),
+                expected
+            ));
+        }
         self.vector_tx
             .send((uid, vector))
             .map_err(|e| anyhow::anyhow!("Failed to send vector to worker: {}", e))?;
@@ -779,14 +801,22 @@ impl Storage {
     }
 
     pub fn search_vectors(&self, query: &[f64], k: usize) -> anyhow::Result<Vec<(u64, f64)>> {
-        let vec_f32: Vec<f32> = query.iter().map(|v| *v as f32).collect();
-        let vec_bytes =
-            unsafe { std::slice::from_raw_parts(vec_f32.as_ptr() as *const u8, vec_f32.len() * 4) };
-
         let backend = self
             .backends
             .get("default")
             .ok_or(anyhow::anyhow!("Missing default DB"))?;
+        let expected = backend.vector_dims();
+        if query.len() != expected {
+            return Err(anyhow::anyhow!(
+                "Query vector dimension mismatch: got {}, vec_data expects {}",
+                query.len(),
+                expected
+            ));
+        }
+        let vec_f32: Vec<f32> = query.iter().map(|v| *v as f32).collect();
+        let vec_bytes =
+            unsafe { std::slice::from_raw_parts(vec_f32.as_ptr() as *const u8, vec_f32.len() * 4) };
+
         let conn = backend.get_reader()?;
         let res = (|| -> anyhow::Result<Vec<(u64, f64)>> {
             let mut stmt = conn.prepare("SELECT uid, distance FROM vec_data WHERE embedding MATCH ?1 AND k = ?2 ORDER BY distance")?;

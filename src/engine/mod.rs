@@ -4,4 +4,3 @@ pub mod id;
 pub mod resolver;
 pub mod scalars;
 pub mod schema;
-pub mod tokenizer;

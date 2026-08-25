@@ -255,7 +255,7 @@ mod mock {
     impl PlannerIndexAccess for KnnRuntime {
         fn lookup_unique(&self, _: &str, _: &str, _: &QueryValue) -> anyhow::Result<Option<EntityId>> { Ok(None) }
         fn ordered_scan(&self, _: &str, _: &str, _: SortDirection, _: Option<&CursorValue>, _: Option<usize>) -> anyhow::Result<Vec<EntityId>> { Ok(vec![]) }
-        fn text_search(&self, _: &str, _: &str, _: FilterOp, _: &str, _: Option<usize>) -> anyhow::Result<Vec<EntityId>> { Ok(vec![]) }
+        fn text_search(&self, _: &str, _: &str, _: FilterOp, _: &str, _: Option<usize>) -> anyhow::Result<Vec<(EntityId, f64)>> { Ok(vec![]) }
         fn vector_search(&self, _t: &str, _f: &str, _v: &[f64], limit: Option<usize>) -> anyhow::Result<Vec<(EntityId, f64)>> {
             self.calls.lock().unwrap().push(format!("vector:{_t}"));
             // Distance-ascending order, deliberately unsorted uid values.

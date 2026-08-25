@@ -194,6 +194,12 @@ pub async fn init_system(config: crate::config::VardaConfig) -> (Arc<ServerState
     let _port = config.server.port;
     println!("VardaDB Engine v0.1.0 initializing...");
 
+    // 0. Apply native search configuration before any table is created.
+    if let Some(dims) = config.search.vector_dims {
+        crate::storage::sqlite_backend::set_configured_vector_dims(dims);
+        println!("Vector index dimensionality configured: {}", dims);
+    }
+
     // 1. Initialize Storage
     let storage_path = config.server.storage_path.clone();
     let storage = Arc::new(

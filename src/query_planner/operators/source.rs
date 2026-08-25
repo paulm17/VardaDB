@@ -236,14 +236,101 @@ impl ExecOperator for TextBM25Scan {
     }
     fn execute(&self, ctx: &mut ExecContext) -> FlowResult<Vec<RowBatch>> {
         let start = std::time::Instant::now();
-        let ids = match ctx
+        let scored = match ctx
             .runtime
             .text_search(&self.type_name, &self.field, self.op.clone(), &self.query, self.limit)
         {
-            Ok(ids) => ids,
+            Ok(scored) => scored,
             Err(e) => return FlowResult::Error(PlannerError::Storage(e.to_string())),
         };
-        let out = vec![RowBatch(ids)];
+        for (id, score) in &scored {
+            ctx.scores.insert(id.uid, *score);
+        }
+        // Capture the FTS context so `_snippet` can render excerpts lazily.
+        if ctx.snippet_ctx.is_none() {
+            let (strategy, require_all) = match self.op {
+                FilterOp::AllOfTerms => ("term", true),
+                FilterOp::AnyOfTerms => ("term", false),
+                FilterOp::AllOfText => ("fulltext", true),
+                _ => ("fulltext", false),
+            };
+            if let Some(match_expr) =
+                crate::bridge::fts_query::build_fts_match_query(&self.query, require_all)
+            {
+                let (table, plain) = match strategy {
+                    "term" => ("fts_term_data", true),
+                    "trigram" => ("fts_trigram_data", true),
+                    _ => ("fts_data", false),
+                };
+                let index_field = if plain {
+                    self.field.clone()
+                } else {
+                    format!("{}.{}", self.field, strategy)
+                };
+                ctx.snippet_ctx = Some(crate::engine::resolver::SnippetContext {
+                    table,
+                    index_field,
+                    match_expr,
+                });
+            }
+        }
+        let rows = scored.into_iter().map(|(id, _score)| id).collect::<Vec<_>>();
+        let out = vec![RowBatch(rows)];
+        let n = out[0].len();
+        record(ctx, "scan", self.detail(), n, start);
+        FlowResult::Rows(out)
+    }
+}
+
+/// Weighted multi-field text search: fuses several [`TextQuerySpec`]
+/// rankings via weighted RRF (see
+/// [`PlannerIndexAccess::text_search_weighted`](crate::query_planner::traits::PlannerIndexAccess::text_search_weighted)).
+/// Output is fused-relevance order; scores land in the exec context.
+pub struct MultiTextScan {
+    pub type_name: String,
+    pub specs: Vec<crate::query_planner::traits::TextQuerySpec>,
+    pub limit: Option<usize>,
+}
+
+impl ExecOperator for MultiTextScan {
+    fn kind(&self) -> OperatorKind {
+        OperatorKind::Scan
+    }
+    fn detail(&self) -> String {
+        let fields = self
+            .specs
+            .iter()
+            .map(|s| format!("{}.{}^{}", s.field, s.strategy, s.boost))
+            .collect::<Vec<_>>()
+            .join(",");
+        format!("multi_text_scan type={} specs=[{fields}]", self.type_name)
+    }
+    fn cardinality(&self) -> CardinalityHint {
+        match self.limit {
+            Some(k) => CardinalityHint::Bounded(k),
+            None => CardinalityHint::Unbounded,
+        }
+    }
+    fn output_ordering(&self) -> OutputOrdering {
+        OutputOrdering::Unordered
+    }
+    fn children(&self) -> Vec<&dyn ExecOperator> {
+        vec![]
+    }
+    fn execute(&self, ctx: &mut ExecContext) -> FlowResult<Vec<RowBatch>> {
+        let start = std::time::Instant::now();
+        let scored = match ctx
+            .runtime
+            .text_search_weighted(&self.type_name, &self.specs, self.limit)
+        {
+            Ok(scored) => scored,
+            Err(e) => return FlowResult::Error(PlannerError::Storage(e.to_string())),
+        };
+        for (id, score) in &scored {
+            ctx.scores.insert(id.uid, *score);
+        }
+        let rows = scored.into_iter().map(|(id, _)| id).collect::<Vec<_>>();
+        let out = vec![RowBatch(rows)];
         let n = out[0].len();
         record(ctx, "scan", self.detail(), n, start);
         FlowResult::Rows(out)
@@ -305,6 +392,11 @@ impl ExecOperator for VectorKNNScan {
             Ok(scored) => scored,
             Err(e) => return FlowResult::Error(PlannerError::Storage(e.to_string())),
         };
+        // Distances are lower-better; normalize into the shared `_score`
+        // convention (similarity, higher-better).
+        for (id, dist) in &scored {
+            ctx.scores.insert(id.uid, 1.0 / (1.0 + *dist));
+        }
         let rows = scored.into_iter().map(|(id, _dist)| id).collect::<Vec<_>>();
         let out = vec![RowBatch(rows)];
         let n = out[0].len();
@@ -363,6 +455,22 @@ impl ExecOperator for HybridSearchScan {
             Ok(scored) => scored,
             Err(e) => return FlowResult::Error(PlannerError::Storage(e.to_string())),
         };
+        for (id, rrf_score) in &scored {
+            ctx.scores.insert(id.uid, *rrf_score);
+        }
+        // The hybrid CTE matches the fulltext table; capture that context so
+        // `_snippet` works on hybrid results too.
+        if ctx.snippet_ctx.is_none() {
+            if let Some(match_expr) =
+                crate::bridge::fts_query::build_fts_match_query(&self.text_query, self.require_all)
+            {
+                ctx.snippet_ctx = Some(crate::engine::resolver::SnippetContext {
+                    table: "fts_data",
+                    index_field: format!("{}.fulltext", self.field),
+                    match_expr,
+                });
+            }
+        }
         let rows = scored.into_iter().map(|(id, _dist)| id).collect::<Vec<_>>();
         let out = vec![RowBatch(rows)];
         let n = out[0].len();

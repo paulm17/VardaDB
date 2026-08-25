@@ -43,8 +43,8 @@ type MemoryChunk @model {
   sourceFile: String! @search(by: [term]) # e.g. "MEMORY.md", "knowledge/deploy.md"
   
   # Vector embedding for semantic search
-  # VardaDB will automatically manage the HNSW index for this field
-  embedding: [Float!] @search(by: [hnsw]) 
+  # Supply embeddings at write time; query with `search(vector:, k:)`.
+  embedding: [Float!] @vector
   
   # Relevance/Quality score
   utilityScore: Float

@@ -6,8 +6,52 @@ use rusqlite::{params, Connection};
 use std::hash::Hash;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 use tracing::{error, info};
+
+/// Default dimensionality of the `vec_data` embedding column.
+pub const DEFAULT_VECTOR_DIMS: usize = 384;
+
+/// Process-wide override for the vector dimensionality (set from `VardaConfig`).
+static CONFIGURED_VECTOR_DIMS: AtomicUsize = AtomicUsize::new(0);
+
+/// Set the vector dimensionality used when creating new `vec_data` tables.
+/// Called by `init_system` from `[search] vector_dims` in `VardaConfig`.
+pub fn set_configured_vector_dims(dims: usize) {
+    CONFIGURED_VECTOR_DIMS.store(dims.max(1), Ordering::SeqCst);
+}
+
+/// The explicitly configured dims, if any (config value takes priority over env).
+pub fn configured_vector_dims() -> Option<usize> {
+    match CONFIGURED_VECTOR_DIMS.load(Ordering::SeqCst) {
+        0 => None,
+        n => Some(n),
+    }
+}
+
+/// Effective dims for newly created `vec_data` tables:
+/// config override > `VARDADB_VECTOR_DIMS` env var > [`DEFAULT_VECTOR_DIMS`].
+pub fn effective_vector_dims() -> usize {
+    configured_vector_dims()
+        .or_else(|| {
+            std::env::var("VARDADB_VECTOR_DIMS")
+                .ok()
+                .and_then(|s| s.trim().parse::<usize>().ok())
+                .filter(|d| *d > 0)
+        })
+        .unwrap_or(DEFAULT_VECTOR_DIMS)
+}
+
+/// Extract the embedding dimensionality from a `CREATE VIRTUAL TABLE ... USING vec0(...)`
+/// DDL string by locating the `float[N]` column type.
+fn parse_vec_dims_from_ddl(ddl: &str) -> Option<usize> {
+    let marker = "float[";
+    let start = ddl.to_ascii_lowercase().find(marker)? + marker.len();
+    let rest = &ddl[start..];
+    let end = rest.find(']')?;
+    rest[..end].trim().parse::<usize>().ok().filter(|d| *d > 0)
+}
 
 macro_rules! dbg_info {
     ($($arg:tt)*) => {
@@ -26,6 +70,9 @@ pub struct SqliteBackend {
     reader_pool: Mutex<Vec<Connection>>,
     /// Path to the database file (for creating new reader connections)
     path: PathBuf,
+    /// Effective dimensionality of this backend's `vec_data` table
+    /// (0 until `create_native_search_tables` has run).
+    vector_dims: AtomicUsize,
 }
 
 impl SqliteBackend {
@@ -61,6 +108,7 @@ impl SqliteBackend {
             writer: Mutex::new(writer),
             reader_pool: Mutex::new(Vec::new()),
             path: db_path,
+            vector_dims: AtomicUsize::new(0),
         })
     }
 
@@ -89,18 +137,62 @@ impl SqliteBackend {
         Ok(())
     }
 
-    /// Create Full-Text Search and Vector tables for native search
+    /// Create Full-Text Search and Vector tables for native search.
+    ///
+    /// The `vec_data` dimensionality comes from the process-wide configuration
+    /// (`set_configured_vector_dims` / `VARDADB_VECTOR_DIMS`), defaulting to
+    /// [`DEFAULT_VECTOR_DIMS`]. If a `vec_data` table already exists (created with
+    /// different dims), the existing schema wins — its dims are introspected and
+    /// reported via [`SqliteBackend::vector_dims`] so writers validate against it.
     pub fn create_native_search_tables(&self) -> anyhow::Result<()> {
         dbg_info!(db_path = %self.path.display(), "SqliteBackend: creating native search tables if needed");
         let conn = self.writer.lock().unwrap();
-        // Native vector storage currently uses a fixed 384-dimensional schema.
+        // FTS tables are created unconditionally (idempotent); only vec_data
+        // creation is gated on the dims probe so an existing table's schema
+        // always wins.
         conn.execute_batch(
             "CREATE VIRTUAL TABLE IF NOT EXISTS fts_data USING fts5(uid UNINDEXED, field UNINDEXED, text_content, tokenize='porter unicode61');
              CREATE VIRTUAL TABLE IF NOT EXISTS fts_term_data USING fts5(uid UNINDEXED, field UNINDEXED, text_content, tokenize='unicode61');
-             CREATE VIRTUAL TABLE IF NOT EXISTS vec_data USING vec0(uid INTEGER PRIMARY KEY, embedding float[384]);"
+             CREATE VIRTUAL TABLE IF NOT EXISTS fts_trigram_data USING fts5(uid UNINDEXED, field UNINDEXED, text_content, tokenize='trigram');",
         )?;
-        dbg_info!(db_path = %self.path.display(), "SqliteBackend: native search table setup complete");
+        let effective_dims = if let Some(existing) = Self::existing_vec_dims(&conn)? {
+            existing
+        } else {
+            let dims = effective_vector_dims();
+            conn.execute_batch(&format!(
+                "CREATE VIRTUAL TABLE IF NOT EXISTS vec_data USING vec0(uid INTEGER PRIMARY KEY, embedding float[{dims}]);"
+            ))?;
+            dims
+        };
+        self.vector_dims
+            .store(effective_dims, Ordering::Release);
+        dbg_info!(
+            db_path = %self.path.display(),
+            vector_dims = effective_dims,
+            "SqliteBackend: native search table setup complete"
+        );
         Ok(())
+    }
+
+    /// Introspect the dimensionality of an already-existing `vec_data` table.
+    fn existing_vec_dims(conn: &Connection) -> anyhow::Result<Option<usize>> {
+        let ddl: Option<String> = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'vec_data'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(ddl.and_then(|s| parse_vec_dims_from_ddl(&s)))
+    }
+
+    /// Effective dimensionality of this backend's `vec_data` table.
+    /// Returns [`DEFAULT_VECTOR_DIMS`] before `create_native_search_tables` has run.
+    pub fn vector_dims(&self) -> usize {
+        match self.vector_dims.load(Ordering::Acquire) {
+            0 => effective_vector_dims(),
+            n => n,
+        }
     }
 
     /// Create a main data table with an extra `ts` column for LWW.
@@ -1089,6 +1181,73 @@ pub fn compute_prefix_upper_bound(prefix: &[u8]) -> Option<Vec<u8>> {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn test_parse_vec_dims_from_ddl() {
+        assert_eq!(
+            parse_vec_dims_from_ddl(
+                "CREATE VIRTUAL TABLE vec_data USING vec0(uid INTEGER PRIMARY KEY, embedding float[384])"
+            ),
+            Some(384)
+        );
+        assert_eq!(
+            parse_vec_dims_from_ddl(
+                "CREATE VIRTUAL TABLE vec_data USING vec0(uid INTEGER PRIMARY KEY, embedding float[1024])"
+            ),
+            Some(1024)
+        );
+        assert_eq!(
+            parse_vec_dims_from_ddl(
+                "CREATE VIRTUAL TABLE vec_data USING vec0(uid INTEGER PRIMARY KEY, embedding FLOAT[768])"
+            ),
+            Some(768)
+        );
+        // No float[] column → unknown
+        assert_eq!(parse_vec_dims_from_ddl("CREATE TABLE t(a)"), None);
+        assert_eq!(
+            parse_vec_dims_from_ddl("CREATE VIRTUAL TABLE v USING vec0(uid, embedding)"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_effective_vector_dims_defaults_and_override() {
+        // Without configuration or env var the default applies.
+        let saved = configured_vector_dims();
+        std::env::remove_var("VARDADB_VECTOR_DIMS");
+        CONFIGURED_VECTOR_DIMS.store(0, Ordering::SeqCst);
+        assert_eq!(effective_vector_dims(), DEFAULT_VECTOR_DIMS);
+
+        set_configured_vector_dims(1024);
+        assert_eq!(configured_vector_dims(), Some(1024));
+        assert_eq!(effective_vector_dims(), 1024);
+
+        // Restore prior state.
+        match saved {
+            Some(d) => set_configured_vector_dims(d),
+            None => CONFIGURED_VECTOR_DIMS.store(0, Ordering::SeqCst),
+        }
+    }
+
+    #[test]
+    fn test_native_search_tables_report_existing_dims() {
+        let dir = tempdir().unwrap();
+        let backend = SqliteBackend::new(dir.path().join("dims.db")).unwrap();
+        set_configured_vector_dims(512);
+        backend.create_native_search_tables().unwrap();
+        assert_eq!(backend.vector_dims(), 512);
+
+        // Reopening the same file must introspect 512 even if config changes.
+        drop(backend);
+        let reopened = SqliteBackend::new(dir.path().join("dims.db")).unwrap();
+        set_configured_vector_dims(384);
+        reopened.create_native_search_tables().unwrap();
+        assert_eq!(reopened.vector_dims(), 512);
+
+        // Restore default.
+        set_configured_vector_dims(DEFAULT_VECTOR_DIMS);
+        CONFIGURED_VECTOR_DIMS.store(0, Ordering::SeqCst);
+    }
 
     #[test]
     fn test_prefix_upper_bound() {

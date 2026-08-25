@@ -48,9 +48,9 @@ pub use pagination::{CursorSkipOperator, LimitOperator, OffsetOperator};
 pub use relation::{CosineRerankOperator, RelatedIdsSource};
 pub use sort::{compare_stored, SortOperator};
 pub use source::{
-    build_source_tree, FullTypeScan, HybridSearchScan, IntersectionSources, OrderedIndexScan,
-    PredicatePushdownSource, RelationExpandSource, TextBM25Scan, UniqueLookupSource, UnionSources,
-    VectorKNNScan,
+    build_source_tree, FullTypeScan, HybridSearchScan, IntersectionSources, MultiTextScan,
+    OrderedIndexScan, PredicatePushdownSource, RelationExpandSource, TextBM25Scan,
+    UniqueLookupSource, UnionSources, VectorKNNScan,
 };
 
 /// A batch of rows flowing between operators.
@@ -279,6 +279,16 @@ pub struct ExecContext<'a> {
     pub runtime: &'a dyn PlannerRuntime,
     pub db_name: &'a str,
     pub explain: ExplainCapture,
+    /// Relevance/distance scores captured by search source operators
+    /// (`TextBM25Scan`, `VectorKNNScan`, `HybridSearchScan`), keyed by uid.
+    /// Surfaced to the projection layer as the virtual `_score` field;
+    /// entries from a later scan for the same uid overwrite earlier ones.
+    pub scores: std::collections::HashMap<u64, f64>,
+    /// Keyword-search context captured by [`TextBM25Scan`] /
+    /// [`HybridSearchScan`](crate::query_planner::operators::HybridSearchScan)
+    /// enabling lazy `_snippet` resolution; handed to the request-scoped
+    /// cache after pipeline execution. First writer wins.
+    pub snippet_ctx: Option<crate::engine::resolver::SnippetContext>,
     depth: usize,
 }
 
@@ -289,6 +299,8 @@ impl<'a> ExecContext<'a> {
             runtime,
             db_name,
             explain: ExplainCapture::new(enabled),
+            scores: std::collections::HashMap::new(),
+            snippet_ctx: None,
             depth: 0,
         }
     }
@@ -305,6 +317,8 @@ impl<'a> ExecContext<'a> {
             runtime,
             db_name,
             explain: ExplainCapture::new(explain),
+            scores: std::collections::HashMap::new(),
+            snippet_ctx: None,
             depth: 0,
         }
     }

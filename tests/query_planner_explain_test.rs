@@ -203,7 +203,7 @@ fn operator_stats_json_reports_rows_in_and_out() {
         None,
         None,
         None,
-        None,
+        &[],
         &[],
         &fx.metadata,
         &rt,

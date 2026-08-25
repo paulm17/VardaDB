@@ -198,7 +198,9 @@ impl CandidatePlan {
             }
             CandidateSource::TextIndex { field, op, query } => {
                 match runtime.text_search(&self.type_name, field, *op, query, None) {
-                    Ok(list) => CandidateOutcome::Narrowed(list),
+                    Ok(list) => {
+                        CandidateOutcome::Narrowed(list.into_iter().map(|(e, _)| e).collect())
+                    }
                     Err(_) => CandidateOutcome::NoNarrowing,
                 }
             }

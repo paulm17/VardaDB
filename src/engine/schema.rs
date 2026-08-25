@@ -699,6 +699,122 @@ impl Schema {
                                     })
                                 },
                             ));
+                            // Virtual relevance-score field populated by
+                            // scored source pipelines (BM25 / vector / hybrid
+                            // scans); null when the row was not produced by a
+                            // scored scan.
+                            obj = obj.field(dynamic::Field::new(
+                                "_score",
+                                dynamic::TypeRef::named(dynamic::TypeRef::FLOAT),
+                                |ctx| {
+                                    dynamic::FieldFuture::new(async move {
+                                        let uid = ctx.parent_value.try_downcast_ref::<u64>()?;
+                                        let Some(cache) = ctx.data_opt::<RequestCache>() else {
+                                            return Ok(None);
+                                        };
+                                        match cache.get_search_score(*uid) {
+                                            Some(score) => {
+                                                let num = serde_json::Number::from_f64(score)
+                                                    .unwrap_or_else(|| {
+                                                        serde_json::Number::from(0)
+                                                    });
+                                                Ok(Some(dynamic::FieldValue::value(
+                                                    async_graphql::Value::Number(num),
+                                                )))
+                                            }
+                                            None => Ok(Some(dynamic::FieldValue::value(
+                                                async_graphql::Value::Null,
+                                            ))),
+                                        }
+                                    })
+                                },
+                            ));
+                            // Virtual snippet field: lazily renders an FTS5
+                            // snippet() excerpt for this row using the
+                            // keyword-search context captured by the scan
+                            // (BM25 or hybrid); null when the request had no
+                            // text search.
+                            obj = obj.field({
+                                let mut snip_field = dynamic::Field::new(
+                                    "_snippet",
+                                    dynamic::TypeRef::named(dynamic::TypeRef::STRING),
+                                    |ctx| {
+                                        dynamic::FieldFuture::new(async move {
+                                            use crate::engine::resolver::Resolver;
+                                            let uid =
+                                                ctx.parent_value.try_downcast_ref::<u64>()?;
+                                            let Some(cache) = ctx.data_opt::<RequestCache>()
+                                            else {
+                                                return Ok(None);
+                                            };
+                                            let Some(sctx) = cache.get_snippet_context() else {
+                                                return Ok(Some(dynamic::FieldValue::value(
+                                                    async_graphql::Value::Null,
+                                                )));
+                                            };
+                                            let arg_str = |name: &str| -> Option<String> {
+                                                ctx.args
+                                                    .try_get(name)
+                                                    .ok()
+                                                    .and_then(|v| v.string().ok())
+                                                    .map(|s| s.to_string())
+                                            };
+                                            let tokens = ctx
+                                                .args
+                                                .try_get("tokens")
+                                                .ok()
+                                                .and_then(|v| v.u64().ok())
+                                                .map(|n| n.min(64) as usize);
+                                            let resolver = ctx
+                                                .data::<Box<dyn Resolver + Send + Sync>>()
+                                                .unwrap();
+                                            match resolver.snippet_for_uid(
+                                                *uid,
+                                                sctx.table,
+                                                &sctx.index_field,
+                                                &sctx.match_expr,
+                                                arg_str("before")
+                                                    .unwrap_or_else(|| "<b>".to_string())
+                                                    .as_str(),
+                                                arg_str("after")
+                                                    .unwrap_or_else(|| "</b>".to_string())
+                                                    .as_str(),
+                                                arg_str("ellipsis")
+                                                    .unwrap_or_else(|| "…".to_string())
+                                                    .as_str(),
+                                                tokens.unwrap_or(12),
+                                            ) {
+                                                Some(text) => Ok(Some(
+                                                    dynamic::FieldValue::value(
+                                                        async_graphql::Value::String(text),
+                                                    ),
+                                                )),
+                                                None => Ok(Some(dynamic::FieldValue::value(
+                                                    async_graphql::Value::Null,
+                                                ))),
+                                            }
+                                        })
+                                    },
+                                );
+                                snip_field = snip_field
+                                    .argument(dynamic::InputValue::new(
+                                        "before",
+                                        dynamic::TypeRef::named(dynamic::TypeRef::STRING),
+                                    ))
+                                    .argument(dynamic::InputValue::new(
+                                        "after",
+                                        dynamic::TypeRef::named(dynamic::TypeRef::STRING),
+                                    ))
+                                    .argument(dynamic::InputValue::new(
+                                        "ellipsis",
+                                        dynamic::TypeRef::named(dynamic::TypeRef::STRING),
+                                    ))
+                                    .argument(dynamic::InputValue::new(
+                                        "tokens",
+                                        dynamic::TypeRef::named(dynamic::TypeRef::INT),
+                                    ));
+                                snip_field
+                            });
                         }
                         let mut input = dynamic::InputObject::new(format!("{}Input", type_name))
                             .field(dynamic::InputValue::new(
@@ -1625,6 +1741,66 @@ impl Schema {
 
                         query_fields.push(count_field);
 
+                        // Facet aggregation root: counts per distinct value
+                        // of a chosen field over the filtered candidate set.
+                        let facet_query_name = format!("aggregate{}", type_name);
+                        let type_name_for_facet = type_name.clone();
+                        let query_metadata_for_facet = query_metadata_arc.clone();
+                        let facet_field = dynamic::Field::new(
+                            facet_query_name,
+                            dynamic::TypeRef::named_nn_list("SearchFacet"),
+                            move |ctx| {
+                                let t_name = type_name_for_facet.clone();
+                                let query_metadata = query_metadata_for_facet.clone();
+                                dynamic::FieldFuture::new(async move {
+                                    use crate::engine::resolver::Resolver;
+                                    let resolver =
+                                        ctx.data::<Box<dyn Resolver + Send + Sync>>().unwrap();
+                                    let mut filter_map = std::collections::HashMap::new();
+                                    if let Ok(filter_arg) = ctx.args.try_get("filter") {
+                                        filter_map = filter_arg.deserialize()?;
+                                    }
+                                    let group_field = ctx
+                                        .args
+                                        .try_get("groupBy")?
+                                        .string()?
+                                        .to_string();
+                                    let mut limit = None;
+                                    if let Ok(limit_arg) = ctx.args.try_get("limit") {
+                                        if let Ok(n) = limit_arg.u64() {
+                                            limit = Some(n as usize);
+                                        }
+                                    }
+                                    let facets = resolver.facet_nodes(
+                                        &t_name,
+                                        filter_map,
+                                        &group_field,
+                                        limit,
+                                        query_metadata.as_ref(),
+                                    );
+                                    let result: Vec<dynamic::FieldValue> = facets
+                                        .into_iter()
+                                        .map(dynamic::FieldValue::owned_any)
+                                        .collect();
+                                    Ok(Some(dynamic::FieldValue::list(result)))
+                                })
+                            },
+                        )
+                        .argument(dynamic::InputValue::new(
+                            "filter",
+                            dynamic::TypeRef::named(filter_type_name.clone()),
+                        ))
+                        .argument(dynamic::InputValue::new(
+                            "groupBy",
+                            dynamic::TypeRef::named_nn(dynamic::TypeRef::STRING),
+                        ))
+                        .argument(dynamic::InputValue::new(
+                            "limit",
+                            dynamic::TypeRef::named(dynamic::TypeRef::INT),
+                        ));
+
+                        query_fields.push(facet_field);
+
                         // Define Relation Filter Type *Explicitly* here if needed or rely on dynamic
                         // The loop below handles fields.
 
@@ -2169,6 +2345,34 @@ impl Schema {
                 },
             ));
 
+        // Shared facet group for `aggregate<Type>` root fields: one row per
+        // distinct group-key value with its candidate count.
+        let search_facet_obj = dynamic::Object::new("SearchFacet")
+            .field(dynamic::Field::new(
+                "value",
+                dynamic::TypeRef::named_nn("String"),
+                |ctx| {
+                    dynamic::FieldFuture::new(async move {
+                        let val = ctx.parent_value.try_downcast_ref::<(String, i64)>()?;
+                        Ok(Some(dynamic::FieldValue::value(
+                            async_graphql::Value::String(val.0.clone()),
+                        )))
+                    })
+                },
+            ))
+            .field(dynamic::Field::new(
+                "count",
+                dynamic::TypeRef::named_nn("Int64"),
+                |ctx| {
+                    dynamic::FieldFuture::new(async move {
+                        let val = ctx.parent_value.try_downcast_ref::<(String, i64)>()?;
+                        Ok(Some(dynamic::FieldValue::value(
+                            async_graphql::Value::Number(val.1.into()),
+                        )))
+                    })
+                },
+            ));
+
         // Generic Subscription Field: "subscribe(types: [String!])"
         subscription_fields.push(
             dynamic::SubscriptionField::new(
@@ -2558,6 +2762,7 @@ impl Schema {
         schema_builder = schema_builder.register(mutation_type_enum);
         schema_builder = schema_builder.register(mutation_event_obj);
         schema_builder = schema_builder.register(search_result_obj);
+        schema_builder = schema_builder.register(search_facet_obj);
         schema_builder = schema_builder.register(check_permission_input);
         schema_builder = schema_builder.register(check_permission_result);
 

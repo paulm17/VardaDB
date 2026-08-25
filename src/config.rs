@@ -12,7 +12,18 @@ pub struct VardaConfig {
     pub llm: LLMConfig,
     #[serde(default)]
     pub r2: R2Config,
+    #[serde(default)]
+    pub search: SearchConfig,
     pub auth: Option<auth::config::AuthConfig>,
+}
+
+/// Native search configuration (FTS5 / sqlite-vec).
+#[derive(Deserialize, Debug, Clone, Default)]
+pub struct SearchConfig {
+    /// Dimensionality of the `vec_data` embedding column for newly created
+    /// databases. Defaults to 384; must match your embedding model
+    /// (e.g. 1024 for mxbai-embed-large-v1). Existing tables keep their dims.
+    pub vector_dims: Option<usize>,
 }
 
 #[derive(Deserialize, Debug, Clone, Default)]
@@ -126,6 +137,7 @@ impl Default for VardaConfig {
             remote_append: RemoteAppendConfig::default(),
             llm: LLMConfig::default(),
             r2: R2Config::default(),
+            search: SearchConfig::default(),
             auth: None, // Auth is disabled by default
         }
     }

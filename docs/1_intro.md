@@ -6,11 +6,11 @@ VardaDB is a cutting-edge, graph-native database engine written in Rust, designe
 
 - **GraphQL Native**: Schema-first design. Define your data model using standard GraphQL SDL (Schema Definition Language), and VardaDB automatically generates a complete API with Queries and Mutations.
 - **Graph & Relational**: First-class support for relationships (edges) between nodes, allowing for deep graph traversals and complex data modeling.
-- **Vector Search**: Integrated vector storage and HNSW-based approximate nearest neighbor search, enabling semantic search and AI-driven applications directly within your database.
-- **Hybrid Search**: Combine traditional full-text search (BM25-like) with vector similarity search for optimal retrieval results.
+- **Vector Search**: Integrated vector storage with KNN similarity search over a configurable-dimension `vec0` table, enabling semantic search and AI-driven applications directly within your database.
+- **Hybrid Search**: Combine traditional full-text search (BM25-like) with vector similarity via Reciprocal Rank Fusion for optimal retrieval results.
 - **Real-time Subscriptions**: Built-in support for real-time data updates via GraphQL Subscriptions.
 - **Geo-Spatial Support**: Native support for GeoPoint, Polygon, and MultiPolygon types with spatial filtering capabilities.
-- **Pluggable Storage**: Built on top of `fjall` (LSM-tree based) but designed with a clean abstraction layer.
+- **Pluggable Storage**: Built on top of SQLite (with FTS5 full-text indexes and the sqlite-vec extension) behind a clean abstraction layer.
 
 ## How It Works
 
