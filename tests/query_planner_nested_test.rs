@@ -67,9 +67,9 @@ fn build_fixture() -> Fixture {
         inverse_field: "posts".to_string(),
         inverse_is_list: true,
     }];
-    for (uid, title, owner) in [
-        (301u64, "Intro to Rust", 101u64),
-        (302, "Advanced Go", 102),
+    for (uid, title, owner, likes) in [
+        (301u64, "Intro to Rust", 101u64, 10i64),
+        (302, "Advanced Go", 102, 2),
     ] {
         resolver
             .create_node_internal(
@@ -78,6 +78,7 @@ fn build_fixture() -> Fixture {
                 str_map(&[
                     ("title", serde_json::json!(title)),
                     ("user", serde_json::json!(owner.to_string())),
+                    ("likes", serde_json::json!(likes)),
                 ]),
                 &[],
                 &post_inverses,
@@ -224,4 +225,87 @@ fn nested_scalar_conjunction_intersects_with_relation() {
     let expected = legacy_uids(&fx, "User", &filter);
     assert_eq!(expected, vec![fx.bob], "legacy baseline");
     assert_eq!(pipeline_uids(&fx, "User", &filter), expected);
+}
+
+#[test]
+fn nested_conjunct_subfilter_prefetches_both_fields() {
+    // Two-field conjunct inside the relation sub-filter: the hash-join
+    // prefetch must batch-load BOTH referenced child fields in one pass and
+    // keep parity with the legacy residual walk.
+    let fx = build_fixture();
+    let filter = gql_map(&[(
+        "posts",
+        obj(&[
+            ("likes", obj(&[("ge", async_graphql::Value::Number(5.into()))])),
+            ("title", obj(&[("contains", s("Rust"))])),
+        ]),
+    )]);
+    let expected = legacy_uids(&fx, "User", &filter);
+    assert_eq!(expected, vec![fx.alice], "legacy baseline");
+    assert_eq!(pipeline_uids(&fx, "User", &filter), expected);
+
+    // Flip the conjunct: low likes + Go title isolates Bob instead.
+    let filter = gql_map(&[(
+        "posts",
+        obj(&[
+            ("likes", obj(&[("le", async_graphql::Value::Number(5.into()))])),
+            ("title", obj(&[("contains", s("Go"))])),
+        ]),
+    )]);
+    let expected = legacy_uids(&fx, "User", &filter);
+    assert_eq!(expected, vec![fx.bob], "legacy baseline");
+    assert_eq!(pipeline_uids(&fx, "User", &filter), expected);
+}
+
+#[test]
+fn inline_list_edges_any_match_semantics() {
+    // Diamond shape: two parents share child posts through INLINE list edges
+    // (stored directly on the rows, no inverse-edge resolution). Both must
+    // pass alongside the inverse-edge user — list edges match when ANY
+    // referenced child satisfies the sub-filter.
+    use vardadb::query_planner::lower_filter_map;
+    use vardadb::query_planner::operators::{ExecContext, FullTypeScan};
+
+    let fx = build_fixture();
+    for (uid, name, edges) in [
+        (201u64, "Carol", vec![serde_json::json!("301")]),
+        (202, "Dan", vec![serde_json::json!("301"), serde_json::json!("302")]),
+    ] {
+        fx.resolver
+            .create_node_internal(
+                "User",
+                uid,
+                str_map(&[
+                    ("name", serde_json::json!(name)),
+                    ("posts", serde_json::Value::Array(edges)),
+                ]),
+                &[],
+                &[],
+                &HashMap::new(),
+                MutationSource::Local,
+                Some(ts(uid as u16)),
+            )
+            .unwrap();
+    }
+
+    let filter = gql_map(&[("posts", obj(&[("title", obj(&[("contains", s("Rust"))]))]))]);
+    let rt = runtime_for(&fx.resolver, &fx.metadata);
+    let mut ctx = ExecContext::new(&rt, "default");
+    let pipeline =
+        FilterOperator::boxed(Box::new(FullTypeScan::new("User")), lower_filter_map(&filter));
+    match pipeline.execute(&mut ctx) {
+        FlowResult::Rows(batches) => {
+            let mut uids: Vec<u64> = batches
+                .into_iter()
+                .flat_map(|b| b.0.into_iter().map(|e| e.uid))
+                .collect();
+            uids.sort_unstable();
+            assert_eq!(
+                uids,
+                vec![101, 201, 202],
+                "Alice (inverse edge), Carol + Dan (inline lists sharing post 301)"
+            );
+        }
+        other => panic!("expected rows, got error={}", other.is_error()),
+    }
 }
