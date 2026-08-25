@@ -6,6 +6,7 @@ pub mod index;
 pub mod ir;
 pub mod lowering;
 pub mod operators;
+pub mod physical_expr;
 pub mod plan;
 pub mod planner;
 pub mod traits;

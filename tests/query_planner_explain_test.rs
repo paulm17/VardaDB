@@ -6,10 +6,10 @@ use std::collections::HashMap;
 use tempfile::tempdir;
 use vardadb::bridge::sqlite_resolver::SqliteResolver;
 use vardadb::engine::resolver::{InverseInfo, QueryTypeMetadata, Resolver};
-use vardadb::query_planner::debug_capture::{self, CapturedPlan};
+use vardadb::query_planner::debug_capture;
 use vardadb::query_planner::explain::candidate_plan_json;
 use vardadb::query_planner::operators::{
-    build_scan_pipeline, ExecContext, ExecOperator, FlowResult,
+    build_scan_pipeline, ExecContext, FlowResult,
 };
 use vardadb::query_planner::{plan_candidates, runtime_for};
 use vardadb::realtime::bus::MutationSource;
