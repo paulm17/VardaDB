@@ -410,7 +410,7 @@ fn stored_source_evaluates_fields_through_planner_bridge() {
 // -- compile() surface -----------------------------------------------------------
 
 #[test]
-fn compile_rejects_unregistered_functions_and_subquery() {
+fn compile_rejects_unregistered_functions() {
     let unknown = LogicalExpr::Function {
         name: "nosuchfun".to_string(),
         args: vec![lit(s("X"))],
@@ -419,10 +419,6 @@ fn compile_rejects_unregistered_functions_and_subquery() {
         compile(&unknown),
         Err(ExprError::UnknownFunction(name)) if name == "nosuchfun"
     ));
-    let subquery = LogicalExpr::Subquery(Box::new(vardadb::query_planner::ir::LogicalQuery::scan(
-        "Author",
-    )));
-    assert!(matches!(compile(&subquery), Err(ExprError::UnsupportedSubquery)));
 }
 
 // -- 3.1b function registry -----------------------------------------------------
@@ -857,3 +853,93 @@ fn compile_filter_rejects_unknown_functions_and_counts_expr_nodes() {
 }
 
 
+
+// -- M-C subquery evaluation -----------------------------------------------------
+
+use vardadb::query_planner::ir::{LogicalQuery, Pagination};
+
+fn book_scan(filter: Option<LogicalFilter>, first: Option<usize>) -> LogicalExpr {
+    let mut query = LogicalQuery::scan("Book");
+    query.filter = filter;
+    query.pagination = Pagination {
+        first,
+        offset: None,
+        after: None,
+    };
+    LogicalExpr::Subquery(Box::new(query))
+}
+
+#[test]
+fn subquery_yields_sorted_uid_strings() {
+    let fx = build_fixture();
+    let rt = runtime_for(&fx.resolver, &fx.metadata);
+    let src = StoredSource::new(&rt, EntityId::new(fx.paul));
+    let ctx = EvalContext::with_runtime(&rt, "default", &src);
+
+    let compiled = compile(&book_scan(Some(pred("title", FilterOp::AllOfTerms, s("planner internals"))), None)).unwrap();
+    assert_eq!(
+        compiled.evaluate(&ctx).unwrap(),
+        QueryValue::List(vec![s("201")]),
+        "allofterms(planner internals) matches exactly book 201"
+    );
+
+    // Unfiltered child scan yields every Book uid.
+    let all = compile(&book_scan(None, None)).unwrap();
+    assert_eq!(all.evaluate(&ctx).unwrap(), QueryValue::List(vec![s("201")]));
+
+    // Same result twice — the row-independent cache path.
+    assert_eq!(all.evaluate(&ctx).unwrap(), QueryValue::List(vec![s("201")]));
+}
+
+#[test]
+fn subquery_membership_via_contains() {
+    let fx = build_fixture();
+    let rt = runtime_for(&fx.resolver, &fx.metadata);
+    let src = StoredSource::new(&rt, EntityId::new(fx.paul));
+    let ctx = EvalContext::with_runtime(&rt, "default", &src);
+
+    let hit = bin(book_scan(None, None), BinaryOp::Contains, lit(s("201")));
+    assert_eq!(compile(&hit).unwrap().evaluate(&ctx).unwrap(), QueryValue::Bool(true));
+
+    let miss = bin(book_scan(None, None), BinaryOp::Contains, lit(s("999")));
+    assert_eq!(compile(&miss).unwrap().evaluate(&ctx).unwrap(), QueryValue::Bool(false));
+}
+
+#[test]
+fn subquery_first_truncates_results() {
+    let fx = build_fixture();
+    let rt = runtime_for(&fx.resolver, &fx.metadata);
+    let src = StoredSource::new(&rt, EntityId::new(fx.ada));
+    let ctx = EvalContext::with_runtime(&rt, "default", &src);
+    // first:0 clamps to an empty result set.
+    let compiled = compile(&book_scan(None, Some(0))).unwrap();
+    assert_eq!(compiled.evaluate(&ctx).unwrap(), QueryValue::List(vec![]));
+}
+
+#[test]
+fn subquery_without_runtime_errors() {
+    let rec = record(&[("name", s("Paul"))]);
+    let src = RecordSource::new(&rec);
+    let compiled = compile(&book_scan(None, None)).unwrap();
+    match compiled.evaluate(&EvalContext::new(&src)) {
+        Err(ExprError::UnsupportedSubquery) => {}
+        other => panic!("expected UnsupportedSubquery, got {other:?}"),
+    }
+}
+
+#[test]
+fn filter_operator_evaluates_subquery_expression_node() {
+    let fx = build_fixture();
+
+    // Authors whose id appears in the subquery's uid set (v1 subqueries
+    // yield uid strings, consumed by scalar-in-list membership).
+    let mut query = LogicalQuery::scan("Author");
+    query.filter = Some(pred(
+        "name",
+        FilterOp::Eq,
+        QueryValue::String("Paul".to_string()),
+    ));
+    let expr = bin(fld("id"), BinaryOp::In, LogicalExpr::Subquery(Box::new(query)));
+    let op = FilterOperator::boxed(Box::new(FullTypeScan::new("Author")), expr_filter(expr));
+    assert_eq!(exec_uids(op, &fx), vec![fx.paul]);
+}

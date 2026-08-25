@@ -28,6 +28,7 @@ pub mod function;
 pub mod idiom;
 pub mod literal;
 pub mod ops;
+pub mod subquery;
 
 pub use function::FunctionExpr;
 pub use idiom::{FieldExpr, RecordSource, StoredSource};
@@ -58,9 +59,11 @@ pub enum ExprError {
         expected: String,
         got: usize,
     },
-    /// Subquery expressions execute through the Stage 3.4 control-flow
-    /// bridge; compiling one before then is rejected here.
+    /// A subquery was evaluated without pipeline access (no runtime in the
+    /// [`EvalContext`]), or its child execution failed.
     UnsupportedSubquery,
+    /// Child operator execution surfaced a storage/pipeline error.
+    Execution(String),
 }
 
 impl fmt::Display for ExprError {
@@ -83,8 +86,9 @@ impl fmt::Display for ExprError {
                 write!(f, "function {function:?} expects {expected} arguments, got {got}")
             }
             ExprError::UnsupportedSubquery => {
-                write!(f, "subquery expressions require the Stage 3.4 bridge")
+                write!(f, "subquery evaluated without pipeline access")
             }
+            ExprError::Execution(detail) => write!(f, "expression execution failed: {detail}"),
         }
     }
 }
@@ -104,14 +108,39 @@ pub trait FieldSource {
 }
 
 /// Evaluation context handed to every expression node.
+///
+/// `runtime`/`db_name` are populated by operator evaluation sites so
+/// row-independent subqueries can execute through the pipeline; bare
+/// `new` contexts (unit tests, `field_value`) leave them `None`, and any
+/// [`LogicalExpr::Subquery`] encountered then raises
+/// [`ExprError::UnsupportedSubquery`].
 #[derive(Clone, Copy)]
 pub struct EvalContext<'a> {
     pub row: &'a dyn FieldSource,
+    pub runtime: Option<&'a dyn crate::query_planner::traits::PlannerRuntime>,
+    pub db_name: Option<&'a str>,
 }
 
 impl<'a> EvalContext<'a> {
     pub fn new(row: &'a dyn FieldSource) -> Self {
-        EvalContext { row }
+        EvalContext {
+            row,
+            runtime: None,
+            db_name: None,
+        }
+    }
+
+    /// Context with pipeline access, enabling subquery evaluation.
+    pub fn with_runtime(
+        runtime: &'a dyn crate::query_planner::traits::PlannerRuntime,
+        db_name: &'a str,
+        row: &'a dyn FieldSource,
+    ) -> Self {
+        EvalContext {
+            row,
+            runtime: Some(runtime),
+            db_name: Some(db_name),
+        }
     }
 
     fn resolve(&self, path: &FieldPath) -> Option<QueryValue> {
@@ -131,8 +160,9 @@ pub trait PhysicalExpr: fmt::Debug + Send + Sync {
 ///
 /// `Function` nodes resolve through the process-global function registry
 /// ([`crate::query_planner::function::default_registry`]); unknown names and
-/// arity violations are compile-time errors. `Subquery` nodes stay
-/// unsupported until the Stage 3.4 control-flow bridge exists.
+/// arity violations are compile-time errors. `Subquery` nodes compile into
+/// [`subquery::SubqueryExpr`] and require pipeline access at evaluation
+/// time (see [`EvalContext::with_runtime`]).
 pub fn compile(expr: &LogicalExpr) -> Result<Box<dyn PhysicalExpr>, ExprError> {
     match expr {
         LogicalExpr::Value(v) => Ok(Box::new(LiteralExpr::new(v.clone()))),
@@ -166,7 +196,9 @@ pub fn compile(expr: &LogicalExpr) -> Result<Box<dyn PhysicalExpr>, ExprError> {
                 compiled,
             )))
         }
-        LogicalExpr::Subquery(_) => Err(ExprError::UnsupportedSubquery),
+        LogicalExpr::Subquery(query) => {
+            Ok(Box::new(subquery::SubqueryExpr::try_new(query.as_ref().clone())?))
+        }
     }
 }
 

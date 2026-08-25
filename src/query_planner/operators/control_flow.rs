@@ -119,7 +119,7 @@ impl ExecOperator for ExprValueOperator {
     fn execute(&self, ctx: &mut ExecContext) -> FlowResult<Vec<RowBatch>> {
         let start = std::time::Instant::now();
         let source = EmptySource;
-        match self.expr.evaluate(&EvalContext::new(&source)) {
+        match self.expr.evaluate(&EvalContext::with_runtime(ctx.runtime, ctx.db_name, &source)) {
             Ok(value) => {
                 *self.value.borrow_mut() = Some(value);
                 record(ctx, "expr", self.detail(), 1, start);
@@ -204,7 +204,7 @@ impl ExecOperator for ComputeOperator {
                 let mut fields = BTreeMap::new();
                 {
                     let source = StoredSource::new(ctx.runtime, EntityId::new(id.uid));
-                    let row_ctx = EvalContext::new(&source);
+                    let row_ctx = EvalContext::with_runtime(ctx.runtime, ctx.db_name, &source);
                     for (alias, expr) in &self.fields {
                         match expr.evaluate(&row_ctx) {
                             Ok(value) => {
@@ -281,7 +281,7 @@ impl ExecOperator for IfElseOperator {
     fn execute(&self, ctx: &mut ExecContext) -> FlowResult<Vec<RowBatch>> {
         let start = std::time::Instant::now();
         let source = EmptySource;
-        let eval_ctx = EvalContext::new(&source);
+        let eval_ctx = EvalContext::with_runtime(ctx.runtime, ctx.db_name, &source);
         let selected = 'selected: {
             for (cond, body) in &self.branches {
                 match cond.evaluate(&eval_ctx) {
@@ -373,7 +373,7 @@ impl ExecOperator for ForeachOperator {
     fn execute(&self, ctx: &mut ExecContext) -> FlowResult<Vec<RowBatch>> {
         let start = std::time::Instant::now();
         let source = EmptySource;
-        let eval_ctx = EvalContext::new(&source);
+        let eval_ctx = EvalContext::with_runtime(ctx.runtime, ctx.db_name, &source);
         let range_value = match self.range.evaluate(&eval_ctx) {
             Ok(QueryValue::List(items)) => items,
             Ok(QueryValue::Null) => Vec::new(),
@@ -389,7 +389,7 @@ impl ExecOperator for ForeachOperator {
         let mut ran = 0usize;
         for element in range_value {
             let bound = BoundSource::new(&EmptySource, self.var.clone(), element);
-            let iter_ctx = EvalContext::new(&bound);
+            let iter_ctx = EvalContext::with_runtime(ctx.runtime, ctx.db_name, &bound);
             let mut skip_rest = false;
             for step in &self.body {
                 match step.evaluate(&iter_ctx) {

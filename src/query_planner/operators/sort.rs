@@ -110,7 +110,7 @@ impl SortOperator {
                 .zip(&self.computed)
                 .map(|(k, computed)| match computed {
                     Some(expr) => expr
-                        .evaluate(&EvalContext::new(&StoredSource::new(
+                        .evaluate(&EvalContext::with_runtime(ctx.runtime, ctx.db_name, &StoredSource::new(
                             ctx.runtime,
                             EntityId::new(uid_value),
                         )))

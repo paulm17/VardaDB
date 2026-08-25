@@ -87,6 +87,16 @@ impl FilterOperator {
         Box::new(FilterOperator::new(input, filter))
     }
 
+    /// Fallible construction for user-authored filters (subqueries,
+    /// expression syntax) where an `Expr` node may fail to compile.
+    pub fn try_boxed(
+        input: Box<dyn ExecOperator>,
+        filter: LogicalFilter,
+    ) -> Result<Box<dyn ExecOperator>, crate::query_planner::physical_expr::ExprError> {
+        let compiled = compile_filter(&filter)?;
+        Ok(Box::new(FilterOperator { input, filter: compiled }))
+    }
+
     fn execute_inner(&self, ctx: &mut ExecContext) -> FlowResult<Vec<RowBatch>> {
         let start = std::time::Instant::now();
         let child = self.input.execute(ctx);
@@ -163,7 +173,7 @@ fn eval_compiled(ctx: &ExecContext, uid: u64, filter: &CompiledFilter) -> bool {
             eval_predicate(ctx, uid, pred.op, &pred.value, pred.path.single())
         }
         CompiledFilter::Expr(expr) => expr
-            .evaluate(&EvalContext::new(&StoredSource::new(
+            .evaluate(&EvalContext::with_runtime(ctx.runtime, ctx.db_name, &StoredSource::new(
                 ctx.runtime,
                 EntityId::from(uid),
             )))

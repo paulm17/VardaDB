@@ -193,7 +193,7 @@ impl ExecOperator for HashAggregateOperator {
             rows_in += batch.0.len();
             for id in batch.0 {
                 let source = StoredSource::new(ctx.runtime, id);
-                let eval_ctx = EvalContext::new(&source);
+                let eval_ctx = EvalContext::with_runtime(ctx.runtime, ctx.db_name, &source);
                 let key_values: Vec<QueryValue> = self
                     .group_by
                     .iter()
