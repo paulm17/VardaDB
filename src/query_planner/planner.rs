@@ -31,6 +31,11 @@ pub fn build_candidate_plan(
 
     let mut sources: Vec<CandidateSource> = Vec::new();
     let mut notes: Vec<AccessPathNote> = Vec::new();
+    // Fields whose nested filter is enforced authoritatively by a
+    // relation-expansion semi-join (child subplan + inverse edge), so the
+    // matching `Relation` conjunct can be elided from the row-level residual.
+    let mut consumed_relations: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
 
     let mut keys: Vec<&String> = filter.keys().collect();
     keys.sort();
@@ -40,6 +45,9 @@ pub fn build_candidate_plan(
         if let Some((source, note)) =
             source_for_field(ctx, key, condition, &lowered)
         {
+            if let CandidateSource::RelationExpansion { field, .. } = &source {
+                consumed_relations.insert(field.clone());
+            }
             notes.push(note);
             sources.push(source);
         }
@@ -69,15 +77,49 @@ pub fn build_candidate_plan(
         ),
     };
 
-    CandidatePlan {
-        type_name: ctx.type_name.to_string(),
-        source,
-        residual: if lowered.is_empty_conjunction() {
+    let residual = if consumed_relations.is_empty() {
+        if lowered.is_empty_conjunction() {
             None
         } else {
             Some(lowered)
-        },
+        }
+    } else {
+        match strip_consumed_relations(lowered, &consumed_relations) {
+            Some(f) if !f.is_empty_conjunction() => Some(f),
+            _ => None,
+        }
+    };
+
+    CandidatePlan {
+        type_name: ctx.type_name.to_string(),
+        source,
+        residual,
         notes,
+    }
+}
+
+/// Remove top-level `Relation` conjuncts whose field was narrowed by a
+/// relation-expansion semi-join. Only descends through `And`: predicates
+/// under `Or`/`Not` were never planned as expansions and stay untouched.
+///
+/// Soundness: the expansion pipeline verifies every child against the full
+/// nested map (child `FilterOperator`, legacy `check_condition` parity) and
+/// inverse-expands exactly the parents owning a matching child — identical
+/// semantics to the per-row residual walk restricted to the candidate set,
+/// which is how the legacy candidate path behaved as well.
+fn strip_consumed_relations(
+    filter: LogicalFilter,
+    consumed: &std::collections::HashSet<String>,
+) -> Option<LogicalFilter> {
+    match filter {
+        LogicalFilter::Relation { field, .. } if consumed.contains(&field) => None,
+        LogicalFilter::And(parts) => Some(LogicalFilter::And(
+            parts
+                .into_iter()
+                .filter_map(|part| strip_consumed_relations(part, consumed))
+                .collect(),
+        )),
+        other => Some(other),
     }
 }
 

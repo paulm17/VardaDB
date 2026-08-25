@@ -63,3 +63,23 @@ deliberately use small thresholds to exercise real row evaluation.
 See `docs/bench_results.md` for the one-shot absolute-timing table captured
 with `examples/archon_bench.rs`; criterion medians from this suite are the
 authoritative regression reference going forward.
+
+## Semi-join nested-filter cutover
+
+Nested relation filters are planned as semi-joins: the child subplan (source
+narrowing + child residual filter) executes once and inverse-expands the
+matching parents; the matching `Relation` conjunct is elided from the
+row-level residual (`strip_consumed_relations` in `planner.rs`). Measured
+impact vs the pre-semi-join baseline on this dataset:
+
+| Scenario | Before | After | Δ |
+|---|---:|---:|---|
+| `04_nested_relation_low` | ~1.92 ms | ~705 µs | −63% |
+| `05_nested_relation_wide` | ~45.4 ms | ~14.6 ms | −91% |
+
+Soundness: the expansion verifies every child against the full nested map
+(legacy `check_condition` parity) and returns exactly the parents owning a
+matching child — identical to legacy candidate narrowing followed by residual
+verification of that candidate set. Predicates under `Or`/`Not` and edges
+without inverse metadata keep the residual walk. Baseline `main` was refreshed
+at this commit.

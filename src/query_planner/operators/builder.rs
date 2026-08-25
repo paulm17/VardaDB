@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use async_graphql::Value;
 
 use crate::engine::resolver::QueryTypeMetadata;
-use crate::query_planner::ir::{FieldSegment, FilterOp};
+use crate::query_planner::ir::{FieldSegment, FilterOp, LogicalFilter};
 use crate::query_planner::operators::filter::FilterOperator;
 use crate::query_planner::operators::pagination::{
     CursorSkipOperator, LimitOperator, OffsetOperator,
@@ -150,6 +150,19 @@ pub fn build_scan_pipeline(
         "hybrid_search",
     );
 
+    // Row-level residual: full lowered filter for search-driven sources;
+    // for planned bases the plan's own (semi-join-stripped) residual.
+    let residual: Option<LogicalFilter> = match &base {
+        BaseSource::Search(..) => {
+            if filter.is_empty() {
+                None
+            } else {
+                Some(lower_filter_map(filter))
+            }
+        }
+        BaseSource::Planned(plan) => plan.residual.clone(),
+    };
+
     let shape: String;
     let mut used_candidates = false;
     let mut planned_full_scan = false;
@@ -219,7 +232,15 @@ pub fn build_scan_pipeline(
                 keys[0].direction.clone(),
             );
             return BuiltPipeline {
-                root: finish_chain(Box::new(src), filter, &keys, after, offset, first, true),
+                root: finish_chain(
+                    Box::new(src),
+                    Some(lower_filter_map(filter)),
+                    &keys,
+                    after,
+                    offset,
+                    first,
+                    true,
+                ),
                 shape: "ordered_index_scan".to_string(),
                 used_candidates: true,
                 plan: kept_plan.take(),
@@ -234,7 +255,7 @@ pub fn build_scan_pipeline(
     BuiltPipeline {
         root: finish_chain(
             source,
-            filter,
+            residual,
             &keys,
             after,
             offset,
@@ -250,7 +271,7 @@ pub fn build_scan_pipeline(
 #[allow(clippy::too_many_arguments)]
 fn finish_chain(
     source: Box<dyn ExecOperator>,
-    filter: &RawFilterMap,
+    residual: Option<LogicalFilter>,
     keys: &[crate::query_planner::ir::OrderKey],
     after: Option<&str>,
     offset: Option<usize>,
@@ -258,8 +279,10 @@ fn finish_chain(
     seek_cursor: bool,
 ) -> Box<dyn ExecOperator> {
     let mut node = source;
-    if !filter.is_empty() {
-        node = FilterOperator::boxed(node, lower_filter_map(filter));
+    if let Some(f) = residual {
+        if !f.is_empty_conjunction() {
+            node = FilterOperator::boxed(node, f);
+        }
     }
     if !keys.is_empty() {
         node = SortOperator::boxed(node, keys.to_vec());
@@ -302,8 +325,13 @@ pub fn build_relation_pipeline(
         shape = "relation_cosine_rerank".to_string();
     }
     let keys = lower_sort_map(sort);
+    let residual = if filter.is_empty() {
+        None
+    } else {
+        Some(lower_filter_map(filter))
+    };
     BuiltPipeline {
-        root: finish_chain(source, filter, &keys, after, offset, first, false),
+        root: finish_chain(source, residual, &keys, after, offset, first, false),
         shape,
         used_candidates: false,
         plan: None,
@@ -363,10 +391,19 @@ pub fn build_count_pipeline(
             }
         }
     };
-    let root = if filter.is_empty() {
-        source
-    } else {
-        FilterOperator::boxed(source, lower_filter_map(filter))
+    let residual = match &kept_plan {
+        Some(plan) => plan.residual.clone(),
+        None => {
+            if filter.is_empty() {
+                None
+            } else {
+                Some(lower_filter_map(filter))
+            }
+        }
+    };
+    let root = match residual {
+        Some(f) if !f.is_empty_conjunction() => FilterOperator::boxed(source, f),
+        _ => source,
     };
     BuiltPipeline {
         root,

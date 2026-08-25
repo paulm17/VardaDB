@@ -153,10 +153,27 @@ fn candidate_plan_json_exposes_source_tree_and_notes() {
     );
     assert_eq!(json["source"]["children"][0]["type"], "Book");
     assert_eq!(json["source"]["children"][0]["source"]["kind"], "text_index");
-    // Residual relation condition is surfaced for downstream enforcement.
+    // Semi-join: the expansion subplan enforces the nested conjunct
+    // authoritatively, so the row-level residual is elided.
+    assert!(
+        json["residual"].is_null(),
+        "residual must be stripped by the semi-join: {}",
+        json
+    );
+
+    // Mixed conjuncts keep the non-relation predicates in the residual.
+    let mixed = gql_map(&[
+        ("books", obj(&[("title", obj(&[("allofterms", s("planner"))]))])),
+        (
+            "name",
+            obj(&[("eq", async_graphql::Value::String("Paul".into()))]),
+        ),
+    ]);
+    let plan = plan_candidates("default", "Author", &mixed, &["name".to_string()], &fx.metadata);
+    let json = candidate_plan_json(&plan);
     assert!(
         !json["residual"].is_null(),
-        "residual must be present: {}",
+        "non-relation conjuncts stay residual: {}",
         json
     );
 
