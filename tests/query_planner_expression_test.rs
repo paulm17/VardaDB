@@ -406,17 +406,240 @@ fn stored_source_evaluates_fields_through_planner_bridge() {
 // -- compile() surface -----------------------------------------------------------
 
 #[test]
-fn compile_rejects_function_and_subquery_until_later_stages() {
-    let function = LogicalExpr::Function {
-        name: "lower".to_string(),
+fn compile_rejects_unregistered_functions_and_subquery() {
+    let unknown = LogicalExpr::Function {
+        name: "nosuchfun".to_string(),
         args: vec![lit(s("X"))],
     };
     assert!(matches!(
-        compile(&function),
-        Err(ExprError::UnknownFunction(_))
+        compile(&unknown),
+        Err(ExprError::UnknownFunction(name)) if name == "nosuchfun"
     ));
     let subquery = LogicalExpr::Subquery(Box::new(vardadb::query_planner::ir::LogicalQuery::scan(
         "Author",
     )));
     assert!(matches!(compile(&subquery), Err(ExprError::UnsupportedSubquery)));
+}
+
+// -- 3.1b function registry -----------------------------------------------------
+
+fn func(name: &str, args: Vec<LogicalExpr>) -> LogicalExpr {
+    LogicalExpr::Function {
+        name: name.to_string(),
+        args,
+    }
+}
+
+fn fld(path: &str) -> LogicalExpr {
+    LogicalExpr::Field(FieldPath::field(path))
+}
+
+#[test]
+fn lower_upper_trim_transform_strings() {
+    let rec = record(&[]);
+    assert_eq!(
+        eval_over(&func("lower", vec![lit(s("HeLLo"))]), &rec).unwrap(),
+        s("hello")
+    );
+    assert_eq!(
+        eval_over(&func("upper", vec![lit(s("hello"))]), &rec).unwrap(),
+        s("HELLO")
+    );
+    assert_eq!(
+        eval_over(&func("trim", vec![lit(s("  pad  "))]), &rec).unwrap(),
+        s("pad")
+    );
+}
+
+#[test]
+fn string_functions_reject_non_strings() {
+    let rec = record(&[]);
+    for name in ["lower", "upper", "trim"] {
+        let err = eval_over(&func(name, vec![lit(i(5))]), &rec).unwrap_err();
+        assert!(matches!(err, ExprError::TypeMismatch { .. }), "{name}: {err}");
+    }
+}
+
+#[test]
+fn len_counts_chars_lists_and_objects() {
+    let rec = record(&[]);
+    // Multi-byte chars count as single chars.
+    assert_eq!(
+        eval_over(&func("len", vec![lit(s("héllo"))]), &rec).unwrap(),
+        i(5)
+    );
+    assert_eq!(
+        eval_over(
+            &func(
+                "len",
+                vec![lit(QueryValue::List(vec![i(1), i(2), i(3)]))]
+            ),
+            &rec
+        )
+        .unwrap(),
+        i(3)
+    );
+    let obj = QueryValue::Object(
+        [("a", 1), ("b", 2)]
+            .iter()
+            .map(|(k, v)| (k.to_string(), i(*v)))
+            .collect(),
+    );
+    assert_eq!(eval_over(&func("len", vec![lit(obj)]), &rec).unwrap(), i(2));
+}
+
+#[test]
+fn len_rejects_numbers() {
+    let rec = record(&[]);
+    let err = eval_over(&func("len", vec![lit(i(42))]), &rec).unwrap_err();
+    assert!(matches!(err, ExprError::TypeMismatch { op: "len", .. }));
+}
+
+#[test]
+fn concat_joins_variadic_strings() {
+    let rec = record(&[]);
+    assert_eq!(
+        eval_over(
+            &func(
+                "concat",
+                vec![lit(s("a")), lit(s("b")), lit(s("c"))]
+            ),
+            &rec
+        )
+        .unwrap(),
+        s("abc")
+    );
+    assert_eq!(
+        eval_over(&func("concat", vec![lit(s("solo"))]), &rec).unwrap(),
+        s("solo")
+    );
+}
+
+#[test]
+fn concat_rejects_non_string_elements() {
+    let rec = record(&[]);
+    let err = eval_over(
+        &func("concat", vec![lit(s("x")), lit(i(1))]),
+        &rec,
+    )
+    .unwrap_err();
+    assert!(matches!(err, ExprError::TypeMismatch { op: "concat", .. }));
+}
+
+#[test]
+fn abs_preserves_int_float_and_reports_overflow() {
+    let rec = record(&[]);
+    assert_eq!(eval_over(&func("abs", vec![lit(i(-5))]), &rec).unwrap(), i(5));
+    assert_eq!(
+        eval_over(&func("abs", vec![lit(f(-2.5))]), &rec).unwrap(),
+        f(2.5)
+    );
+    let err = eval_over(&func("abs", vec![lit(i(i64::MIN))]), &rec).unwrap_err();
+    assert_eq!(err, ExprError::ArithmeticOverflow);
+    let err = eval_over(&func("abs", vec![lit(s("x"))]), &rec).unwrap_err();
+    assert!(matches!(err, ExprError::TypeMismatch { op: "abs", .. }));
+}
+
+#[test]
+fn ceil_floor_round_handle_int_passthrough() {
+    let rec = record(&[]);
+    assert_eq!(
+        eval_over(&func("ceil", vec![lit(f(2.1))]), &rec).unwrap(),
+        f(3.0)
+    );
+    assert_eq!(
+        eval_over(&func("floor", vec![lit(f(2.9))]), &rec).unwrap(),
+        f(2.0)
+    );
+    // Rust f64 rounding is half-away-from-zero.
+    assert_eq!(
+        eval_over(&func("round", vec![lit(f(2.5))]), &rec).unwrap(),
+        f(3.0)
+    );
+    assert_eq!(
+        eval_over(&func("round", vec![lit(f(-2.5))]), &rec).unwrap(),
+        f(-3.0)
+    );
+    // Int passthrough stays Int (no float promotion).
+    assert_eq!(
+        eval_over(&func("ceil", vec![lit(i(7))]), &rec).unwrap(),
+        i(7)
+    );
+}
+
+#[test]
+fn arity_violations_are_compile_time_errors() {
+    let rec = record(&[]);
+    let too_many = compile(&LogicalExpr::Function {
+        name: "lower".to_string(),
+        args: vec![lit(s("a")), lit(s("b"))],
+    })
+    .unwrap_err();
+    match too_many {
+        ExprError::ArityMismatch {
+            function, expected, got,
+        } => {
+            assert_eq!(function, "lower");
+            assert_eq!(expected, "1..1");
+            assert_eq!(got, 2);
+        }
+        other => panic!("expected ArityMismatch, got {other}"),
+    }
+    let none = compile(&LogicalExpr::Function {
+        name: "concat".to_string(),
+        args: vec![],
+    });
+    assert!(matches!(none, Err(ExprError::ArityMismatch { .. })));
+    // Well-arity'd functions still evaluate.
+    assert_eq!(
+        eval_over(&func("lower", vec![lit(s("OK"))]), &rec).unwrap(),
+        s("ok")
+    );
+}
+
+#[test]
+fn null_arguments_short_circuit_to_null() {
+    let rec = record(&[("nickname", QueryValue::Null)]);
+    // Null beats strict typing: abs(missing-number) is Null, not a mismatch.
+    assert_eq!(
+        eval_over(&func("abs", vec![fld("missing")]), &rec).unwrap(),
+        QueryValue::Null
+    );
+    assert_eq!(
+        eval_over(&func("lower", vec![fld("nickname")]), &rec).unwrap(),
+        QueryValue::Null
+    );
+}
+
+#[test]
+fn functions_compose_with_operators_and_fields() {
+    let rec = record(&[("name", s("paul"))]);
+    // abs(len(concat(name, "!"))) == abs(len("paul!")) == 5.
+    let expr = bin(
+        func(
+            "abs",
+            vec![func(
+                "len",
+                vec![func(
+                    "concat",
+                    vec![fld("name"), lit(s("!"))],
+                )],
+            )],
+        ),
+        BinaryOp::Eq,
+        lit(i(5)),
+    );
+    assert_eq!(eval_over(&expr, &rec).unwrap(), QueryValue::Bool(true));
+}
+
+#[test]
+fn default_registry_shape() {
+    let registry = vardadb::query_planner::function::default_registry();
+    assert!(registry.contains("lower"));
+    assert!(registry.contains("round"));
+    // Lookup is case-sensitive on exact registration keys.
+    assert!(!registry.contains("LOWER"));
+    assert_eq!(registry.len(), 9);
+    assert!(!registry.is_empty());
+    assert!(registry.get("ceil").is_some());
 }

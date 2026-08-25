@@ -2,6 +2,7 @@ pub mod adapters;
 pub mod context;
 pub mod debug_capture;
 pub mod explain;
+pub mod function;
 pub mod index;
 pub mod ir;
 pub mod lowering;

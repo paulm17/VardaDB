@@ -24,10 +24,12 @@ use std::fmt;
 
 use crate::query_planner::ir::{FieldPath, LogicalExpr, QueryRecord, QueryValue};
 
+pub mod function;
 pub mod idiom;
 pub mod literal;
 pub mod ops;
 
+pub use function::FunctionExpr;
 pub use idiom::{FieldExpr, RecordSource, StoredSource};
 pub use literal::LiteralExpr;
 pub use ops::{BinaryExpr, UnaryExpr};
@@ -48,8 +50,14 @@ pub enum ExprError {
     },
     DivisionByZero,
     ArithmeticOverflow,
-    /// Named scalar function is not registered (3.1b registry lookup).
+    /// Named scalar function is not registered.
     UnknownFunction(String),
+    /// Function call arity does not match its registered signature.
+    ArityMismatch {
+        function: String,
+        expected: String,
+        got: usize,
+    },
     /// Subquery expressions execute through the Stage 3.4 control-flow
     /// bridge; compiling one before then is rejected here.
     UnsupportedSubquery,
@@ -67,6 +75,13 @@ impl fmt::Display for ExprError {
             ExprError::DivisionByZero => write!(f, "division by zero"),
             ExprError::ArithmeticOverflow => write!(f, "arithmetic overflow"),
             ExprError::UnknownFunction(name) => write!(f, "unknown function {name:?}"),
+            ExprError::ArityMismatch {
+                function,
+                expected,
+                got,
+            } => {
+                write!(f, "function {function:?} expects {expected} arguments, got {got}")
+            }
             ExprError::UnsupportedSubquery => {
                 write!(f, "subquery expressions require the Stage 3.4 bridge")
             }
@@ -114,8 +129,10 @@ pub trait PhysicalExpr: fmt::Debug + Send + Sync {
 
 /// Compile a logical expression tree into an executable one.
 ///
-/// `Function` nodes compile once the 3.1b registry lands; `Subquery` nodes
-/// stay unsupported until the Stage 3.4 control-flow bridge exists.
+/// `Function` nodes resolve through the process-global function registry
+/// ([`crate::query_planner::function::default_registry`]); unknown names and
+/// arity violations are compile-time errors. `Subquery` nodes stay
+/// unsupported until the Stage 3.4 control-flow bridge exists.
 pub fn compile(expr: &LogicalExpr) -> Result<Box<dyn PhysicalExpr>, ExprError> {
     match expr {
         LogicalExpr::Value(v) => Ok(Box::new(LiteralExpr::new(v.clone()))),
@@ -126,7 +143,29 @@ pub fn compile(expr: &LogicalExpr) -> Result<Box<dyn PhysicalExpr>, ExprError> {
             compile(right)?,
         ))),
         LogicalExpr::Unary { op, expr } => Ok(Box::new(UnaryExpr::new(*op, compile(expr)?))),
-        LogicalExpr::Function { .. } => Err(ExprError::UnknownFunction(String::new())),
+        LogicalExpr::Function { name, args } => {
+            let registry = crate::query_planner::function::default_registry();
+            let Some(func) = registry.get(name) else {
+                return Err(ExprError::UnknownFunction(name.clone()));
+            };
+            let signature = func.signature();
+            if !signature.accepts_arity(args.len()) {
+                return Err(ExprError::ArityMismatch {
+                    function: name.clone(),
+                    expected: signature.arity_label(),
+                    got: args.len(),
+                });
+            }
+            let compiled = args
+                .iter()
+                .map(compile)
+                .collect::<Result<Vec<_>, ExprError>>()?;
+            Ok(Box::new(FunctionExpr::new(
+                name.clone(),
+                func,
+                compiled,
+            )))
+        }
         LogicalExpr::Subquery(_) => Err(ExprError::UnsupportedSubquery),
     }
 }
