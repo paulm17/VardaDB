@@ -110,6 +110,10 @@ criterion = { version = "0.5", features = ["html_reports"] }
 name = "million_todos"
 harness = false
 
+[[bench]]
+name = "planner_bench"
+harness = false
+
 [profile.release]
 lto = true
 codegen-units = 1

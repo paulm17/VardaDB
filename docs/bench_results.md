@@ -16,19 +16,19 @@ Absolute timings of the planner-first pipeline against a copy of the production 
 |---|---|---:|---:|---:|---:|---:|
 | A | unique lookup Book.code | 1 | 0.01 | 0.01 | 0.01 | 0.01 |
 | A | unique lookup Language.code | 1 | 0.01 | 0.01 | 0.01 | 0.01 |
-| B | filter Chapter.number eq | 91 | 0.23 | 0.24 | 0.24 | 0.26 |
+| B | filter Chapter.number eq | 91 | 0.23 | 0.24 | 0.24 | 0.31 |
 | C | count all Chapters (fast path) | 1791 | 0.04 | 0.04 | 0.04 | 0.04 |
-| C | count all Verses (fast path) | 76373 | 1.50 | 1.68 | 1.66 | 2.02 |
-| C | count Verses filtered (pipeline) | 1791 | 4.89 | 5.15 | 5.12 | 5.30 |
-| D | sort Books nameEn ASC first 3 | 3 | 0.01 | 0.01 | 0.01 | 0.02 |
-| D | sort Chapters number DESC first 10 | 10 | 0.26 | 0.27 | 0.28 | 0.37 |
+| C | count all Verses (fast path) | 76373 | 1.49 | 1.60 | 1.63 | 1.90 |
+| C | count Verses filtered (pipeline) | 1791 | 4.92 | 5.18 | 5.17 | 5.48 |
+| D | sort Books nameEn ASC first 3 | 3 | 0.01 | 0.01 | 0.01 | 0.01 |
+| D | sort Chapters number DESC first 10 | 10 | 0.27 | 0.29 | 0.30 | 0.38 |
 | E | fulltext search Chunk.text alloftext | 0 | 0.01 | 0.01 | 0.01 | 0.02 |
-| E | term search Book.nameEn anyofterms | 0 | 0.01 | 0.01 | 0.01 | 0.01 |
+| E | term search Book.nameEn anyofterms | 0 | 0.01 | 0.01 | 0.01 | 0.02 |
 | F | edge fetch Chapter->verses | 51 | 0.01 | 0.01 | 0.01 | 0.01 |
 | F | edge backref Verse->chapter | 1 | 0.01 | 0.01 | 0.01 | 0.01 |
-| G | graphql BookTranslation{chapters{verses}} | 2 | 0.45 | 0.45 | 0.45 | 0.46 |
-| G | graphql Verse filter+first | 20 | 4.97 | 5.22 | 5.27 | 5.78 |
-| H | count Chapters filtered gt | 1380 | 3.57 | 3.64 | 3.65 | 3.82 |
+| G | graphql BookTranslation{chapters{verses}} | 2 | 0.44 | 0.44 | 0.45 | 0.46 |
+| G | graphql Verse filter+first | 20 | 4.90 | 5.17 | 5.17 | 5.42 |
+| H | count Chapters filtered gt | 1380 | 3.54 | 3.68 | 3.68 | 3.87 |
 
 ## Notes
 
