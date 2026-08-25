@@ -5,6 +5,32 @@ use crate::engine::resolver::RequestCache;
 
 static MUTATION_SEMAPHORE: Semaphore = Semaphore::const_new(64);
 
+/// Evaluate one compiled expression for a single row. Root fields referenced
+/// by the expression are loaded through the resolver and assembled into a
+/// `QueryRecord`, so computed fields behave exactly like expression evaluation
+/// anywhere else in the planner (missing root -> Null).
+fn eval_expr_for_uid(
+    resolver: &dyn crate::engine::resolver::Resolver,
+    uid: u64,
+    expr: &std::sync::Arc<dyn crate::query_planner::physical_expr::PhysicalExpr>,
+    roots: &[String],
+) -> Option<crate::query_planner::QueryValue> {
+    use std::collections::BTreeMap;
+
+    let mut fields: BTreeMap<String, crate::query_planner::QueryValue> = BTreeMap::new();
+    for root in roots {
+        let value = resolver.resolve(uid, root)?;
+        fields.insert(root.clone(), crate::query_planner::QueryValue::from(&value));
+    }
+    let record = crate::query_planner::QueryRecord {
+        id: crate::query_planner::EntityId::new(uid),
+        fields,
+    };
+    let source = crate::query_planner::physical_expr::RecordSource::new(&record);
+    let ctx = crate::query_planner::physical_expr::EvalContext::new(&source);
+    expr.evaluate(&ctx).ok()
+}
+
 // This is our "Engine" Schema, which currently wraps async-graphql
 #[derive(Clone, Debug)]
 pub struct TypeMetadata {
@@ -176,6 +202,9 @@ impl Schema {
         let mut metadata_map: std::collections::HashMap<String, TypeMetadata> =
             std::collections::HashMap::new();
         let mut enum_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+        // @compute(expr: "...") fields per type: (field_name, expression source).
+        let mut computed_map: std::collections::HashMap<String, Vec<(String, String)>> =
+            std::collections::HashMap::new();
 
         for def in &doc.definitions {
             if let TypeSystemDefinition::Type(type_def) = def {
@@ -202,9 +231,32 @@ impl Schema {
                         let mut vector_config: Option<crate::engine::resolver::VectorConfig> = None;
                         let mut relations: std::collections::HashMap<String, String> =
                             std::collections::HashMap::new();
+                        let mut computed_fields: Vec<(String, String)> = Vec::new();
 
                         for field in &obj_def.fields {
                             let field_name = field.node.name.node.to_string();
+
+                            // @compute: virtual field evaluated as an expression
+                            // over the row; excluded from storage metadata.
+                            if let Some(expr) = field.node.directives.iter().find_map(|d| {
+                                if d.node.name.node != "compute" {
+                                    return None;
+                                }
+                                d.node.arguments.iter().find_map(|(arg_name, arg_value)| {
+                                    if arg_name.node != "expr" {
+                                        return None;
+                                    }
+                                    match &arg_value.node {
+                                        async_graphql_value::ConstValue::String(s) => {
+                                            Some(s.clone())
+                                        }
+                                        _ => None,
+                                    }
+                                })
+                            }) {
+                                computed_fields.push((field_name, expr));
+                                continue;
+                            }
 
                             // Uniques
                             if field
@@ -390,6 +442,17 @@ impl Schema {
                         let mut validate_fields = std::collections::HashMap::new();
                         for field in &obj_def.fields {
                             let field_name = field.node.name.node.to_string();
+
+                            // @compute virtual fields carry no validation or
+                            // storage semantics.
+                            if field
+                                .node
+                                .directives
+                                .iter()
+                                .any(|d| d.node.name.node == "compute")
+                            {
+                                continue;
+                            }
                             let field_type_name = match &field.node.ty.node.base {
                                 BaseType::Named(n) => n.to_string(),
                                 BaseType::List(inner) => match &inner.base {
@@ -529,6 +592,9 @@ impl Schema {
                                 kind: TypeKind::Object,
                             },
                         );
+                        if !computed_fields.is_empty() {
+                            computed_map.insert(type_name.clone(), computed_fields);
+                        }
                     }
                     AstTypeKind::Interface(_int_def) => {
                         metadata_map.insert(
@@ -649,6 +715,39 @@ impl Schema {
                         // Parse Fields
                         let mut scalar_fields_map: Vec<(String, String)> = Vec::new();
 
+                        // Pre-parse + pre-compile @compute expressions once per
+                        // type so field resolvers only evaluate per row.
+                        let mut type_computed: Vec<(
+                            String,
+                            std::sync::Arc<dyn crate::query_planner::physical_expr::PhysicalExpr>,
+                            Vec<String>,
+                        )> = Vec::new();
+                        if let Some(entries) = computed_map.get(&type_name) {
+                            for (alias, src) in entries {
+                                match crate::query_planner::parse_expression(src)
+                                    .map_err(|e| e.to_string())
+                                    .and_then(|expr| {
+                                        let mut roots = Vec::new();
+                                        crate::query_planner::parser::root_fields(
+                                            &expr, &mut roots,
+                                        );
+                                        crate::query_planner::physical_expr::compile_arc(&expr)
+                                            .map_err(|e| e.to_string())
+                                            .map(|compiled| (compiled, roots))
+                                    }) {
+                                    Ok((compiled, roots)) => {
+                                        type_computed.push((alias.clone(), compiled, roots));
+                                    }
+                                    Err(err) => {
+                                        eprintln!(
+                                            "schema: skipping @compute field {}.{}: {}",
+                                            type_name, alias, err
+                                        );
+                                    }
+                                }
+                            }
+                        }
+
                         // Implement Interfaces
                         for interface in &meta.interface_implementations {
                             obj = obj.implement(interface.clone());
@@ -691,6 +790,61 @@ impl Schema {
                                 &field_type_name,
                             ) || is_enum;
                             let is_relation = !is_scalar;
+
+                            // @compute virtual field: expression evaluated per
+                            // row against the resolver-loaded root fields.
+                            if let Some((_, compute_expr, compute_roots)) =
+                                type_computed.iter().find(|(alias, _, _)| alias == &field_name)
+                            {
+                                let compute_expr = compute_expr.clone();
+                                let compute_roots = compute_roots.clone();
+                                let mut compute_ty = match field_type_name.as_str() {
+                                    "ID" => dynamic::TypeRef::named(dynamic::TypeRef::ID),
+                                    "String" => dynamic::TypeRef::named(dynamic::TypeRef::STRING),
+                                    "Int" | "Int64" => dynamic::TypeRef::named(dynamic::TypeRef::INT),
+                                    "Float" => dynamic::TypeRef::named(dynamic::TypeRef::FLOAT),
+                                    "Boolean" => {
+                                        dynamic::TypeRef::named(dynamic::TypeRef::BOOLEAN)
+                                    }
+                                    other => dynamic::TypeRef::named(other),
+                                };
+                                if is_list {
+                                    compute_ty =
+                                        dynamic::TypeRef::List(Box::new(compute_ty));
+                                }
+                                obj = obj.field(dynamic::Field::new(
+                                    field_name.clone(),
+                                    compute_ty,
+                                    move |ctx| {
+                                        let compute_expr = compute_expr.clone();
+                                        let compute_roots = compute_roots.clone();
+                                        dynamic::FieldFuture::new(async move {
+                                            use crate::engine::resolver::Resolver;
+                                            let resolver = ctx
+                                                .data::<Box<dyn Resolver + Send + Sync>>()
+                                                .unwrap();
+                                            let uid =
+                                                *ctx.parent_value.try_downcast_ref::<u64>()?;
+                                            match eval_expr_for_uid(
+                                                resolver.as_ref(),
+                                                uid,
+                                                &compute_expr,
+                                                &compute_roots,
+                                            ) {
+                                                Some(value) => Ok(Some(
+                                                    dynamic::FieldValue::value(
+                                                        crate::query_planner::physical_expr::to_graphql_value(&value),
+                                                    ),
+                                                )),
+                                                None => Ok(Some(dynamic::FieldValue::value(
+                                                    async_graphql::Value::Null,
+                                                ))),
+                                            }
+                                        })
+                                    },
+                                ));
+                                continue;
+                            }
 
                             // Check if field type is polymorphic (Interface or Union)
                             // We need to check metadata map. If missing, assume scalar/standard object.
@@ -1105,6 +1259,15 @@ impl Schema {
                                 dynamic::TypeRef::named("SortDirection"),
                             ));
                         }
+                        // @compute aliases are sortable too (in-memory ordering).
+                        if let Some(entries) = computed_map.get(&type_name) {
+                            for (alias, _) in entries {
+                                sort_input = sort_input.field(dynamic::InputValue::new(
+                                    alias.clone(),
+                                    dynamic::TypeRef::named("SortDirection"),
+                                ));
+                            }
+                        }
                         types.push(dynamic::Type::InputObject(sort_input));
 
                         // --- ROOTS for OBJECTS ONLY ---
@@ -1117,6 +1280,7 @@ impl Schema {
                         let uniques = meta.uniques.clone();
                         let query_metadata = query_metadata_arc.clone();
                         let has_vector = meta.vector_config.is_some();
+                        let type_computed_for_query = type_computed.clone();
                         let mut list_field = dynamic::Field::new(
                             list_query_name,
                             dynamic::TypeRef::named_list(type_name_for_list.clone()),
@@ -1124,6 +1288,7 @@ impl Schema {
                                 let t_name = type_name_for_list.clone();
                                 let uniques = uniques.clone();
                                 let query_metadata = query_metadata.clone();
+                                let computed_exprs = type_computed_for_query.clone();
                                 dynamic::FieldFuture::new(async move {
                                     use crate::engine::resolver::Resolver;
                                     let resolver =
@@ -1190,30 +1355,169 @@ impl Schema {
                                         }
                                     }
 
-                                    let uids = match request_cache {
-                                        Some(cache) => resolver.scan_nodes_with_cache(
+                                    // M-D `where` expression: post-filter over scanned uids.
+                                    let mut where_filter: Option<(
+                                        std::sync::Arc<
+                                            dyn crate::query_planner::physical_expr::PhysicalExpr,
+                                        >,
+                                        Vec<String>,
+                                    )> = None;
+                                    if let Ok(where_arg) = ctx.args.try_get("where") {
+                                        let src = where_arg.string()?.to_string();
+                                        if after.is_some() {
+                                            return Err(async_graphql::Error::new(
+                                                "where expressions cannot be combined with cursor pagination (after); use offset instead",
+                                            ));
+                                        }
+                                        let expr = crate::query_planner::parse_expression(&src)
+                                            .map_err(|e| {
+                                                async_graphql::Error::new(format!(
+                                                    "where expression parse error: {}",
+                                                    e
+                                                ))
+                                            })?;
+                                        let mut roots = Vec::new();
+                                        crate::query_planner::parser::root_fields(&expr, &mut roots);
+                                        let compiled =
+                                            crate::query_planner::physical_expr::compile_arc(&expr)
+                                                .map_err(|e| {
+                                                    async_graphql::Error::new(format!(
+                                                        "where expression compile error: {}",
+                                                        e
+                                                    ))
+                                                })?;
+                                        where_filter = Some((compiled, roots));
+                                    }
+
+                                    // Sort by a @compute alias => in-memory ordering.
+                                    let computed_sort_key: Option<(String, bool)> =
+                                        sort_map.keys().find_map(|k| {
+                                            computed_exprs
+                                                .iter()
+                                                .find(|(alias, _, _)| alias == k)
+                                                .map(|(alias, _, _)| {
+                                                    let dir_str = match &sort_map[k] {
+                                                        async_graphql::Value::Enum(e) => {
+                                                            e.as_str().to_string()
+                                                        }
+                                                        async_graphql::Value::String(s) => {
+                                                            s.clone()
+                                                        }
+                                                        _ => "ASC".to_string(),
+                                                    };
+                                                    (
+                                                        alias.clone(),
+                                                        !dir_str.eq_ignore_ascii_case("DESC"),
+                                                    )
+                                                })
+                                        });
+
+                                    let uids = if where_filter.is_some() || computed_sort_key.is_some()
+                                    {
+                                        let mut rows = resolver.scan_nodes(
                                             &t_name,
                                             filter_map,
-                                            sort_map,
-                                            first,
-                                            after,
-                                            offset,
+                                            if computed_sort_key.is_some() {
+                                                std::collections::HashMap::new()
+                                            } else {
+                                                sort_map
+                                            },
+                                            None,
+                                            None,
+                                            None,
                                             &uniques,
                                             near_vector,
                                             query_metadata.as_ref(),
-                                            cache,
-                                        ),
-                                        None => resolver.scan_nodes(
-                                            &t_name,
-                                            filter_map,
-                                            sort_map,
-                                            first,
-                                            after,
-                                            offset,
-                                            &uniques,
-                                            near_vector,
-                                            query_metadata.as_ref(),
-                                        ),
+                                        );
+                                        if let Some((expr, roots)) = &where_filter {
+                                            rows.retain(|uid| {
+                                                matches!(
+                                                    eval_expr_for_uid(resolver.as_ref(), *uid, expr, roots),
+                                                    Some(crate::query_planner::QueryValue::Bool(true))
+                                                )
+                                            });
+                                        }
+                                        if let Some((alias, asc)) = &computed_sort_key {
+                                            if let Some((_, expr, roots)) = computed_exprs
+                                                .iter()
+                                                .find(|(a, _, _)| a == alias)
+                                            {
+                                                let mut decorated: Vec<(
+                                                    crate::query_planner::QueryValue,
+                                                    u64,
+                                                )> = rows
+                                                    .into_iter()
+                                                    .map(|uid| {
+                                                        let value = eval_expr_for_uid(
+                                                            resolver.as_ref(),
+                                                            uid,
+                                                            expr,
+                                                            roots,
+                                                        )
+                                                        .unwrap_or(
+                                                            crate::query_planner::QueryValue::Null,
+                                                        );
+                                                        (value, uid)
+                                                    })
+                                                    .collect();
+                                                decorated.sort_by(|(av, aid), (bv, bid)| {
+                                                    use crate::query_planner::QueryValue;
+                                                    let ord = match (av, bv) {
+                                                        (QueryValue::Null, QueryValue::Null) => {
+                                                            std::cmp::Ordering::Equal
+                                                        }
+                                                        (QueryValue::Null, _) => {
+                                                            std::cmp::Ordering::Less
+                                                        }
+                                                        (_, QueryValue::Null) => {
+                                                            std::cmp::Ordering::Greater
+                                                        }
+                                                        (a, b) => crate::query_planner::physical_expr::value_cmp(a, b)
+                                                            .unwrap_or(std::cmp::Ordering::Equal),
+                                                    };
+                                                    let ord = ord.then(aid.cmp(bid));
+                                                    if *asc {
+                                                        ord
+                                                    } else {
+                                                        ord.reverse()
+                                                    }
+                                                });
+                                                rows = decorated.into_iter().map(|(_, uid)| uid).collect();
+                                            }
+                                        }
+                                        if let Some(off) = offset {
+                                            rows = rows.into_iter().skip(off).collect();
+                                        }
+                                        if let Some(f) = first {
+                                            rows.truncate(f);
+                                        }
+                                        rows
+                                    } else {
+                                        match request_cache {
+                                            Some(cache) => resolver.scan_nodes_with_cache(
+                                                &t_name,
+                                                filter_map,
+                                                sort_map,
+                                                first,
+                                                after,
+                                                offset,
+                                                &uniques,
+                                                near_vector,
+                                                query_metadata.as_ref(),
+                                                cache,
+                                            ),
+                                            None => resolver.scan_nodes(
+                                                &t_name,
+                                                filter_map,
+                                                sort_map,
+                                                first,
+                                                after,
+                                                offset,
+                                                &uniques,
+                                                near_vector,
+                                                query_metadata.as_ref(),
+                                            ),
+                                        }
                                     };
                                     let result: Vec<dynamic::FieldValue> = uids
                                         .into_iter()
@@ -1242,9 +1546,11 @@ impl Schema {
                         .argument(dynamic::InputValue::new(
                             "after",
                             dynamic::TypeRef::named(dynamic::TypeRef::STRING),
-                        ));
-
-                        if has_vector {
+                        ))
+                        .argument(dynamic::InputValue::new(
+                            "where",
+                            dynamic::TypeRef::named(dynamic::TypeRef::STRING),
+                        ));                        if has_vector {
                             list_field = list_field.argument(dynamic::InputValue::new(
                                 "nearVector",
                                 dynamic::TypeRef::named_list(dynamic::TypeRef::FLOAT),
