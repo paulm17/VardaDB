@@ -78,7 +78,7 @@ impl<'a> FieldSource for StoredSource<'a> {
 }
 
 /// Walk remaining segments through Object maps and List indices.
-fn walk(value: &QueryValue, path: &FieldPath) -> Option<QueryValue> {
+pub(crate) fn walk(value: &QueryValue, path: &FieldPath) -> Option<QueryValue> {
     let mut current = value.clone();
     for segment in &path.segments {
         current = match (&current, segment) {

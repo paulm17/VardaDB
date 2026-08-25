@@ -28,6 +28,7 @@ use crate::query_planner::ir::{EntityId, OrderKey, SortDirection};
 use crate::query_planner::traits::PlannerRuntime;
 
 pub mod aggregate;
+pub mod control_flow;
 pub mod recursion;
 pub mod builder;
 pub mod relation;
@@ -36,6 +37,10 @@ pub mod pagination;
 pub mod sort;
 pub mod source;
 pub use aggregate::{AggGroupRow, AggregateSpec, HashAggregateOperator};
+pub use control_flow::{
+    BoundSource, ComputedRow, ComputeOperator, EmptySource, ExprValueOperator,
+    ForeachOperator, IfElseOperator, ReturnOperator, SequenceOperator,
+};
 pub use recursion::{RecurseGoal, RecurseOperator, RECURSION_LIMIT};
 pub use builder::{build_count_pipeline, build_relation_pipeline, build_scan_pipeline, BuiltPipeline};
 pub use filter::{compile_filter, count_conditions, CompiledFilter, FilterOperator};
@@ -337,6 +342,10 @@ pub enum OperatorKind {
     Union,
     Aggregate,
     Traverse,
+    /// Scalar-expression evaluation (Stage 3.4 `ExprValueOperator`).
+    Expr,
+    /// Control-flow composition (if/foreach/sequence/return).
+    Control,
     Explain,
 }
 
@@ -352,6 +361,8 @@ impl OperatorKind {
             OperatorKind::Union => "union",
             OperatorKind::Aggregate => "aggregate",
             OperatorKind::Traverse => "traverse",
+            OperatorKind::Expr => "expr",
+            OperatorKind::Control => "control",
             OperatorKind::Explain => "explain",
         }
     }

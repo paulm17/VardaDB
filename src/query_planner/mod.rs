@@ -10,6 +10,7 @@ pub mod lowering;
 pub mod operators;
 pub mod physical_expr;
 pub mod plan;
+pub mod plan_or_compute;
 pub mod planner;
 pub mod traits;
 
@@ -25,6 +26,7 @@ pub use ir::{
 };
 pub use lowering::{lower_count_query, lower_filter_map, lower_get_query, lower_root_query, lower_sort_map};
 pub use plan::{AccessPathNote, CandidateOutcome, CandidatePlan, CandidateSource};
+pub use plan_or_compute::{candidates_or_legacy, field_value, plan_or_compute};
 pub use planner::{build_candidate_plan, compile_aggregates, plan_candidates};
 pub use traits::{
     AuthPrincipal, FieldMeta, PlannerAuthorization, PlannerCatalog,
