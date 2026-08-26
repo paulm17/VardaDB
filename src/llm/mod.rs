@@ -1,6 +1,6 @@
 use std::fs;
 use std::net::{SocketAddr, TcpStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex, Weak};
 use std::thread;
@@ -43,7 +43,7 @@ impl MlxEngine {
         let server_path = resolve_mlx_server_path(&config);
         let bind = "127.0.0.1";
         let base_url = format!("http://{}:{}", bind, config.port);
-        let config_path = write_mlx_server_config(&config, &bind)?;
+        let config_path = write_mlx_server_config(&config, &bind, &server_path)?;
 
         let mut command = Command::new(&server_path);
         command
@@ -196,25 +196,105 @@ fn resolve_mlx_server_path(config: &LLMConfig) -> PathBuf {
     PathBuf::from("llama-server")
 }
 
-fn write_mlx_server_config(config: &LLMConfig, bind: &str) -> Result<PathBuf> {
-    let mut content = format!(
-        "[server]\nbind = \"{}\"\nport = {}\nembeddings_batch_size = {}\n",
-        bind, config.port, EMBEDDINGS_BATCH_SIZE
-    );
+/// Locate an inherited mlx-rs config file, if one exists.
+///
+/// Discovery order:
+/// 1. `MLX_RS_CONFIG` environment variable (explicit path)
+/// 2. `config.toml` in the repo root of the resolved server binary
+///    (e.g. `../mlx-rs/target/release/llama-server` -> `../mlx-rs/config.toml`)
+fn discover_base_config(server_path: &Path) -> Option<(PathBuf, toml::Table)> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
 
-    if !config.model.is_empty() && config.model != "llama3" {
-        content.push_str(&format!(
-            "model_path = \"{}\"\n",
-            config.model.replace('"', "\\\"")
-        ));
+    if let Ok(explicit) = std::env::var("MLX_RS_CONFIG") {
+        candidates.push(PathBuf::from(explicit));
+    }
+
+    // Binary at <repo>/target/<profile>/llama-server -> <repo>/config.toml
+    if let Some(repo_dir) = server_path.ancestors().nth(2) {
+        candidates.push(repo_dir.join("config.toml"));
+    }
+    candidates.push(PathBuf::from("../mlx-rs/config.toml"));
+
+    for candidate in candidates {
+        if let Ok(content) = fs::read_to_string(&candidate) {
+            match toml::from_str::<toml::Table>(&content) {
+                Ok(table) => return Some((candidate, table)),
+                Err(e) => {
+                    info!(
+                        target: "vardadb::llm::proxy",
+                        path = candidate.display().to_string(),
+                        error = %e,
+                        "ignoring invalid inherited server config"
+                    );
+                }
+            }
+        }
+    }
+
+    None
+}
+
+fn write_mlx_server_config(config: &LLMConfig, bind: &str, server_path: &Path) -> Result<PathBuf> {
+    let (base_path, root_table) = match discover_base_config(server_path) {
+        Some((path, table)) => (Some(path), table),
+        None => (None, toml::Table::new()),
+    };
+    let mut root = toml::Value::Table(root_table);
+
+    if base_path.is_some() {
+        info!(
+            target: "vardadb::llm::proxy",
+            path = base_path.unwrap().display().to_string(),
+            "inheriting mlx-rs server config"
+        );
+    }
+
+    if !root.as_table().map(|t| t.contains_key("server")).unwrap_or(false) {
+        root.as_table_mut()
+            .expect("root is always a table")
+            .insert("server".to_string(), toml::Value::Table(toml::map::Map::new()));
+    }
+
+    {
+        let server = root
+            .get_mut("server")
+            .and_then(|v| v.as_table_mut())
+            .expect("server section is guaranteed to be a table");
+
+        // VardaDB always controls these keys.
+        server.insert("bind".to_string(), toml::Value::String(bind.to_string()));
+        server.insert("port".to_string(), toml::Value::Integer(config.port as i64));
+        server.insert(
+            "embeddings_batch_size".to_string(),
+            toml::Value::Integer(EMBEDDINGS_BATCH_SIZE as i64),
+        );
+
+        if !server.contains_key("embedding") {
+            // Not set by the inherited config: default embeddings on so
+            // /v1/embeddings works with embedding models out of the box.
+            server.insert("embedding".to_string(), toml::Value::Boolean(true));
+        }
+
+        if !config.model.is_empty() && config.model != "llama3" {
+            server.insert(
+                "model_path".to_string(),
+                toml::Value::String(config.model.clone()),
+            );
+        }
     }
 
     if let Some(hf_token) = &config.huggingface.hf_token {
-        content.push_str(&format!(
-            "\n[huggingface]\nhf_token = \"{}\"\n",
-            hf_token.replace('"', "\\\"")
-        ));
+        let hf = root
+            .as_table_mut()
+            .expect("root is always a table")
+            .entry("huggingface")
+            .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
+        hf.as_table_mut()
+            .expect("huggingface section is a table")
+            .insert("hf_token".to_string(), toml::Value::String(hf_token.clone()));
     }
+
+    let content = toml::to_string_pretty(&root)?;
 
     let path = std::env::temp_dir().join(format!(
         "vardadb-mlx-server-{}-{}.toml",
@@ -402,4 +482,69 @@ pub async fn wait_for_proxy_ready(state: Arc<MlxEngine>) -> bool {
         sleep(MLX_SERVER_POLL_INTERVAL).await;
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::HuggingFaceConfig;
+
+    fn test_config(model: &str, port: u16) -> LLMConfig {
+        LLMConfig {
+            provider: "mlx".to_string(),
+            model: model.to_string(),
+            draft_model: None,
+            port,
+            num_draft_tokens: 0,
+            openai_api_key: None,
+            llama_server_path: None,
+            huggingface: HuggingFaceConfig {
+                hf_token: Some("test-token".to_string()),
+            },
+        }
+    }
+
+    #[test]
+    fn test_server_config_generation_and_inheritance() {
+        // ── Scenario 1: no inherited config → defaults with embedding on ──
+        let config = test_config(
+            "ChristianAzinn/mxbai-embed-large-v1-gguf/mxbai-embed-large-v1.Q8_0.gguf",
+            8080,
+        );
+        let path =
+            write_mlx_server_config(&config, "127.0.0.1", Path::new("/nonexistent/llama-server"))
+                .unwrap();
+        let content = fs::read_to_string(&path).unwrap();
+        fs::remove_file(&path).ok();
+        assert!(content.contains("embedding = true"), "content: {content}");
+        assert!(content.contains("port = 8080"));
+        assert!(content.contains("embeddings_batch_size = 256"));
+        assert!(content.contains("mxbai-embed-large-v1.Q8_0.gguf"));
+
+        // ── Scenario 2: inherited config merged, VardaDB keys overridden ──
+        let base = tempfile::NamedTempFile::new().unwrap();
+        fs::write(
+            base.path(),
+            "[server]\nbind = \"0.0.0.0\"\nport = 1\nembedding = true\nn_ctx = 2048\n\n[llamacpp]\npooling = \"mean\"\n",
+        )
+        .unwrap();
+
+        std::env::set_var("MLX_RS_CONFIG", base.path());
+        let config = test_config("", 8080);
+        let path =
+            write_mlx_server_config(&config, "127.0.0.1", Path::new("/nonexistent/llama-server"));
+        std::env::remove_var("MLX_RS_CONFIG");
+        let path = path.unwrap();
+        let content = fs::read_to_string(&path).unwrap();
+        fs::remove_file(&path).ok();
+
+        assert!(content.contains("n_ctx = 2048"), "inherited key lost: {content}");
+        assert!(content.contains("pooling = \"mean\""));
+        assert!(content.contains("embedding = true"));
+        // VardaDB overrides bind/port even when inherited.
+        assert!(content.contains("bind = \"127.0.0.1\""));
+        assert!(content.contains("port = 8080"));
+        // Empty model must not inject model_path.
+        assert!(!content.contains("model_path"));
+    }
 }
