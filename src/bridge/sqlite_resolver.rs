@@ -2291,7 +2291,9 @@ impl SqliteResolver {
 
         // 5. Remove Vector Data (Soft Delete)
         // We delete indiscriminately; if no vector existed, it's a safe no-op.
-        self.storage.delete_vector(uid).map_err(|e| e.to_string())?;
+        self.storage
+            .delete_vector(&self.db_name, uid)
+            .map_err(|e| e.to_string())?;
 
         // 6. Remove Data Keys (Scan Prefix)
         let prefix = Codec::encode_data_prefix(uid);
@@ -3056,7 +3058,7 @@ impl Resolver for SqliteResolver {
     }
 
     fn search_vectors(&self, query: &[f64], k: usize) -> Vec<(u64, f64)> {
-        match self.storage.search_vectors(query, k) {
+        match self.storage.search_vectors(&self.db_name, query, k) {
             Ok(res) => res,
             Err(e) => {
                 eprintln!("Vector Search Error: {}", e);
@@ -3128,8 +3130,9 @@ impl Resolver for SqliteResolver {
             .and_then(Self::extract_vector)
         {
             let storage = self.storage.clone();
+            let db_name = self.db_name.clone();
             tokio::task::spawn_blocking(move || {
-                if let Err(e) = storage.put_vector(uid, vec_data) {
+                if let Err(e) = storage.put_vector(&db_name, uid, vec_data) {
                     eprintln!("Background Vector Insert Error (UID {}): {}", uid, e);
                 }
             });
@@ -3309,8 +3312,9 @@ impl Resolver for SqliteResolver {
                         .collect();
                     if !vec_data.is_empty() {
                         let storage = self.storage.clone();
+                        let db_name = self.db_name.clone();
                         tokio::task::spawn_blocking(move || {
-                            if let Err(e) = storage.put_vector(uid, vec_data) {
+                            if let Err(e) = storage.put_vector(&db_name, uid, vec_data) {
                                 eprintln!("Background Vector Update Error (UID {}): {}", uid, e);
                             }
                         });

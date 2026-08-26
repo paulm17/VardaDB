@@ -18,9 +18,9 @@ async fn test_vector_api_search() {
     let mut v3 = vec![0.0; 384];
     v3[1] = 1.0;
 
-    storage.put_vector(100, v1.clone()).unwrap();
-    storage.put_vector(101, v2).unwrap();
-    storage.put_vector(102, v3).unwrap();
+    storage.put_vector("default", 100, v1.clone()).unwrap();
+    storage.put_vector("default", 101, v2).unwrap();
+    storage.put_vector("default", 102, v3).unwrap();
 
     // Give async vector worker time to insert
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;

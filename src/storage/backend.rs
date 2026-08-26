@@ -60,7 +60,7 @@ pub struct Storage {
     pub auth_store: AuthStore,         // AUTH: Authorization tuples and attributes
     pub node_id: u64,
     pub clock: std::sync::Mutex<crate::storage::timestamp::Timestamp>,
-    pub vector_tx: std::sync::mpsc::SyncSender<(u64, Vec<f64>)>,
+    pub vector_tx: std::sync::mpsc::SyncSender<(String, u64, Vec<f64>)>,
 
     // Incremental Fingerprints: DbName -> (Hash, Count)
     pub fingerprints: std::sync::Arc<
@@ -136,12 +136,20 @@ impl Storage {
         );
 
         // Vector Worker (Bounded Channel)
-        let (tx, rx) = std::sync::mpsc::sync_channel::<(u64, Vec<f64>)>(5000);
-        let worker_backend = default_backend.clone();
+        let (tx, rx) = std::sync::mpsc::sync_channel::<(String, u64, Vec<f64>)>(5000);
+        let worker_backends = backends.clone();
 
         std::thread::spawn(move || {
             dbg_println!("Storage: Vector Background Worker Started");
-            while let Ok((uid, vec)) = rx.recv() {
+            while let Ok((db_name, uid, vec)) = rx.recv() {
+                let Some(worker_backend) = worker_backends.get(&db_name).map(|b| b.clone()) else {
+                    error!(
+                        db = db_name,
+                        uid = uid,
+                        "Storage: dropping vector for unknown database"
+                    );
+                    continue;
+                };
                 let expected = worker_backend.vector_dims();
                 if vec.len() != expected {
                     error!(
@@ -767,10 +775,10 @@ impl Storage {
 
     // --- Vector Operations ---
 
-    pub fn put_vector(&self, uid: u64, vector: Vec<f64>) -> anyhow::Result<()> {
+    pub fn put_vector(&self, db_name: &str, uid: u64, vector: Vec<f64>) -> anyhow::Result<()> {
         let expected = self
             .backends
-            .get("default")
+            .get(db_name)
             .map(|b| b.vector_dims())
             .unwrap_or_else(crate::storage::sqlite_backend::effective_vector_dims);
         if vector.len() != expected {
@@ -781,14 +789,14 @@ impl Storage {
             ));
         }
         self.vector_tx
-            .send((uid, vector))
+            .send((db_name.to_string(), uid, vector))
             .map_err(|e| anyhow::anyhow!("Failed to send vector to worker: {}", e))?;
         Ok(())
     }
 
-    pub fn delete_vector(&self, uid: u64) -> anyhow::Result<()> {
+    pub fn delete_vector(&self, db_name: &str, uid: u64) -> anyhow::Result<()> {
         let uid_i64 = uid as i64;
-        if let Some(backend) = self.backends.get("default") {
+        if let Some(backend) = self.backends.get(db_name) {
             backend.with_writer(|conn| {
                 conn.execute(
                     "DELETE FROM vec_data WHERE uid = ?1",
@@ -800,11 +808,16 @@ impl Storage {
         Ok(())
     }
 
-    pub fn search_vectors(&self, query: &[f64], k: usize) -> anyhow::Result<Vec<(u64, f64)>> {
+    pub fn search_vectors(
+        &self,
+        db_name: &str,
+        query: &[f64],
+        k: usize,
+    ) -> anyhow::Result<Vec<(u64, f64)>> {
         let backend = self
             .backends
-            .get("default")
-            .ok_or(anyhow::anyhow!("Missing default DB"))?;
+            .get(db_name)
+            .ok_or_else(|| anyhow::anyhow!("Missing database '{}'", db_name))?;
         let expected = backend.vector_dims();
         if query.len() != expected {
             return Err(anyhow::anyhow!(
